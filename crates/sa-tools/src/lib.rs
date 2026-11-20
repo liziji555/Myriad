@@ -10,6 +10,7 @@ mod list_dir;
 mod read;
 mod walk;
 mod web_fetch;
+mod write;
 
 pub use fence::Fence;
 pub use glob::GlobTool;
@@ -17,6 +18,7 @@ pub use grep::GrepTool;
 pub use list_dir::ListDirTool;
 pub use read::ReadTool;
 pub use web_fetch::WebFetchTool;
+pub use write::WriteTool;
 
 use async_trait::async_trait;
 use serde::de::DeserializeOwned;
