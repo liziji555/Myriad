@@ -303,6 +303,14 @@ async fn a_task_stops_at_its_limit_and_continuing_grants_another_share() {
     assert_eq!(summary.tasks.len(), 1);
     assert_eq!(summary.tasks[0].label, "看目录");
     assert_eq!(summary.tasks[0].spend.cost, 60.0);
+
+    // 负责的 Bot 被删掉以后，任务花了多少还查得到。
+    let other = rig.engine.create_bot("替补", ModelTier::Mid, "").unwrap();
+    rig.engine.add_room_member(&rig.room, &other.id).unwrap();
+    rig.engine.delete_bot(&rig.bot).unwrap();
+    assert_eq!(rig.engine.task_spend(&task.id).unwrap().total, 60_000_000);
+    let summary = rig.orchestrator.usage_summary().await.unwrap();
+    assert_eq!(summary.tasks[0].spend.cost, 60.0);
     rig.orchestrator.shutdown().await;
 }
 
