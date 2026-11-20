@@ -7,6 +7,7 @@ use crate::{
 use async_trait::async_trait;
 use eventsource_stream::Eventsource;
 use futures_util::{stream, Stream, StreamExt};
+use reqwest::header::HeaderName;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
@@ -23,6 +24,7 @@ pub struct OpenAiCompat {
     base_url: String,
     api_key: String,
     idle_timeout: Duration,
+    session_header: Option<HeaderName>,
 }
 
 impl OpenAiCompat {
@@ -31,6 +33,8 @@ impl OpenAiCompat {
         // 没有内置加密后端的 rustls 需要先选一个；已经选过时返回 Err，可以忽略。
         let _ = rustls::crypto::ring::default_provider().install_default();
         let http = reqwest::Client::builder()
+            // 用自己的名字，不用 HTTP 库的默认值：网关按它识别客户端。
+            .user_agent(concat!("superagent/", env!("CARGO_PKG_VERSION")))
             .connect_timeout(CONNECT_TIMEOUT)
             .build()
             .map_err(|e| LlmError::Network(e.to_string()))?;
@@ -39,7 +43,16 @@ impl OpenAiCompat {
             base_url: base_url.trim_end_matches('/').to_string(),
             api_key: api_key.into(),
             idle_timeout: IDLE_TIMEOUT,
+            session_header: None,
         })
+    }
+
+    /// 把会话 ID 放在这个请求头里发给服务端（例如 OpenCode 的 `x-opencode-session`）。
+    pub fn with_session_header(mut self, name: &str) -> Result<Self, LlmError> {
+        let name = HeaderName::from_bytes(name.as_bytes())
+            .map_err(|_| LlmError::BadRequest(format!("「{name}」不是合法的请求头名字")))?;
+        self.session_header = Some(name);
+        Ok(self)
     }
 
     pub fn with_idle_timeout(mut self, timeout: Duration) -> Self {
@@ -55,12 +68,15 @@ impl Provider for OpenAiCompat {
         request: ChatRequest,
         cancel: CancellationToken,
     ) -> Result<EventStream, LlmError> {
-        let send = self
+        let mut call = self
             .http
             .post(format!("{}/chat/completions", self.base_url))
             .bearer_auth(&self.api_key)
-            .json(&request_body(&request))
-            .send();
+            .json(&request_body(&request));
+        if let (Some(header), Some(session)) = (&self.session_header, &request.session_id) {
+            call = call.header(header, session);
+        }
+        let send = call.send();
         let response = tokio::select! {
             _ = cancel.cancelled() => return Err(LlmError::Cancelled),
             result = tokio::time::timeout(self.idle_timeout, send) => match result {
@@ -405,6 +421,8 @@ mod tests {
         replies: Arc<Mutex<VecDeque<Canned>>>,
         /// 每个请求的 `Authorization` 头和请求体。
         seen: Arc<Mutex<Vec<Seen>>>,
+        /// 每个请求的全部请求头。
+        headers: Arc<Mutex<Vec<HeaderMap>>>,
     }
 
     async fn handle(
@@ -416,6 +434,7 @@ mod tests {
             .get("authorization")
             .map(|v| v.to_str().unwrap().to_string());
         server.seen.lock().unwrap().push((auth, body));
+        server.headers.lock().unwrap().push(headers);
         let reply = server.replies.lock().unwrap().pop_front();
         let sse = |lines: Vec<&'static str>, stall: bool| {
             let body: String = lines.iter().map(|l| format!("data: {l}\n\n")).collect();
@@ -460,6 +479,7 @@ mod tests {
             tools: vec![],
             max_tokens: None,
             thinking: None,
+            session_id: None,
         }
     }
 
@@ -511,6 +531,41 @@ mod tests {
         );
         assert!(body.get("tools").is_none());
         assert!(body.get("thinking").is_none());
+    }
+
+    #[tokio::test]
+    async fn identifies_itself_and_sends_the_session_header_when_configured() {
+        let ok = || {
+            Canned::Sse(vec![
+                r#"{"choices":[{"delta":{"content":"好"},"finish_reason":"stop"}]}"#,
+                "[DONE]",
+            ])
+        };
+        let (provider, server) = start(vec![ok(), ok(), ok()]).await;
+        let mut with_session = request();
+        with_session.session_id = Some("ses_123".into());
+
+        // 没配置请求头名字：不发。
+        collect(&provider, with_session.clone()).await.unwrap();
+        let provider = provider.with_session_header("x-opencode-session").unwrap();
+        collect(&provider, with_session).await.unwrap();
+        // 配置了但这次请求没有会话：也不发。
+        collect(&provider, request()).await.unwrap();
+
+        let headers = server.headers.lock().unwrap().clone();
+        let session = |i: usize| {
+            headers[i]
+                .get("x-opencode-session")
+                .map(|v| v.to_str().unwrap())
+        };
+        assert_eq!(
+            [session(0), session(1), session(2)],
+            [None, Some("ses_123"), None]
+        );
+        let agent = headers[0].get("user-agent").unwrap().to_str().unwrap();
+        assert!(agent.starts_with("superagent/"), "{agent}");
+
+        assert!(provider.with_session_header("不是 请求头").is_err());
     }
 
     #[tokio::test]

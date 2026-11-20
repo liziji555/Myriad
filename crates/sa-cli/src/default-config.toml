@@ -10,6 +10,14 @@ port = 4517
 kind = "openai_compat"
 base_url = "https://api.deepseek.com"
 api_key_env = "DEEPSEEK_API_KEY"
+# 其他 OpenAI 兼容的服务也可以照这个格式加一段。有的网关要求每个会话带一个固定的请求头，
+# 用 session_header 指定名字，例如 OpenCode Go：
+#   [providers.opencode-go]
+#   kind = "openai_compat"
+#   base_url = "https://opencode.ai/inference/go/v1"
+#   api_key_env = "OPENCODE_API_KEY"
+#   session_header = "x-opencode-session"
+# 然后把 [tiers] 里的 provider 和 model 改成它（例如 model = "deepseek-v4.1-flash"）。
 
 # 模型档位。Bot 只引用档位（cheap / mid / strong），换模型只改这里。
 # thinking 控制思考模式：true 开、false 关，不写就用模型服务的默认值。

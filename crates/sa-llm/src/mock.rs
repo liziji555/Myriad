@@ -252,6 +252,7 @@ mod tests {
             }],
             max_tokens: None,
             thinking: None,
+            session_id: None,
         }
     }
 

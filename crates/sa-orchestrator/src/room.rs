@@ -119,6 +119,7 @@ async fn turn(
                 max_steps: shared.settings.max_steps,
                 max_tokens: None,
                 thinking: model.thinking,
+                session_id: Some(session_id.to_string()),
                 retry: RetryPolicy::default(),
             };
             let mut ctx = ToolCtx::new(shared.settings.fence.clone());

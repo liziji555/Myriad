@@ -133,6 +133,7 @@ async fn hello_gets_a_streamed_reply_from_the_host_bot() {
     assert!(request.messages[0].content.contains("助手"));
     assert!(!request.messages[0].content.contains("{workspace}"));
     assert_eq!(request.messages[1].content, "你好");
+    assert!(request.session_id.as_deref().unwrap().starts_with("ses_"));
     assert_eq!(request.tools.len(), 5);
     rig.orchestrator.shutdown().await;
 }

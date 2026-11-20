@@ -63,10 +63,12 @@ impl ModelRouter for ConfigModels {
                              只想先看看流程的话，可以加 --mock 用不联网的假模型。"
                         )
                     })?;
-                let client: Arc<dyn Provider> = Arc::new(
-                    OpenAiCompat::new(&provider.base_url, key)
-                        .map_err(|e| format!("模型服务「{name}」配置有误：{e}"))?,
-                );
+                let invalid = |e| format!("模型服务「{name}」配置有误：{e}");
+                let mut client = OpenAiCompat::new(&provider.base_url, key).map_err(invalid)?;
+                if let Some(header) = &provider.session_header {
+                    client = client.with_session_header(header).map_err(invalid)?;
+                }
+                let client: Arc<dyn Provider> = Arc::new(client);
                 clients.insert(name.clone(), client.clone());
                 client
             }

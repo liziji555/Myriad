@@ -29,6 +29,9 @@ pub struct Provider {
     pub kind: ProviderKind,
     pub base_url: String,
     pub api_key_env: String,
+    /// 把会话 ID 放在这个请求头里发给服务端。不写就不发。
+    #[serde(default)]
+    pub session_header: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -106,6 +109,15 @@ impl Config {
             if provider.api_key_env.trim().is_empty() {
                 bail!("[providers.{name}] 没有填 api_key_env");
             }
+            if let Some(header) = &provider.session_header {
+                let valid = !header.is_empty()
+                    && header
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+                if !valid {
+                    bail!("[providers.{name}] 的 session_header「{header}」不是合法的请求头名字");
+                }
+            }
         }
         let limit = self.budget.daily_limit;
         if !limit.is_finite() || limit < 0.0 {
@@ -147,6 +159,27 @@ mod tests {
         let config = Config::parse(DEFAULT_CONFIG_TOML).unwrap();
         assert_eq!(config.tiers.cheap.thinking, Some(false));
         assert_eq!(config.tiers.strong.thinking, None);
+    }
+
+    #[test]
+    fn provider_session_header_is_optional_and_checked() {
+        let config = Config::parse(DEFAULT_CONFIG_TOML).unwrap();
+        assert_eq!(config.providers["deepseek"].session_header, None);
+
+        let with_header = DEFAULT_CONFIG_TOML.replace(
+            r#"api_key_env = "DEEPSEEK_API_KEY""#,
+            "api_key_env = \"DEEPSEEK_API_KEY\"\nsession_header = \"x-opencode-session\"",
+        );
+        let config = Config::parse(&with_header).unwrap();
+        assert_eq!(
+            config.providers["deepseek"].session_header.as_deref(),
+            Some("x-opencode-session")
+        );
+        let bad = with_header.replace("x-opencode-session", "x session");
+        assert!(Config::parse(&bad)
+            .unwrap_err()
+            .to_string()
+            .contains("session_header"));
     }
 
     #[test]

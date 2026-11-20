@@ -76,6 +76,8 @@ pub struct ChatRequest {
     pub max_tokens: Option<u32>,
     /// 是否开启思考模式。`None` 表示用服务商的默认值。
     pub thinking: Option<bool>,
+    /// 这次请求属于哪个会话。同一个会话始终用同一个值；有的网关靠它做路由和提示词缓存。
+    pub session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

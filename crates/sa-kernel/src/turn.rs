@@ -23,6 +23,8 @@ pub struct TurnConfig {
     pub max_steps: usize,
     pub max_tokens: Option<u32>,
     pub thinking: Option<bool>,
+    /// 会话 ID，原样带在每次模型请求上。
+    pub session_id: Option<String>,
     pub retry: RetryPolicy,
 }
 
@@ -163,6 +165,7 @@ impl Turn {
                 tools: specs.clone(),
                 max_tokens: config.max_tokens,
                 thinking: config.thinking,
+                session_id: config.session_id.clone(),
             };
 
             let (reply, failure) = self
@@ -563,6 +566,7 @@ mod tests {
                 max_steps: 8,
                 max_tokens: None,
                 thinking: None,
+                session_id: Some("ses_test".into()),
                 retry: RetryPolicy {
                     max_retries: 2,
                     base_delay: Duration::from_millis(1),
@@ -648,6 +652,7 @@ mod tests {
         assert_eq!(request.messages[0].content, "你是测试助手");
         assert_eq!(request.messages[1].content, "你好");
         assert_eq!(request.tools.len(), 7);
+        assert_eq!(request.session_id.as_deref(), Some("ses_test"));
     }
 
     #[tokio::test]
