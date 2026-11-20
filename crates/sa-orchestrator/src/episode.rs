@@ -43,6 +43,13 @@ impl Episode {
     }
 
     /// 取下一个该说话的 Bot，并记一次发言。
+    /// 正在说话的 Bot 读到了人说的新话：上限重新算（它这一次发言算新一轮的第一次），已经排上队的照旧。
+    pub fn renew(&mut self) {
+        self.turns = 1;
+        self.pairs.clear();
+        self.recent.clear();
+    }
+
     pub fn next(&mut self) -> Option<Job> {
         let job = self.queue.pop_front()?;
         self.turns += 1;

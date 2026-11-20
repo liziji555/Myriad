@@ -1314,6 +1314,40 @@ async fn a_message_for_another_bot_is_not_swallowed_by_the_speaker() {
     t.rig.orchestrator.shutdown().await;
 }
 
+/// 人中途补了一句、由正在说话的 Bot 接着答：算新的一轮，之前用掉的上限不再算数。
+#[tokio::test]
+async fn a_follow_up_read_by_the_speaker_resets_the_limits() {
+    let dir = tempfile::tempdir().unwrap();
+    let bots = vec![
+        // 第一句话：Coder 和 Reviewer 互相找满 2 次。
+        ask("c1", "Reviewer", "先看第一版"),
+        MockReply::text("交给 Reviewer"),
+        ask("r1", "Coder", "看过了，请确认"),
+        MockReply::text("请 Coder 确认"),
+        // Coder 这一轮停在审批卡上；人补了一句之后它再找 Reviewer，应该被允许。
+        MockReply::tool_calls("", &[("c2", "shell", r#"{"command":"echo hi"}"#)]),
+        ask("c3", "Reviewer", "用户有新要求，请再看一遍"),
+        MockReply::text("已经转给 Reviewer"),
+        MockReply::text("按新要求看过了"),
+    ];
+    let t = team(dir.path(), vec![], bots);
+    t.rig.say("@Coder 开始吧").await;
+    let approval = t.rig.waiting_approval().await;
+    t.rig.say("补充一下：还要兼容旧版本").await;
+    assert!(t.rig.orchestrator.decide(&approval, ApprovalDecision::Once));
+    t.rig.until_idle().await;
+
+    let all = t.rig.messages();
+    let asked = all
+        .iter()
+        .find(|m| m.content == "@Reviewer 用户有新要求，请再看一遍")
+        .unwrap_or_else(|| panic!("第三次找 Reviewer 应该发得出去：{all:#?}"));
+    // 人说了新的话，转手次数也从头算。
+    assert_eq!(asked.hop, 1);
+    assert_eq!(all.last().unwrap().content, "按新要求看过了");
+    t.rig.orchestrator.shutdown().await;
+}
+
 /// 「停止」：正在说的停下，排着队的也不再说。重启之后已经处理过的消息不会被再答一遍。
 #[tokio::test]
 async fn stop_ends_the_whole_exchange_and_a_restart_does_not_replay_it() {

@@ -7,6 +7,7 @@ use sa_protocol::{Bot, RoomId};
 use sa_tools::{Tool, ToolCtx, ToolError, ToolResult};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 /// 一句话最多这么多字。要交代的东西更多时，应该写进文件让对方去读。
@@ -19,7 +20,8 @@ pub(crate) struct AskBotTool {
     /// 谁在问。
     pub from: Bot,
     /// 它这次发言是转到第几手。
-    pub hop: u32,
+    /// 这次发言转到了第几手。人中途说了新的话会被清零，所以是共享的。
+    pub hop: Arc<AtomicU32>,
 }
 
 #[derive(Deserialize)]
@@ -120,7 +122,12 @@ impl Tool for AskBotTool {
         let job = self
             .link
             .episode()
-            .ask(&self.from.id, self.hop, &target.id, &message)
+            .ask(
+                &self.from.id,
+                self.hop.load(Ordering::SeqCst),
+                &target.id,
+                &message,
+            )
             .map_err(ToolError)?;
         let engine = self.shared.engine.clone();
         let (room_id, from, to) = (

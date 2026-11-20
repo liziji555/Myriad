@@ -16,7 +16,7 @@ use sa_protocol::{
 use sa_tools::{Fence, ToolCtx};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::Notify;
 
@@ -243,7 +243,9 @@ async fn turn(
         names,
         solo: others.is_empty(),
         last_seq: transcript.last_message_seq(),
+        hop: Arc::new(AtomicU32::new(hop)),
     };
+    let live_hop = inbox.hop.clone();
     let first = inbox.drain().await;
     if first.is_empty() {
         return Ok(());
@@ -306,7 +308,7 @@ async fn turn(
                     link: link.clone(),
                     room_id: room_id.clone(),
                     from: bot.clone(),
-                    hop,
+                    hop: live_hop,
                 });
             }
             let outcome = run_turn(
@@ -420,6 +422,8 @@ struct RoomInbox {
     /// 房间里只有它一个 Bot：人说的话原样给它，不加「是谁说的」。
     solo: bool,
     last_seq: i64,
+    /// 这次发言转到了第几手，和 `ask_bot` 共用。
+    hop: Arc<AtomicU32>,
 }
 
 #[async_trait]
@@ -462,7 +466,12 @@ impl Inbox for RoomInbox {
             // 点名找别的 Bot 的不算：这一轮马上会被打断，那条消息要留给被点到的 Bot。
             let for_me = message.mentions.first().is_none_or(|id| id == &self.bot_id);
             if speaker.is_none() && for_me {
-                self.link.handled.fetch_max(message.seq, Ordering::SeqCst);
+                let before = self.link.handled.fetch_max(message.seq, Ordering::SeqCst);
+                if message.seq > before {
+                    // 人中途说了新的话，由正在说话的 Bot 接着答：和新开一轮一样，上限重新算。
+                    self.link.episode().renew();
+                    self.hop.store(0, Ordering::SeqCst);
+                }
             }
             let to_me = if message.mentions.contains(&self.bot_id) {
                 "（对你说）"
