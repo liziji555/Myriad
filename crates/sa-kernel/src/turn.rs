@@ -18,6 +18,8 @@ const DENIED_RESULT: &str =
     "用户没有批准这次操作，它没有执行。不要换个办法绕过去；告诉用户你原本想做什么，问他想怎么办。";
 /// 压缩连续失败这么多次就不再试了，免得每一步都白花一次模型调用。
 const MAX_COMPACT_FAILURES: u32 = 3;
+const CHANGED_RESULT: &str =
+    "等用户批准的这段时间里，这个操作的目标变了，和批准的不是同一件事，所以没有执行。请重新调用一次。";
 const CANCELLED_RESULT: &str = "（用户在这个工具返回之前点了停止，结果未知。）";
 
 #[derive(Debug, Clone)]
@@ -551,6 +553,11 @@ async fn run_one(
                         if !observer.request_approval(request).await {
                             return Err(DENIED_RESULT.to_string());
                         }
+                        // 人批准的是卡片上写的那件事。等的时候情况变了（比如路径上的链接被改指向别处），
+                        // 就不能拿这次批准去做另一件事。
+                        if tool.check_permission(input, ctx).await != Permission::Ask(reason) {
+                            return Err(CHANGED_RESULT.to_string());
+                        }
                     }
                 }
                 let max = tool.max_result_chars();
@@ -750,6 +757,11 @@ mod tests {
         async fn check_permission(&self, input: &Value, _: &ToolCtx) -> Permission {
             match input["permission"].as_str() {
                 Some("ask") => Permission::Ask("探针要问一下".into()),
+                // 每问一次，要做的事都不一样：模拟等批准的时候目标变了。
+                Some("shifting") => {
+                    static TARGET: AtomicUsize = AtomicUsize::new(0);
+                    Permission::Ask(format!("目标 {}", TARGET.fetch_add(1, Ordering::SeqCst)))
+                }
                 Some("deny") => Permission::Deny("探针不让做".into()),
                 _ => Permission::Allow,
             }
@@ -1157,6 +1169,33 @@ mod tests {
             // 没批准的那次，工具一次都没跑：只有 c3 跑过。
             assert_eq!(rig.peak.load(Ordering::SeqCst), 1);
         }
+    }
+
+    /// 批准之后再看一眼：要做的事和卡片上写的不一样了，就不执行。
+    #[tokio::test]
+    async fn approval_does_not_carry_over_to_a_changed_target() {
+        let mut rig = rig();
+        let provider = MockProvider::scripted([
+            MockReply::tool_calls("", &[("c1", "serial", r#"{"permission":"shifting"}"#)]),
+            MockReply::text("好"),
+        ]);
+        let observer = Recorder {
+            approve: Some(true),
+            ..Default::default()
+        };
+        let outcome = rig
+            .turn(
+                &provider,
+                vec![vec![says("跑", 1)]],
+                &observer,
+                &CancellationToken::new(),
+            )
+            .await;
+
+        assert_eq!(outcome.end, TurnEnd::Completed);
+        assert_eq!(rig.tool_results(), [(CHANGED_RESULT.to_string(), true)]);
+        assert_eq!(rig.peak.load(Ordering::SeqCst), 0, "工具不应该跑");
+        assert!(observer.log().contains(&"finish:c1:false".to_string()));
     }
 
     /// 结果太长：交给模型的是截短的，完整内容另存一份。

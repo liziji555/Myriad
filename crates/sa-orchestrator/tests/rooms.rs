@@ -811,3 +811,31 @@ async fn stop_kills_the_running_command_and_its_children() {
     assert!(!child.exists(), "停止之后子进程 {pid} 还活着");
     rig.orchestrator.shutdown().await;
 }
+
+/// 等批准的时候，路径上的链接被改指向了别处：批准的是原来那个文件，新的目标不能写。
+#[cfg(unix)]
+#[tokio::test]
+async fn approval_does_not_cover_a_retargeted_link() {
+    let dir = tempfile::tempdir().unwrap();
+    let (first, second) = (dir.path().join("甲"), dir.path().join("乙"));
+    std::fs::create_dir_all(&first).unwrap();
+    std::fs::create_dir_all(&second).unwrap();
+    let replies = vec![write("c1", "出口/a.txt", "内容"), MockReply::text("好")];
+    let rig = start(dir.path(), replies, true);
+    let link = dir.path().join("work/出口");
+    std::os::unix::fs::symlink(&first, &link).unwrap();
+
+    rig.say("写").await;
+    let id = rig.waiting_approval().await;
+    let card = rig.messages().pop().unwrap().steps[0].approval.clone();
+    assert!(card.unwrap().reason.ends_with("甲/a.txt"));
+    std::fs::remove_file(&link).unwrap();
+    std::os::unix::fs::symlink(&second, &link).unwrap();
+    assert!(rig.orchestrator.decide(&id, ApprovalDecision::Once));
+
+    let reply = rig.settled(2).await.pop().unwrap();
+    assert_eq!(reply.steps[0].state, StepState::Error);
+    assert!(rig.last_tool_result().contains("目标变了"));
+    assert!(!first.join("a.txt").exists() && !second.join("a.txt").exists());
+    rig.orchestrator.shutdown().await;
+}
