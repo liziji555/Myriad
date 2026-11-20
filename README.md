@@ -2,7 +2,7 @@
 
 Rust 多 Bot Agent Harness：房间里的 AI 团队。一个可执行文件，自带内核、本机服务和三栏界面。
 
-## 现在能做什么（M7a）
+## 现在能做什么（M7b）
 
 - 任务：Bot 把要花些功夫的事开成任务，在独立的目录里做，做完交给你验收；验收通过，改动才回到你的工作目录
 - 任务里可以派子代理去查资料（只读），可以把任务分支推到远端、在 GitHub 上开 PR（每次都要你批准）
@@ -31,6 +31,11 @@ Rust 多 Bot Agent Harness：房间里的 AI 团队。一个可执行文件，�
 - MCP：接本机启动的外部 MCP 服务，它们的工具加给每个 Bot，每次调用都要你批准
 - 突然断电、进程被杀之后再启动：消息一条不丢；还没人接的话接着回应，写到一半的回复标成「中断」
 - 审计日志：谁批准了什么、Bot 执行了什么命令、任务走到了哪一步，都留底；界面右侧「审计」页和 `sa audit` 查
+- Bot 模板：把一个房间的团队导出成一个文件，换一台机器或者另开一个房间时导入
+- 回复下面的每一步操作可以展开，看它拿到了什么结果
+- 界面记得你的摆法：左栏可以收起，右栏可以拖宽；每个房间里写了一半的话也留着
+
+文档：[安装](docs/安装.md)、[使用](docs/使用.md)、[用六个信号检验](docs/验收.md)、[界面验收 20 条](docs/界面验收.md)。
 
 ## 运行
 
@@ -160,6 +165,38 @@ Bot 在回复里直接写 `@名字` 不会叫到任何人。被叫到但没什�
 - 「停止」：正在说的停下，排着队的也不再说。
 
 每个 Bot 在每个房间里有自己的会话记录。它没参与的对话，在它下一次被叫到时会以「【名字】内容」的形式补给它。
+
+**模板：把团队存成文件**
+
+在「成员」面板最下面点「导出这个房间的团队」，或者：
+
+```sh
+sa bot export --room <房间> -o team.toml     # 一个房间的团队：成员、谁是入口、房间叫什么
+sa bot export Coder Reviewer -o bots.toml    # 只要几个 Bot；一个都不写就是全部
+sa bot import team.toml
+```
+
+文件是这样的，可以手写，也可以改了再导入：
+
+```toml
+version = 1
+
+[[bots]]
+name = "Coder"
+tier = "strong"          # cheap、mid、strong
+persona = "写代码。改完跑测试。"
+enabled = true
+
+[room]                   # 可以没有；有的话导入时新建这个房间
+name = "修 bug"
+host = "Coder"           # 入口 Bot；不写就是第一个成员
+members = ["Coder"]
+```
+
+- 已经有同名的 Bot（不分大小写）就跳过，不会改它；模板带了房间时它照样被拉进新房间。
+- 模板有一处不对（版本、重名、成员对不上、名字不合规矩），什么都不建。
+- 里面只有名字、档位、分工、是否启用和房间的成员，没有密钥、聊天记录、任务和技能。
+- 成员在房间里的先后不保证和文件里一样。
 
 ### 任务
 
@@ -412,7 +449,7 @@ auto_approve = ["read_file"]          # 这些工具不用问；别的每次调�
 | 审批：允许一次、总是允许、拒绝、到时间没人处理、没等到答复就停下了 | `approval.*` |
 | Bot 动手：执行命令、写文件、改文件、推送、开 PR、调用 MCP 工具、开任务、找别的 Bot | `tool.*` |
 | 任务：开任务、继续、每次运行的开始和结束（连同没做成的原因）、换状态（做完、卡住、取消……） | `task.*` |
-| 你改的设置：Bot、房间和成员、撤销「总是允许」、连接、配对码、定时任务 | `bot.*` `room.*` `rule.*` `link.*` `pairing.*` `routine.*` |
+| 你改的设置：Bot、房间和成员、导入模板、撤销「总是允许」、连接、配对码、定时任务 | `bot.*` `room.*` `team.imported` `rule.*` `link.*` `pairing.*` `routine.*` |
 | 程序自己做的：看门狗和预算守卫的提醒、定时任务自动停用、启动、停下、启动时的恢复 | `notice.*` `routine.disabled` `server.*` `recovery.done` |
 
 每条有时间、是谁（你、哪个 Bot、程序、外面）、一句话说明、所在的房间和任务，命令原文这类细节点开看。
@@ -440,7 +477,7 @@ auto_approve = ["read_file"]          # 这些工具不用问；别的每次调�
 |------|------|
 | `sa serve [--port 端口] [--open] [--workdir 目录] [--mock]` | 启动服务和界面 |
 | `sa chat [--room 房间] [--workdir 目录] [--mock]` | 在终端里对话；`-m "内容"` 只发一条就退出 |
-| `sa bot list` / `add <名字> [--tier 档位] [--persona 分工] [--room 房间]` / `set <Bot> [--name] [--tier] [--persona] [--enable\|--disable]` / `rm <Bot>` | 管理 Bot |
+| `sa bot list` / `add <名字> [--tier 档位] [--persona 分工] [--room 房间]` / `set <Bot> [--name] [--tier] [--persona] [--enable\|--disable]` / `rm <Bot>` / `export [Bot…] [--room 房间] [-o 文件]` / `import <文件>` | 管理 Bot；导出、导入模板 |
 | `sa room list` / `add <名字>` / `invite <房间> <Bot>` / `kick <房间> <Bot>` / `host <房间> <Bot>` | 管理房间、成员和入口 Bot |
 | `sa task list [--room 房间]` / `show <任务>` / `add <标题> --scope 做什么 [--acceptance 验收标准] [--owner Bot]` / `resume <任务> [--note 话] [--owner Bot]` / `accept <任务>` / `reject <任务> --note 意见` / `cancel <任务>` | 任务。`<任务>` 可以只写 ID 的开头几位；`add`、`resume`、`reject` 会等到任务需要你处理为止 |
 | `sa routine list` / `add --room 房间 [--bot Bot] --title 名字 --schedule "0 9 * * *" <到点做什么>` / `enable <定时任务>` / `disable <定时任务>` / `remove <定时任务>` | 定时任务。`<定时任务>` 写 ID 或名字 |
