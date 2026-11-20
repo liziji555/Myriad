@@ -933,6 +933,82 @@ async fn a_task_runs_is_rejected_then_accepted_over_http() {
 }
 
 #[tokio::test]
+async fn a_team_is_exported_and_imported_over_the_api() {
+    let (app, engine) = app();
+    let room = engine.list_rooms().unwrap().remove(0);
+    let coder = engine
+        .create_bot("Coder", sa_protocol::ModelTier::Strong, "写代码")
+        .unwrap();
+    engine.add_room_member(&room.id, &coder.id).unwrap();
+    engine.update_room(&room.id, None, Some(&coder.id)).unwrap();
+
+    let path = format!("/api/templates/rooms/{}", room.id);
+    let team: sa_protocol::TeamTemplate =
+        json(app.clone().oneshot(get(&path)).await.unwrap()).await;
+    assert_eq!(team.version, 1);
+    assert_eq!(team.bots.len(), 2);
+    let wanted = team.room.clone().unwrap();
+    assert_eq!(wanted.host.as_deref(), Some("Coder"));
+    let everyone: sa_protocol::TeamTemplate = json(
+        app.clone()
+            .oneshot(get("/api/templates/bots"))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!((everyone.bots.len(), everyone.room), (2, None));
+
+    // 导回同一个地方：Bot 都在，只多一个房间。
+    let body = serde_json::to_string(&team).unwrap();
+    let response = app
+        .clone()
+        .oneshot(post("/api/templates/import", &body))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let report: sa_protocol::ImportReport = json(response).await;
+    assert!(report.created.is_empty());
+    assert_eq!(report.skipped.len(), 2);
+    let made = report.room.unwrap();
+    assert_eq!(made.host_bot_id.as_ref(), Some(&coder.id));
+    assert_eq!(engine.list_rooms().unwrap().len(), 2);
+
+    // 加一个新的 Bot 再导：只建这一个。
+    let more = r#"{"version":1,"bots":[{"name":"Tester","tier":"cheap"}]}"#;
+    let response = app
+        .clone()
+        .oneshot(post("/api/templates/import", more))
+        .await
+        .unwrap();
+    let report: sa_protocol::ImportReport = json(response).await;
+    assert_eq!(report.created.len(), 1);
+    assert!(report.created[0].enabled && report.created[0].persona.is_empty());
+
+    // 版本不对、缺版本、不是 JSON：都是 400，什么都不建。
+    for bad in [r#"{"version":2,"bots":[]}"#, r#"{"bots":[]}"#, "不是 JSON"] {
+        let response = app
+            .clone()
+            .oneshot(post("/api/templates/import", bad))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{bad}");
+    }
+    assert_eq!(engine.list_bots().unwrap().len(), 3);
+    let missing = format!("/api/templates/rooms/{}", sa_protocol::RoomId::new());
+    let response = app.clone().oneshot(get(&missing)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let response = app
+        .oneshot(
+            Request::get("/api/templates/bots")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
 async fn the_audit_log_is_served_filtered_and_paged() {
     let (app, engine) = app();
     let room = engine.list_rooms().unwrap().remove(0);

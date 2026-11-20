@@ -119,6 +119,9 @@ pub fn router(state: AppState) -> Router {
         .route("/rooms/{room_id}/pairing", post(routes::create_pairing))
         .route("/extensions", get(routes::extensions))
         .route("/audit", get(routes::audit))
+        .route("/templates/bots", get(routes::export_bots))
+        .route("/templates/rooms/{room_id}", get(routes::export_room))
+        .route("/templates/import", post(routes::import_team))
         .route("/events", get(sse::events))
         .fallback(routes::api_not_found)
         .layer(middleware::from_fn_with_state(
