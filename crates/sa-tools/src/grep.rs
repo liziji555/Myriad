@@ -114,7 +114,9 @@ impl Tool for GrepTool {
                     continue;
                 }
                 let shown = fence.display(&file);
-                for (number, line) in matching_lines(&file, &regex) {
+                // 多要一条，用来判断「后面还有」；再多的不读进内存。
+                let wanted = limit - hits.len() + 1;
+                for (number, line) in matching_lines(&file, &regex, wanted) {
                     if hits.len() == limit {
                         more = true;
                         break 'files;
@@ -141,7 +143,8 @@ impl Tool for GrepTool {
 }
 
 /// 文件里匹配的行。打不开、太大、是二进制或不是普通文件的，当作没有匹配。
-fn matching_lines(path: &Path, regex: &regex::Regex) -> Vec<(usize, String)> {
+/// 找到 `max` 条就停，不管文件里还有多少。
+fn matching_lines(path: &Path, regex: &regex::Regex, max: usize) -> Vec<(usize, String)> {
     // 先看类型再打开：打开没有写入方的管道会一直卡住。
     if !std::fs::metadata(path).is_ok_and(|m| m.is_file()) {
         return vec![];
@@ -174,6 +177,9 @@ fn matching_lines(path: &Path, regex: &regex::Regex) -> Vec<(usize, String)> {
                 shown.push('…');
             }
             hits.push((number, shown));
+            if hits.len() >= max {
+                break;
+            }
         }
     }
     hits
@@ -292,5 +298,39 @@ mod tests {
         // 直接点名管道也不会去打开它。
         let direct = search(json!({"pattern": "needle", "path": "pipe"})).await;
         assert!(direct.contains("没有找到"), "{direct}");
+    }
+
+    #[test]
+    fn stops_reading_a_file_once_it_has_enough_matches() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dense.log");
+        fs::write(&path, "hit\n".repeat(50_000)).unwrap();
+        let regex = regex::Regex::new("hit").unwrap();
+        let lines = matching_lines(&path, &regex, 3);
+        assert_eq!(lines.iter().map(|l| l.0).collect::<Vec<_>>(), [1, 2, 3]);
+    }
+
+    #[tokio::test]
+    async fn result_limit_still_reports_that_more_exist() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a.log"), "hit\n".repeat(5)).unwrap();
+        fs::write(dir.path().join("b.log"), "hit\n".repeat(5)).unwrap();
+        let ctx = ToolCtx::new(Fence::new(dir.path(), &[]).unwrap());
+        let search = |max: usize| {
+            let ctx = ctx.clone();
+            async move {
+                GrepTool
+                    .call(json!({"pattern": "hit", "max_results": max}), &ctx)
+                    .await
+                    .unwrap()
+            }
+        };
+        let cut = search(7).await;
+        assert_eq!(cut.matches(": hit").count(), 7, "{cut}");
+        assert!(cut.contains("a.log:5: hit") && cut.contains("b.log:2: hit"));
+        assert!(cut.contains("结果超过 7 条"));
+        // 正好够数时不说「超过」。
+        assert!(!search(10).await.contains("结果超过"));
+        assert!(search(5).await.contains("结果超过 5 条"));
     }
 }
