@@ -182,7 +182,11 @@ function Shell() {
       id: "action:new-room",
       group: "action",
       title: "新建房间",
-      run: () => setCreateSignal((n) => n + 1),
+      run: () => {
+        // 填名字的地方在左栏里：左栏收着就先展开。
+        changeLayout({ sidebarCollapsed: false });
+        setCreateSignal((n) => n + 1);
+      },
     },
     ...(room
       ? [
