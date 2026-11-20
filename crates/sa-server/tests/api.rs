@@ -20,6 +20,10 @@ use tower::ServiceExt;
 const TOKEN: &str = "test-token";
 
 fn app() -> (Router, Arc<Engine>) {
+    app_with(|state| state)
+}
+
+fn app_with(configure: impl FnOnce(AppState) -> AppState) -> (Router, Arc<Engine>) {
     let engine = Arc::new(Engine::new(Store::open_in_memory().unwrap()).unwrap());
     engine.ensure_defaults().unwrap();
     // 目录留在磁盘上，测试进程结束后由系统清理。
@@ -50,10 +54,8 @@ fn app() -> (Router, Arc<Engine>) {
         Arc::new(models),
         settings,
     ));
-    (
-        router(AppState::new(engine.clone(), orchestrator, TOKEN)),
-        engine,
-    )
+    let state = configure(AppState::new(engine.clone(), orchestrator, TOKEN));
+    (router(state), engine)
 }
 
 fn post(path: &str, body: &str) -> Request<Body> {
@@ -1022,4 +1024,120 @@ async fn routines_are_created_changed_and_deleted() {
     assert_eq!(call(delete(&path)).await.status(), StatusCode::NO_CONTENT);
     assert_eq!(call(delete(&path)).await.status(), StatusCode::NOT_FOUND);
     assert!(engine.list_routines().unwrap().is_empty());
+}
+
+/// 一次 GitHub 投递：不带访问令牌，带签名。
+fn delivery(event: &str, id: &str, secret: &str, body: &str) -> Request<Body> {
+    Request::post("/hooks/github")
+        .header(CONTENT_TYPE, "application/json")
+        .header("X-GitHub-Event", event)
+        .header("X-GitHub-Delivery", id)
+        .header(
+            "X-Hub-Signature-256",
+            sa_adapters::github_events::sign(secret.as_bytes(), body.as_bytes()),
+        )
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn github_deliveries_are_verified_and_taken_once() {
+    let issue = serde_json::json!({
+        "action": "opened",
+        "repository": { "full_name": "Me/App" },
+        "sender": { "login": "alice", "type": "User" },
+        "issue": { "number": 12, "title": "登录报错", "body": "点登录就 500", "labels": [] },
+    })
+    .to_string();
+
+    // 没配密钥：什么都不收。
+    let (closed, _) = app();
+    let response = closed
+        .oneshot(delivery("issues", "d-1", "s3cret", &issue))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    let (app, engine) = app_with(|state| state.with_github_hook("s3cret", Default::default()));
+    let call = |request: Request<Body>| {
+        let app = app.clone();
+        async move { app.oneshot(request).await.unwrap() }
+    };
+    let outcome = |response: Response<Body>| async move {
+        assert_eq!(response.status(), StatusCode::OK);
+        let answer: serde_json::Value = json(response).await;
+        answer["outcome"].as_str().unwrap().to_string()
+    };
+    let room = engine.list_rooms().unwrap().remove(0);
+
+    // 签名不对（密钥不对、内容被改过）：401，什么都不记。
+    let response = call(delivery("issues", "d-1", "wrong", &issue)).await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let mut tampered = delivery("issues", "d-1", "s3cret", &issue);
+    *tampered.body_mut() = Body::from(issue.replace("alice", "mallory"));
+    assert_eq!(call(tampered).await.status(), StatusCode::UNAUTHORIZED);
+
+    assert_eq!(
+        outcome(call(delivery("ping", "d-0", "s3cret", "{}")).await).await,
+        "pong"
+    );
+    let push = r#"{"repository":{"full_name":"Me/App"}}"#;
+    assert_eq!(
+        outcome(call(delivery("push", "d-p", "s3cret", push)).await).await,
+        "ignored"
+    );
+
+    // 仓库还没连到房间：送到了，但是不收。
+    assert_eq!(
+        outcome(call(delivery("issues", "d-1", "s3cret", &issue)).await).await,
+        "filtered"
+    );
+
+    let body = serde_json::json!({ "room_id": room.id, "repo": "Me/App" }).to_string();
+    let response = call(post("/api/links", &body)).await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let link: sa_protocol::Link = json(response).await;
+    assert_eq!(link.external, "me/app");
+    assert_eq!(
+        call(post("/api/links", &body)).await.status(),
+        StatusCode::BAD_REQUEST
+    );
+    let listed: Vec<sa_protocol::Link> = json(call(get("/api/links")).await).await;
+    assert_eq!(listed, std::slice::from_ref(&link));
+
+    assert_eq!(
+        outcome(call(delivery("issues", "d-2", "s3cret", &issue)).await).await,
+        "stored"
+    );
+    // GitHub 重试同一次投递：不会变成第二条消息。
+    assert_eq!(
+        outcome(call(delivery("issues", "d-2", "s3cret", &issue)).await).await,
+        "duplicate"
+    );
+    let events: Vec<Message> = engine
+        .list_messages(&room.id, None, 50)
+        .unwrap()
+        .messages
+        .into_iter()
+        .filter(|message| message.kind == sa_protocol::MessageKind::Event)
+        .collect();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].origin.as_ref().unwrap().label, "Me/App#12");
+    assert_eq!(
+        events[0].mentions,
+        room.host_bot_id.clone().into_iter().collect::<Vec<_>>()
+    );
+
+    let path = format!("/api/links/{}", link.id);
+    assert_eq!(call(delete(&path)).await.status(), StatusCode::NO_CONTENT);
+    assert_eq!(call(delete(&path)).await.status(), StatusCode::NOT_FOUND);
+
+    // 配对码：只给一次，十分钟内有效。
+    let response = call(post(&format!("/api/rooms/{}/pairing", room.id), "")).await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let pairing: sa_protocol::Pairing = json(response).await;
+    assert_eq!(pairing.code.len(), 6);
+    assert_eq!(pairing.bot_username, None);
+    let linked = engine.redeem_pairing(&pairing.code, "42", "张三").unwrap();
+    assert_eq!(linked.unwrap().room_id, room.id);
 }
