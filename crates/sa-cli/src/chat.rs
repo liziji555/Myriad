@@ -34,6 +34,8 @@ pub fn run(data_dir: &DataDir, args: ChatArgs) -> Result<ExitCode> {
         .enable_all()
         .build()?
         .block_on(async move {
+            // 上次退出时没做完的任务接着排队。
+            app.orchestrator.resume_tasks();
             let mut out = std::io::stdout();
             let result = match args.message {
                 Some(text) => {
