@@ -11,7 +11,8 @@ const COLUMNS: &str =
 pub fn insert(conn: &Connection, message: &Message) -> Result<i64> {
     let (kind, bot_id) = match &message.sender {
         Sender::User => ("user", None),
-        Sender::Bot { bot_id } => ("bot", Some(bot_id.as_str())),
+        // 空 id 表示这个 Bot 已经被删了：和删 Bot 之后留下的消息一样，不指向任何 Bot。
+        Sender::Bot { bot_id } => ("bot", Some(bot_id.as_str()).filter(|id| !id.is_empty())),
     };
     conn.execute(
         "INSERT INTO messages (id, room_id, sender_kind, sender_bot_id, content, steps_json, state, error, rev, created_at, updated_at, mentions_json, hop, kind, task_id, run_id)

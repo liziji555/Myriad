@@ -348,11 +348,14 @@ impl Engine {
             }
             let mut seq = save_task(tx, &mut task, now)?;
             if let Some(report) = &outcome.report {
+                // 运行期间 Bot 被删了：交付卡照样要有，只是不再指向它。
+                let bot_id = match bots::get(tx, &run.bot_id)? {
+                    Some(bot) => bot.id,
+                    None => BotId::from(String::new()),
+                };
                 let delivery = card(
                     &task,
-                    Sender::Bot {
-                        bot_id: run.bot_id.clone(),
-                    },
+                    Sender::Bot { bot_id },
                     MessageKind::Delivery,
                     Some(run.id.clone()),
                     report.summary.clone(),
@@ -679,6 +682,31 @@ mod tests {
         let task = engine.resume_task(&task.id, "", Some(&bot)).unwrap();
         assert_eq!(task.state, TaskState::Open);
         assert_eq!(task.owner_bot_id, Some(bot));
+    }
+
+    #[test]
+    fn a_run_still_ends_when_its_bot_was_deleted_meanwhile() {
+        let (engine, room_id, _) = engine();
+        let coder = engine
+            .create_bot("Coder", sa_protocol::ModelTier::Mid, "")
+            .unwrap();
+        engine.add_room_member(&room_id, &coder.id).unwrap();
+        let task = engine
+            .create_task(new_task(&room_id, Some(&coder.id)))
+            .unwrap();
+        let (run, message, _) = engine.start_run(&task.id, &coder.id).unwrap();
+        engine.delete_bot(&coder.id).unwrap();
+
+        let task = engine.finish_run(&run.id, done("做完了")).unwrap();
+        assert_eq!(task.state, TaskState::Review);
+        assert_eq!(task.owner_bot_id, None);
+        engine
+            .finish_message(&message.id, MessageState::Complete, None)
+            .unwrap();
+        let page = engine.list_messages(&room_id, None, 50).unwrap();
+        let delivery = page.messages.last().unwrap();
+        assert_eq!(delivery.kind, MessageKind::Delivery);
+        assert_eq!(delivery.content, "做完了");
     }
 
     #[test]
