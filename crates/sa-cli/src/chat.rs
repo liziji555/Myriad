@@ -249,7 +249,7 @@ impl Printer {
     fn line(&mut self, out: &mut impl Write, line: &str, is_step: bool) -> std::io::Result<()> {
         if !self.started {
             self.started = true;
-            writeln!(out)?;
+            writeln!(out, "\nBot>")?;
             self.at_line_start = true;
         }
         if !self.at_line_start {
