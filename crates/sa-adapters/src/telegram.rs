@@ -197,6 +197,8 @@ struct Parameters {
 impl Telegram {
     /// `base` 是接口地址（`https://api.telegram.org`），`token` 是 BotFather 给的令牌。
     pub fn new(base: &str, token: &str) -> Self {
+        // TLS 的实现要先选定，否则建客户端会 panic。已经选过时这里什么也不做。
+        let _ = rustls::crypto::ring::default_provider().install_default();
         Self {
             http: reqwest::Client::new(),
             base: base.trim_end_matches('/').to_string(),

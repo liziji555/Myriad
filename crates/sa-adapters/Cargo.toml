@@ -9,6 +9,7 @@ license.workspace = true
 hex.workspace = true
 hmac.workspace = true
 reqwest.workspace = true
+rustls.workspace = true
 sa-engine.workspace = true
 sa-protocol.workspace = true
 serde.workspace = true
