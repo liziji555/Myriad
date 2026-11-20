@@ -4,9 +4,15 @@ use axum::http::{Request, Response, StatusCode};
 use axum::Router;
 use http_body_util::BodyExt;
 use sa_engine::Engine;
-use sa_protocol::{ApiError, Bot, Event, EventKind, Health, Room, StreamReady};
+use sa_llm::MockProvider;
+use sa_orchestrator::{Orchestrator, ResolvedModel, Settings, SingleModel};
+use sa_protocol::{
+    ApiError, Bot, Event, EventKind, Health, Message, MessageDelta, MessagePage, MessageState,
+    Room, Sender, StepState, StopResponse, StreamReady,
+};
 use sa_server::{router, AppState};
 use sa_store::Store;
+use sa_tools::Fence;
 use std::sync::Arc;
 use std::time::Duration;
 use tower::ServiceExt;
@@ -16,7 +22,65 @@ const TOKEN: &str = "test-token";
 fn app() -> (Router, Arc<Engine>) {
     let engine = Arc::new(Engine::new(Store::open_in_memory().unwrap()).unwrap());
     engine.ensure_defaults().unwrap();
-    (router(AppState::new(engine.clone(), TOKEN)), engine)
+    // 目录留在磁盘上，测试进程结束后由系统清理。
+    let dir = tempfile::tempdir().unwrap().keep();
+    std::fs::create_dir_all(dir.join("work")).unwrap();
+    std::fs::write(dir.join("work/说明.md"), "项目代号：海豚\n").unwrap();
+    let models = SingleModel(ResolvedModel {
+        provider: Arc::new(MockProvider::demo().with_chunk_delay(Duration::from_millis(2))),
+        model: "mock".into(),
+        thinking: None,
+    });
+    let settings = Settings {
+        sessions_dir: dir.join("sessions"),
+        fence: Fence::new(&dir.join("work"), &[]).unwrap(),
+        prompt: None,
+        max_steps: 6,
+        allow_private_network: false,
+    };
+    let orchestrator = Arc::new(Orchestrator::new(
+        engine.clone(),
+        Arc::new(models),
+        settings,
+    ));
+    (
+        router(AppState::new(engine.clone(), orchestrator, TOKEN)),
+        engine,
+    )
+}
+
+fn post(path: &str, body: &str) -> Request<Body> {
+    Request::post(path)
+        .header(AUTHORIZATION, format!("Bearer {TOKEN}"))
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+async fn messages(app: &Router, room: &Room, query: &str) -> MessagePage {
+    let response = app
+        .clone()
+        .oneshot(get(&format!("/api/rooms/{}/messages{query}", room.id)))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    json(response).await
+}
+
+/// 等到房间里有 `count` 条消息，并且都写完了。
+async fn settled(app: &Router, room: &Room, count: usize) -> Vec<Message> {
+    for _ in 0..500 {
+        let page = messages(app, room, "").await;
+        let writing = page
+            .messages
+            .iter()
+            .any(|m| m.state == MessageState::Streaming);
+        if page.messages.len() >= count && !writing {
+            return page.messages;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("等不到 {count} 条写完的消息");
 }
 
 fn get(path: &str) -> Request<Body> {
@@ -268,4 +332,190 @@ async fn missing_build_asset_is_a_404_not_the_index_page() {
     let (app, _) = app();
     let response = app.oneshot(get("/assets/missing.js")).await.unwrap();
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn post_message_streams_a_reply_over_sse() {
+    let (app, engine) = app();
+    let room = engine.list_rooms().unwrap().pop().unwrap();
+    let stream = app.clone().oneshot(get("/api/events")).await.unwrap();
+
+    let response = app
+        .clone()
+        .oneshot(post(
+            &format!("/api/rooms/{}/messages", room.id),
+            r#"{"content":"你好"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let sent: Message = json(response).await;
+    assert_eq!(sent.sender, Sender::User);
+    assert_eq!(sent.content, "你好");
+
+    let all = settled(&app, &room, 2).await;
+    let reply = &all[1];
+    assert!(matches!(reply.sender, Sender::Bot { .. }));
+    assert_eq!(reply.state, MessageState::Complete);
+    assert!(!reply.content.is_empty());
+
+    // 事件流里：ready、用户消息、Bot 消息创建、定稿，外加每段文字一个片段。
+    // 落库的事件之间保持顺序；片段和事件之间不保证先后，靠版本号对齐。
+    let deltas = reply.rev as usize - 1;
+    let frames = read_sse(stream, 4 + deltas).await;
+    assert!(frames[0].contains("event: ready"));
+    let (pieces, events): (Vec<_>, Vec<_>) = frames[1..]
+        .iter()
+        .partition(|frame| frame.contains("event: delta"));
+
+    let events: Vec<Event> = events.iter().map(|f| sse_data(f)).collect();
+    let kinds: Vec<_> = events.iter().map(|e| e.kind).collect();
+    assert_eq!(
+        kinds,
+        [
+            EventKind::MessageCreated,
+            EventKind::MessageCreated,
+            EventKind::MessageUpdated
+        ]
+    );
+    let payloads: Vec<Message> = events
+        .into_iter()
+        .map(|e| serde_json::from_value(e.payload).unwrap())
+        .collect();
+    assert_eq!(payloads[0].id, sent.id);
+    assert_eq!(payloads[1].id, reply.id);
+    assert_eq!(payloads[1].state, MessageState::Streaming);
+    assert_eq!(payloads[2], *reply);
+
+    let mut text = String::new();
+    for (index, frame) in pieces.iter().enumerate() {
+        // 片段不带 id：断线重连的起点只看落库的事件。
+        assert!(
+            !frame.lines().any(|line| line.starts_with("id:")),
+            "{frame}"
+        );
+        let delta: MessageDelta = sse_data(frame);
+        assert_eq!(delta.message_id, reply.id);
+        assert_eq!(delta.rev, index as i64 + 1);
+        text.push_str(&delta.text);
+    }
+    assert_eq!(text, reply.content);
+}
+
+#[tokio::test]
+async fn reply_can_read_a_workspace_file_and_pages_are_cut_by_seq() {
+    let (app, engine) = app();
+    let room = engine.list_rooms().unwrap().pop().unwrap();
+    let path = format!("/api/rooms/{}/messages", room.id);
+    let response = app
+        .clone()
+        .oneshot(post(&path, r#"{"content":"读一下 `说明.md`"}"#))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let all = settled(&app, &room, 2).await;
+    let reply = &all[1];
+    assert_eq!(reply.state, MessageState::Complete, "{reply:?}");
+    assert_eq!(reply.steps.len(), 1);
+    assert_eq!(reply.steps[0].tool, "read");
+    assert_eq!(reply.steps[0].state, StepState::Ok);
+    assert!(
+        reply.content.contains("项目代号：海豚"),
+        "{}",
+        reply.content
+    );
+
+    let newest = messages(&app, &room, "?limit=1").await;
+    assert!(newest.has_more);
+    assert_eq!(newest.messages[0].id, reply.id);
+    let older = messages(&app, &room, &format!("?limit=1&before={}", reply.seq)).await;
+    assert!(!older.has_more);
+    assert_eq!(older.messages[0].id, all[0].id);
+}
+
+#[tokio::test]
+async fn message_endpoints_validate_input() {
+    let (app, engine) = app();
+    let room = engine.list_rooms().unwrap().pop().unwrap();
+    let path = format!("/api/rooms/{}/messages", room.id);
+    let missing = "/api/rooms/room_00000000-0000-7000-8000-000000000000";
+
+    for (request, status, code) in [
+        (
+            post(&path, r#"{"content":"  "}"#),
+            StatusCode::BAD_REQUEST,
+            "invalid",
+        ),
+        (post(&path, "{"), StatusCode::BAD_REQUEST, "bad_request"),
+        (post(&path, "{}"), StatusCode::BAD_REQUEST, "bad_request"),
+        (
+            get(&format!("{path}?limit=abc")),
+            StatusCode::BAD_REQUEST,
+            "bad_request",
+        ),
+        (
+            post(&format!("{missing}/messages"), r#"{"content":"在吗"}"#),
+            StatusCode::NOT_FOUND,
+            "not_found",
+        ),
+        (
+            get(&format!("{missing}/messages")),
+            StatusCode::NOT_FOUND,
+            "not_found",
+        ),
+        (
+            post(&format!("{missing}/stop"), ""),
+            StatusCode::NOT_FOUND,
+            "not_found",
+        ),
+        (
+            Request::post(&path)
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"content":"没带令牌"}"#))
+                .unwrap(),
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+        ),
+    ] {
+        let uri = request.uri().clone();
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), status, "{uri}");
+        assert_eq!(json::<ApiError>(response).await.code, code, "{uri}");
+    }
+    assert!(messages(&app, &room, "").await.messages.is_empty());
+
+    // 没有东西在写时，停止是空操作。
+    let response = app
+        .clone()
+        .oneshot(post(&format!("/api/rooms/{}/stop", room.id), ""))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(!json::<StopResponse>(response).await.stopped);
+}
+
+#[tokio::test]
+async fn slow_stream_readers_are_told_to_resync() {
+    let (app, engine) = app();
+    let room = engine.list_rooms().unwrap().pop().unwrap();
+    let bot = engine.list_bots().unwrap().pop().unwrap();
+    let stream = app.clone().oneshot(get("/api/events")).await.unwrap();
+
+    // 没人读的时候塞进远超缓冲区的片段。
+    let draft = engine.begin_bot_message(&room.id, &bot.id).unwrap();
+    for _ in 0..5000 {
+        engine.append_delta(&draft.id, "字");
+    }
+    let frames = read_sse(stream, 3).await;
+    assert!(frames[0].contains("event: ready"));
+    assert_eq!(
+        sse_data::<Event>(&frames[1]).kind,
+        EventKind::MessageCreated
+    );
+    assert!(frames[2].contains("event: resync"), "{}", frames[2]);
+
+    // 重新拉取能拿到完整内容。
+    let page = messages(&app, &room, "").await;
+    assert_eq!(page.messages[0].content.chars().count(), 5000);
+    assert_eq!(page.messages[0].rev, 5000);
 }

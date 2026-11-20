@@ -10,8 +10,10 @@ mod error;
 mod routes;
 mod sse;
 
-use axum::{middleware, routing::get, Router};
+use axum::routing::{get, post};
+use axum::{middleware, Router};
 use sa_engine::Engine;
+use sa_orchestrator::Orchestrator;
 use std::future::Future;
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -22,15 +24,21 @@ pub use assets::frontend_is_embedded;
 #[derive(Clone)]
 pub struct AppState {
     pub(crate) engine: Arc<Engine>,
+    pub(crate) orchestrator: Arc<Orchestrator>,
     pub(crate) token: Arc<str>,
     /// 置为 `true` 表示服务正在关闭：长连接（SSE）据此主动结束，否则优雅关闭会一直等它们。
     pub(crate) closing: watch::Sender<bool>,
 }
 
 impl AppState {
-    pub fn new(engine: Arc<Engine>, token: impl Into<Arc<str>>) -> Self {
+    pub fn new(
+        engine: Arc<Engine>,
+        orchestrator: Arc<Orchestrator>,
+        token: impl Into<Arc<str>>,
+    ) -> Self {
         Self {
             engine,
+            orchestrator,
             token: token.into(),
             closing: watch::Sender::new(false),
         }
@@ -40,6 +48,11 @@ impl AppState {
 pub fn router(state: AppState) -> Router {
     let protected = Router::new()
         .route("/rooms", get(routes::list_rooms).post(routes::create_room))
+        .route(
+            "/rooms/{room_id}/messages",
+            get(routes::list_messages).post(routes::post_message),
+        )
+        .route("/rooms/{room_id}/stop", post(routes::stop))
         .route("/bots", get(routes::list_bots))
         .route("/events", get(sse::events))
         .fallback(routes::api_not_found)

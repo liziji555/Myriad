@@ -6,12 +6,13 @@ use axum::extract::{Query, State};
 use axum::http::HeaderMap;
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use futures_util::stream::{self, Stream};
-use sa_protocol::{Event, StreamReady};
+use sa_protocol::{Event, MessageDelta, StreamReady};
 use serde::Deserialize;
 use std::collections::VecDeque;
 use std::convert::Infallible;
 use std::time::Duration;
-use tokio::sync::watch;
+use tokio::sync::broadcast::error::RecvError;
+use tokio::sync::{broadcast, watch};
 
 const BATCH: u32 = 256;
 
@@ -26,6 +27,9 @@ struct Cursor {
     closing: watch::Receiver<bool>,
     position: i64,
     pending: VecDeque<Event>,
+    live: broadcast::Receiver<MessageDelta>,
+    /// 已经收到、等事件补齐之后再发的片段。
+    held: Option<MessageDelta>,
     ready_sent: bool,
 }
 
@@ -34,12 +38,18 @@ struct Cursor {
 /// 起点依次取 `?cursor=`、`Last-Event-ID` 头（浏览器自动重连时会带）、当前最新位置。
 /// 连接建立后先发一条 `ready`，随后把起点之后的事件按 `seq` 逐条发出，事件来自数据库，
 /// 所以断线期间的事件不会丢。
+///
+/// 另有两种不带 `id` 的消息，不落库、断线不补：
+/// - `delta`：正在写的消息新增的一段文字，带版本号 `rev`。客户端只在 `rev` 正好接上时追加。
+/// - `resync`：片段来得太快、这条连接丢了一些。客户端应当重新拉取消息列表。
 pub async fn events(
     State(state): State<AppState>,
     query: Result<Query<EventsQuery>, QueryRejection>,
     headers: HeaderMap,
 ) -> Result<Sse<impl Stream<Item = Result<SseEvent, Infallible>>>, AppError> {
     let Query(query) = query.map_err(|e| AppError::bad_request(e.body_text()))?;
+    // 先订阅再做别的：之后客户端拉到的消息快照不会比收到的第一个片段新。
+    let live = state.engine.subscribe_live();
     let wake = state.engine.subscribe();
     let closing = state.closing.subscribe();
     let head = state.engine.event_head();
@@ -55,6 +65,8 @@ pub async fn events(
         closing,
         position: requested.unwrap_or(head).clamp(0, head),
         pending: VecDeque::new(),
+        live,
+        held: None,
         ready_sent: false,
     };
     let stream = stream::unfold(cursor, |mut cursor| async move {
@@ -92,18 +104,31 @@ impl Cursor {
                 );
             }
             // 先记下「已看到的最新位置」再查库：查完之后才写入的事件会让 changed() 立刻返回。
-            self.wake.borrow_and_update();
-            let position = self.position;
-            let batch = blocking(&self.state, move |e| e.events_after(position, BATCH))
-                .await
-                .ok()?;
-            if batch.is_empty() {
-                tokio::select! {
-                    changed = self.wake.changed() => changed.ok()?,
-                    _ = self.closing.wait_for(|closing| *closing) => return None,
+            let head = *self.wake.borrow_and_update();
+            if head > self.position {
+                let position = self.position;
+                let batch = blocking(&self.state, move |e| e.events_after(position, BATCH))
+                    .await
+                    .ok()?;
+                if !batch.is_empty() {
+                    self.pending = batch.into();
+                    continue;
                 }
-            } else {
-                self.pending = batch.into();
+            }
+            // 事件都发完了才轮到片段：「消息创建」总在它的第一个片段之前到达。
+            if let Some(delta) = self.held.take() {
+                return Some(SseEvent::default().event("delta").data(to_json(&delta)));
+            }
+            tokio::select! {
+                changed = self.wake.changed() => changed.ok()?,
+                delta = self.live.recv() => match delta {
+                    Ok(delta) => self.held = Some(delta),
+                    Err(RecvError::Lagged(_)) => {
+                        return Some(SseEvent::default().event("resync").data("{}"));
+                    }
+                    Err(RecvError::Closed) => return None,
+                },
+                _ = self.closing.wait_for(|closing| *closing) => return None,
             }
         }
     }

@@ -36,3 +36,10 @@ pub struct MessagePage {
     pub messages: Vec<Message>,
     pub has_more: bool,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct StopResponse {
+    /// 是否真的有一条正在写的回复被停下。
+    pub stopped: bool,
+}

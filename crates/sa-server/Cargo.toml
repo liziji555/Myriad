@@ -11,6 +11,7 @@ futures-util.workspace = true
 mime_guess.workspace = true
 rust-embed.workspace = true
 sa-engine.workspace = true
+sa-orchestrator.workspace = true
 sa-protocol.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -19,7 +20,10 @@ tracing.workspace = true
 
 [dev-dependencies]
 http-body-util = "0.1"
+sa-llm.workspace = true
 sa-store.workspace = true
+sa-tools.workspace = true
+tempfile.workspace = true
 tower = { workspace = true, features = ["util"] }
 
 [lints]
