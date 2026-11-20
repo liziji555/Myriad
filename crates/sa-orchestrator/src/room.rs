@@ -305,6 +305,7 @@ impl Observer for RoomObserver {
             tool: tool.to_string(),
             title: title.to_string(),
             state: StepState::Running,
+            approval: None,
         });
         self.save_steps().await;
     }

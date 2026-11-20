@@ -339,6 +339,7 @@ mod tests {
             tool: "read".into(),
             title: "读取 a.txt".into(),
             state: StepState::Running,
+            approval: None,
         };
         let updated = engine.set_steps(&draft.id, vec![step.clone()]).unwrap();
         assert_eq!(updated.rev, 3);

@@ -1,4 +1,4 @@
-use crate::{BotId, MessageId, Millis, RoomId};
+use crate::{ApprovalId, BotId, MessageId, Millis, RoomId, RuleId};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
@@ -107,10 +107,14 @@ pub enum MessageState {
 #[serde(rename_all = "snake_case")]
 #[ts(export)]
 pub enum StepState {
+    /// 在等人批准，见 [`ToolStep::approval`]。
+    Waiting,
     Running,
     Ok,
     Error,
     Cancelled,
+    /// 人没有批准（拒绝了，或者一直没处理），没有执行。
+    Denied,
 }
 
 str_enum!(MessageState {
@@ -130,6 +134,47 @@ pub struct ToolStep {
     /// 给人看的一句话，例如「读取 README.md」。
     pub title: String,
     pub state: StepState,
+    /// 这一步要人批准时才有。批准或拒绝之后仍然留着，方便回看当时问的是什么。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub approval: Option<StepApproval>,
+}
+
+/// 一次审批：Bot 想做一件要人点头的事。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct StepApproval {
+    pub id: ApprovalId,
+    /// 为什么要问，例如「要执行命令：cargo test」。
+    pub reason: String,
+    /// 到这个时间还没人处理就按拒绝算。
+    #[ts(type = "number")]
+    pub expires_at: Millis,
+}
+
+/// 人对一次审批的答复。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum ApprovalDecision {
+    /// 只允许这一次。
+    Once,
+    /// 允许，并且这个房间里以后同样的操作不再问。
+    Always,
+    Deny,
+}
+
+/// 一条「总是允许」：这个房间里，这个工具做这件事不用再问。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct PermissionRule {
+    pub id: RuleId,
+    pub room_id: RoomId,
+    pub tool: String,
+    /// 具体允许的是什么：`shell` 是命令原文，写文件类工具是文件的完整路径。
+    pub pattern: String,
+    #[ts(type = "number")]
+    pub created_at: Millis,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]

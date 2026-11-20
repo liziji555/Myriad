@@ -10,6 +10,7 @@ pub mod bots;
 pub mod events;
 pub mod messages;
 pub mod rooms;
+pub mod rules;
 pub mod sessions;
 pub mod usage;
 
