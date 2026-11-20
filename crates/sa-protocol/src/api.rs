@@ -166,3 +166,12 @@ pub struct UpdateRoutineRequest {
     #[ts(optional)]
     pub enabled: Option<bool>,
 }
+
+/// 把一个 GitHub 仓库连到房间。Telegram 聊天用配对码连。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct CreateLinkRequest {
+    pub room_id: RoomId,
+    /// `owner/name`。
+    pub repo: String,
+}

@@ -565,6 +565,7 @@ fn card(
         kind,
         task_id: Some(task.id.clone()),
         run_id,
+        origin: None,
         steps: vec![],
         state,
         error: None,

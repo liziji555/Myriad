@@ -1,6 +1,6 @@
 use crate::{
-    ApprovalId, ArtifactId, BotId, MessageId, Millis, NoticeId, RoomId, RoutineId, RuleId, RunId,
-    TaskId,
+    ApprovalId, ArtifactId, BotId, LinkId, MessageId, Millis, NoticeId, RoomId, RoutineId, RuleId,
+    RunId, TaskId,
 };
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -200,6 +200,9 @@ pub enum MessageKind {
     /// 定时任务到点了：内容是存好的那段话，`mentions` 是要做这件事的 Bot。
     /// 不是人刚说的话，Bot 没什么可说时可以不出声。
     Routine,
+    /// 外面发生的事（GitHub 上新开了 issue、有人评论、CI 跑完了）：内容是给人看的一句话加原文，
+    /// `mentions` 是该看这件事的 Bot；空着就只是摆在时间线上，没有 Bot 接。
+    Event,
 }
 
 str_enum!(MessageKind {
@@ -208,7 +211,75 @@ str_enum!(MessageKind {
     Run => "run",
     Delivery => "delivery",
     Routine => "routine",
+    Event => "event",
 });
+
+/// 房间之外的地方。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum Source {
+    Github,
+    Telegram,
+}
+
+str_enum!(Source {
+    Github => "github",
+    Telegram => "telegram",
+});
+
+/// 一条消息是从外面哪里来的。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct Origin {
+    pub source: Source,
+    /// 给人看的出处：Telegram 是说话的人，GitHub 是 `owner/name#12`。
+    pub label: String,
+    /// 原文在哪里看。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub url: Option<String>,
+    /// 回话送到哪里（Telegram 的聊天 id）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub reply_to: Option<String>,
+}
+
+/// 房间和外面一个地方的连接：GitHub 仓库的事件进这个房间，Telegram 聊天里的话进这个房间。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct Link {
+    pub id: LinkId,
+    pub source: Source,
+    /// 外面那一头：GitHub 是小写的 `owner/name`，Telegram 是聊天 id。
+    pub external: String,
+    pub room_id: RoomId,
+    /// 给人看的名字：仓库名，或者 Telegram 聊天的名字。
+    pub title: String,
+    #[ts(type = "number")]
+    pub created_at: Millis,
+}
+
+/// 一个被断开的连接。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct LinkRef {
+    pub id: LinkId,
+    pub room_id: RoomId,
+}
+
+/// 把一个 Telegram 聊天连到房间用的配对码。只在生成的时候给一次。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct Pairing {
+    pub code: String,
+    #[ts(type = "number")]
+    pub expires_at: Millis,
+    /// 接着配对码用的 Telegram 机器人的用户名。还没连上 Telegram 时没有。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub bot_username: Option<String>,
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -236,6 +307,10 @@ pub struct Message {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub run_id: Option<RunId>,
+    /// 从外面来的消息是从哪里来的。在界面里直接发的没有。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub origin: Option<Origin>,
     pub steps: Vec<ToolStep>,
     pub state: MessageState,
     pub error: Option<String>,

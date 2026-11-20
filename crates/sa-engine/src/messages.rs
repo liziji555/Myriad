@@ -142,6 +142,7 @@ impl Engine {
                     kind: MessageKind::Chat,
                     task_id: None,
                     run_id: None,
+                    origin: None,
                     steps: vec![],
                     state,
                     error: None,
