@@ -7,7 +7,7 @@ function bot(name: string): Bot {
 }
 
 function report(patch: Partial<ImportReport>): ImportReport {
-  return { created: [], skipped: [], room: null, ...patch };
+  return { created: [], skipped: [], updated: [], room: null, ...patch };
 }
 
 describe("importSummary", () => {
@@ -25,6 +25,12 @@ describe("importSummary", () => {
   it("只有一部分时不留空的分句", () => {
     expect(importSummary(report({ skipped: ["A", "B"] }))).toBe("已经有 A、B，没有动。");
     expect(importSummary(report({ created: [bot("A")] }))).toBe("新建了 A。");
+  });
+
+  it("自带的助手被照模板改了时说出来", () => {
+    expect(importSummary(report({ updated: [bot("助手")], created: [bot("Coder")] }))).toBe(
+      "新建了 Coder；照模板改了还没动过的 助手。",
+    );
   });
 
   it("什么都没建时照实说", () => {

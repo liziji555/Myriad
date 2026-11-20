@@ -202,13 +202,21 @@ fn bot(engine: &Engine, command: BotCommand, out: &mut impl Write) -> Result<()>
             for bot in &report.created {
                 writeln!(out, "已新建 {}（{}）", bot.name, bot.tier.as_str())?;
             }
+            for bot in &report.updated {
+                writeln!(
+                    out,
+                    "自带的 {} 还没改过，已照模板改了它（{}）",
+                    bot.name,
+                    bot.tier.as_str()
+                )?;
+            }
             for name in &report.skipped {
                 writeln!(out, "已经有 {name}，没有动它")?;
             }
             if let Some(room) = &report.room {
                 writeln!(out, "已新建房间「{}」（{}）", room.name, room.id)?;
             }
-            if report.created.is_empty() && report.room.is_none() {
+            if report.created.is_empty() && report.updated.is_empty() && report.room.is_none() {
                 writeln!(out, "没有新建任何东西。")?;
             }
         }

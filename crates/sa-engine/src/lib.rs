@@ -61,6 +61,18 @@ pub enum EngineError {
 
 pub type Result<T> = std::result::Result<T, EngineError>;
 
+/// 全新的数据库里自带的那个 Bot 叫什么。
+pub(crate) const DEFAULT_BOT_NAME: &str = "助手";
+
+/// 这个 Bot 是不是自带的那个、而且还是出厂的样子（没写过分工、没换过档位、没停用）。
+pub(crate) fn is_untouched_default(bot: &Bot) -> bool {
+    bot.name == DEFAULT_BOT_NAME
+        && bot.kind == BotKind::Assistant
+        && bot.tier == ModelTier::Mid
+        && bot.persona.is_empty()
+        && bot.enabled
+}
+
 /// 新房间的名字合不合规矩。
 pub(crate) fn check_room_name(name: &str) -> Result<()> {
     let name = name.trim();
@@ -105,7 +117,7 @@ impl Engine {
             }
             let bot = Bot {
                 id: BotId::new(),
-                name: "助手".into(),
+                name: DEFAULT_BOT_NAME.into(),
                 kind: BotKind::Assistant,
                 tier: ModelTier::Mid,
                 persona: String::new(),

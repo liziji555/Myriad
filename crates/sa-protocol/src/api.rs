@@ -284,6 +284,9 @@ pub struct ImportReport {
     pub created: Vec<crate::Bot>,
     /// 已经有同名的 Bot，没有动它们。
     pub skipped: Vec<String>,
+    /// 全新的数据目录里自带的那个「助手」，还没被改过，模板里有同名的：照模板改了它。
+    #[serde(default)]
+    pub updated: Vec<crate::Bot>,
     /// 模板里带了房间时新建的房间。
     pub room: Option<crate::Room>,
 }

@@ -15,6 +15,10 @@ created: Array<Bot>,
  */
 skipped: Array<string>, 
 /**
+ * 全新的数据目录里自带的那个「助手」，还没被改过，模板里有同名的：照模板改了它。
+ */
+updated: Array<Bot>, 
+/**
  * 模板里带了房间时新建的房间。
  */
 room: Room | null, };
