@@ -32,6 +32,8 @@ pub const MAX_TOOLS_PER_SERVER: usize = 100;
 /// 工具清单最多翻这么多页。
 const MAX_PAGES: usize = 20;
 const MAX_DESCRIPTION_CHARS: usize = 1024;
+/// 审批卡上最多显示这么多字的参数。
+const MAX_SHOWN_ARGUMENT_CHARS: usize = 600;
 /// 模型服务对工具名的限制。
 const MAX_TOOL_NAME_CHARS: usize = 64;
 /// 服务出错时，把它最后打到标准错误的这么多字带给人看。
@@ -672,15 +674,23 @@ impl Tool for McpTool {
         format!("调用 {} 的 {}", self.server.name, self.remote)
     }
 
-    async fn check_permission(&self, _input: &Value, _ctx: &ToolCtx) -> Permission {
+    async fn check_permission(&self, input: &Value, _ctx: &ToolCtx) -> Permission {
         if self.auto {
-            Permission::Allow
-        } else {
-            Permission::Ask(format!(
-                "这是外部 MCP 服务「{}」的工具，参数会交给它去执行",
-                self.server.name
-            ))
+            return Permission::Allow;
         }
+        // 批准之前要看得到交给它的是什么：路径、命令、发到哪去都在参数里。
+        let shown = match input {
+            Value::Null => "{}".to_string(),
+            other => other.to_string(),
+        };
+        let mut arguments: String = shown.chars().take(MAX_SHOWN_ARGUMENT_CHARS).collect();
+        if shown.chars().count() > MAX_SHOWN_ARGUMENT_CHARS {
+            arguments.push_str("…（太长，后面的没有显示）");
+        }
+        Permission::Ask(format!(
+            "这是外部 MCP 服务「{}」的工具，下面的参数会交给它去执行：{arguments}",
+            self.server.name
+        ))
     }
 
     async fn call(&self, input: Value, ctx: &ToolCtx) -> ToolResult {
@@ -857,8 +867,25 @@ mod tests {
             echo.check_permission(&json!({}), &ctx).await,
             Permission::Allow
         );
-        let ask = tools[1].check_permission(&json!({}), &ctx).await;
-        assert!(matches!(ask, Permission::Ask(reason) if reason.contains("demo")));
+        // 审批卡上看得到交给它的参数；太长的截短并说明。
+        let ask = tools[1]
+            .check_permission(&json!({ "a": 2, "b": 3 }), &ctx)
+            .await;
+        let Permission::Ask(reason) = ask else {
+            panic!("应该先问人");
+        };
+        assert!(
+            reason.contains("demo") && reason.contains(r#"{"a":2,"b":3}"#),
+            "{reason}"
+        );
+        let long = json!({ "text": "字".repeat(5_000) });
+        let Permission::Ask(reason) = tools[1].check_permission(&long, &ctx).await else {
+            panic!("应该先问人");
+        };
+        assert!(
+            reason.chars().count() < 800 && reason.contains("没有显示"),
+            "{reason}"
+        );
     }
 
     #[tokio::test]
