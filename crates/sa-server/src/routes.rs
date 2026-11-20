@@ -4,11 +4,12 @@ use axum::extract::rejection::{JsonRejection, QueryRejection};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
-use sa_engine::{Engine, EngineError};
+use sa_engine::{BotPatch, Engine, EngineError};
 use sa_orchestrator::OrchestratorError;
 use sa_protocol::{
-    ApprovalId, Bot, CreateRoomRequest, DecideApprovalRequest, Health, Message, MessagePage,
-    PermissionRule, PostMessageRequest, Room, RoomId, RuleId, StopResponse,
+    ApprovalId, Bot, BotId, CreateBotRequest, CreateRoomRequest, DecideApprovalRequest, Health,
+    Message, MessagePage, ModelTier, PermissionRule, PostMessageRequest, Room, RoomId, RuleId,
+    StopResponse, UpdateBotRequest, UpdateRoomRequest,
 };
 use serde::Deserialize;
 
@@ -147,6 +148,90 @@ pub async fn delete_rule(
             "没有这条许可",
         ))
     }
+}
+
+pub async fn create_bot(
+    State(state): State<AppState>,
+    body: Result<Json<CreateBotRequest>, JsonRejection>,
+) -> Result<(StatusCode, Json<Bot>), AppError> {
+    let Json(body) = body.map_err(|e| AppError::bad_request(e.body_text()))?;
+    let bot = blocking(&state, move |engine| {
+        engine.create_bot(
+            &body.name,
+            body.tier.unwrap_or(ModelTier::Mid),
+            body.persona.as_deref().unwrap_or(""),
+        )
+    })
+    .await?;
+    Ok((StatusCode::CREATED, Json(bot)))
+}
+
+/// 改一个 Bot 的名字、档位、人设，或者停用、启用它。只改请求里给出的字段。
+pub async fn update_bot(
+    State(state): State<AppState>,
+    Path(bot_id): Path<BotId>,
+    body: Result<Json<UpdateBotRequest>, JsonRejection>,
+) -> Result<Json<Bot>, AppError> {
+    let Json(body) = body.map_err(|e| AppError::bad_request(e.body_text()))?;
+    let patch = BotPatch {
+        name: body.name,
+        tier: body.tier,
+        persona: body.persona,
+        enabled: body.enabled,
+    };
+    Ok(Json(
+        blocking(&state, move |engine| engine.update_bot(&bot_id, patch)).await?,
+    ))
+}
+
+/// 删掉一个 Bot。它发过的消息留着。
+pub async fn delete_bot(
+    State(state): State<AppState>,
+    Path(bot_id): Path<BotId>,
+) -> Result<StatusCode, AppError> {
+    blocking(&state, move |engine| engine.delete_bot(&bot_id)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// 改房间的名字或入口 Bot。
+pub async fn update_room(
+    State(state): State<AppState>,
+    Path(room_id): Path<RoomId>,
+    body: Result<Json<UpdateRoomRequest>, JsonRejection>,
+) -> Result<Json<Room>, AppError> {
+    let Json(body) = body.map_err(|e| AppError::bad_request(e.body_text()))?;
+    Ok(Json(
+        blocking(&state, move |engine| {
+            engine.update_room(&room_id, body.name.as_deref(), body.host_bot_id.as_ref())
+        })
+        .await?,
+    ))
+}
+
+/// 把一个 Bot 拉进房间。已经在里面时什么都不变。
+pub async fn add_member(
+    State(state): State<AppState>,
+    Path((room_id, bot_id)): Path<(RoomId, BotId)>,
+) -> Result<Json<Room>, AppError> {
+    Ok(Json(
+        blocking(&state, move |engine| {
+            engine.add_room_member(&room_id, &bot_id)
+        })
+        .await?,
+    ))
+}
+
+/// 把一个 Bot 请出房间。
+pub async fn remove_member(
+    State(state): State<AppState>,
+    Path((room_id, bot_id)): Path<(RoomId, BotId)>,
+) -> Result<Json<Room>, AppError> {
+    Ok(Json(
+        blocking(&state, move |engine| {
+            engine.remove_room_member(&room_id, &bot_id)
+        })
+        .await?,
+    ))
 }
 
 pub async fn api_not_found() -> AppError {

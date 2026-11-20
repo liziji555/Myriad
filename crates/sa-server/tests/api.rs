@@ -654,3 +654,102 @@ async fn approval_card_is_decided_over_http_and_rules_can_be_revoked() {
         StatusCode::NOT_FOUND
     );
 }
+
+fn send(method: &str, path: &str, body: &str) -> Request<Body> {
+    Request::builder()
+        .method(method)
+        .uri(path)
+        .header(AUTHORIZATION, format!("Bearer {TOKEN}"))
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+/// Bot 的增删改、房间成员和入口 Bot 都走接口；点名另一个 Bot 时由它来回复。
+#[tokio::test]
+async fn bots_and_room_members_are_managed_over_http() {
+    let (app, engine) = app();
+    let room = engine.list_rooms().unwrap().pop().unwrap();
+    let call = |request: Request<Body>| {
+        let app = app.clone();
+        async move { app.oneshot(request).await.unwrap() }
+    };
+
+    let response = call(post("/api/bots", r#"{"name":"Coder","persona":"写代码"}"#)).await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let coder: Bot = json(response).await;
+    assert_eq!(
+        (coder.name.as_str(), coder.persona.as_str()),
+        ("Coder", "写代码")
+    );
+    assert_eq!(coder.tier, sa_protocol::ModelTier::Mid);
+    // 重名、名字里有空格：400，说明原因。
+    for body in [
+        r#"{"name":"coder"}"#,
+        r#"{"name":"a b"}"#,
+        r#"{"tier":"mid"}"#,
+    ] {
+        let response = call(post("/api/bots", body)).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{body}");
+    }
+
+    let bot_path = format!("/api/bots/{}", coder.id);
+    let response = call(send(
+        "PATCH",
+        &bot_path,
+        r#"{"tier":"strong","enabled":false}"#,
+    ))
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let updated: Bot = json(response).await;
+    assert_eq!(
+        (updated.tier, updated.enabled),
+        (sa_protocol::ModelTier::Strong, false)
+    );
+    assert_eq!(updated.persona, "写代码", "没给的字段不变");
+    let response = call(send("PATCH", &bot_path, r#"{"enabled":true}"#)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let missing = call(send("PATCH", "/api/bots/bot_none", "{}")).await;
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+
+    // 拉进房间、设成入口、改房间名。
+    let member_path = format!("/api/rooms/{}/members/{}", room.id, coder.id);
+    let room_path = format!("/api/rooms/{}", room.id);
+    let not_member = format!(r#"{{"host_bot_id":"{}"}}"#, coder.id);
+    let response = call(send("PATCH", &room_path, &not_member)).await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let joined: Room = json(call(send("PUT", &member_path, "")).await).await;
+    assert_eq!(joined.member_bot_ids.len(), 2);
+    let body = format!(r#"{{"name":"新名字","host_bot_id":"{}"}}"#, coder.id);
+    let changed: Room = json(call(send("PATCH", &room_path, &body)).await).await;
+    assert_eq!(changed.name, "新名字");
+    assert_eq!(changed.host_bot_id, Some(coder.id.clone()));
+
+    // 点名原来的 Bot：由它回复，不是入口。
+    let original = room.host_bot_id.clone().unwrap();
+    let messages_path = format!("/api/rooms/{}/messages", room.id);
+    let response = call(post(&messages_path, r#"{"content":"@助手 你好"}"#)).await;
+    let sent: Message = json(response).await;
+    assert_eq!(sent.mentions, std::slice::from_ref(&original));
+    let all = settled(&app, &room, 2).await;
+    assert_eq!(all[1].sender, Sender::Bot { bot_id: original });
+
+    // 请出房间、删掉。
+    let left: Room = json(call(delete(&member_path)).await).await;
+    assert_eq!(left.member_bot_ids.len(), 1);
+    assert_eq!(left.host_bot_id, left.member_bot_ids.first().cloned());
+    assert_eq!(
+        call(delete(&member_path)).await.status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        call(delete(&bot_path)).await.status(),
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        call(delete(&bot_path)).await.status(),
+        StatusCode::NOT_FOUND
+    );
+    let bots: Vec<Bot> = json(call(get("/api/bots")).await).await;
+    assert_eq!(bots.len(), 1);
+}
