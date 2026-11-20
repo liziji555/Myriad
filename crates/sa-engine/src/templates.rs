@@ -157,16 +157,13 @@ impl Engine {
                     .map(|bot| bot.id.clone())
             };
             let mut room = self.create_room(&wanted.name)?;
-            // 新房间会自动带上最早的那个 Bot；模板里没有它就请出去，房间里只留模板写的成员。
-            let wanted_ids: Vec<BotId> = wanted.members.iter().filter_map(|m| id_of(m)).collect();
+            // 新房间会自动带上最早的那个 Bot：先请出去，再按模板写的顺序把成员拉进来。
             for auto in room.member_bot_ids.clone() {
-                if !wanted_ids.contains(&auto) {
-                    room = self.remove_room_member(&room.id, &auto)?;
-                }
+                room = self.remove_room_member(&room.id, &auto)?;
             }
-            for bot_id in &wanted_ids {
-                if !room.member_bot_ids.contains(bot_id) {
-                    room = self.add_room_member(&room.id, bot_id)?;
+            for member in &wanted.members {
+                if let Some(bot_id) = id_of(member) {
+                    room = self.add_room_member(&room.id, &bot_id)?;
                 }
             }
             if let Some(host) = wanted.host.as_deref().and_then(id_of) {
@@ -190,5 +187,223 @@ impl Engine {
         }
         self.audit(entry);
         Ok(report)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::AuditFilter;
+    use sa_protocol::ModelTier;
+    use sa_store::Store;
+
+    fn engine() -> Engine {
+        Engine::new(Store::open_in_memory().unwrap()).unwrap()
+    }
+
+    fn sorted<T: Ord>(mut items: Vec<T>) -> Vec<T> {
+        items.sort();
+        items
+    }
+
+    /// 成员的先后不算数（同一毫秒进房间的几个，先后是不定的），比较之前排好。
+    fn in_order(mut team: TeamTemplate) -> TeamTemplate {
+        team.bots.sort_by(|a, b| a.name.cmp(&b.name));
+        if let Some(room) = &mut team.room {
+            room.members.sort();
+        }
+        team
+    }
+
+    fn bot(name: &str, tier: ModelTier, persona: &str) -> BotTemplate {
+        BotTemplate {
+            name: name.into(),
+            tier,
+            persona: persona.into(),
+            enabled: true,
+        }
+    }
+
+    #[test]
+    fn a_room_exported_here_comes_out_the_same_over_there() {
+        let here = engine();
+        let first = here
+            .create_bot("Lead", ModelTier::Strong, "拆任务")
+            .unwrap();
+        let coder = here
+            .create_bot("Coder", ModelTier::Mid, "写代码\n第二行")
+            .unwrap();
+        let review = here.create_bot("Reviewer", ModelTier::Cheap, "").unwrap();
+        let patch = BotPatch {
+            enabled: Some(false),
+            ..Default::default()
+        };
+        here.update_bot(&review.id, patch).unwrap();
+        // 房间自动带上了最早的 Lead；换成 Coder 和 Reviewer，入口是 Reviewer 之外的 Coder。
+        let room = here.create_room("修 bug").unwrap();
+        here.remove_room_member(&room.id, &first.id).unwrap();
+        here.add_room_member(&room.id, &review.id).unwrap();
+        here.add_room_member(&room.id, &coder.id).unwrap();
+        here.update_room(&room.id, None, Some(&coder.id)).unwrap();
+
+        let team = here.export_room(&room.id).unwrap();
+        assert_eq!(team.version, TEMPLATE_VERSION);
+        let wanted = team.room.clone().unwrap();
+        assert_eq!(sorted(wanted.members.clone()), ["Coder", "Reviewer"]);
+        assert_eq!(wanted.host.as_deref(), Some("Coder"));
+        // 模板里没有 ID 和时间。
+        let text = serde_json::to_string(&team).unwrap();
+        assert!(!text.contains(coder.id.as_str()) && !text.contains("created_at"));
+
+        // 那边已经有一个别的 Bot，新房间不能把它带进来。
+        let there = engine();
+        there.create_bot("Old", ModelTier::Mid, "原来就在").unwrap();
+        let report = there.import_team(&team).unwrap();
+        assert!(report.skipped.is_empty());
+        let names: Vec<&str> = report.created.iter().map(|b| b.name.as_str()).collect();
+        assert_eq!(sorted(names), ["Coder", "Reviewer"]);
+        let made = report.room.unwrap();
+        assert_eq!(
+            in_order(there.export_room(&made.id).unwrap()),
+            in_order(team)
+        );
+        let all = there.list_bots().unwrap();
+        let reviewer = all.iter().find(|b| b.name == "Reviewer").unwrap();
+        assert!(!reviewer.enabled);
+        assert_eq!(reviewer.tier, ModelTier::Cheap);
+        let coder = all.iter().find(|b| b.name == "Coder").unwrap();
+        assert_eq!(coder.persona, "写代码\n第二行");
+        assert_eq!(made.host_bot_id.as_ref(), Some(&coder.id));
+
+        let filter = AuditFilter {
+            action: Some("team.".into()),
+            ..Default::default()
+        };
+        let audit = there.list_audit(&filter, 10).unwrap().entries;
+        assert_eq!(audit.len(), 1);
+        assert_eq!(audit[0].room_id.as_ref(), Some(&made.id));
+        assert!(
+            audit[0].summary.contains("新建 2 个 Bot"),
+            "{}",
+            audit[0].summary
+        );
+    }
+
+    #[test]
+    fn bots_that_already_exist_are_left_alone() {
+        let engine = engine();
+        let mine = engine
+            .create_bot("coder", ModelTier::Strong, "我自己写的")
+            .unwrap();
+        let team = TeamTemplate {
+            version: 1,
+            bots: vec![
+                bot("Coder", ModelTier::Cheap, "模板里的"),
+                bot("Tester", ModelTier::Mid, "跑测试"),
+            ],
+            room: Some(RoomTemplate {
+                name: "新房间".into(),
+                host: None,
+                members: vec!["Tester".into(), "Coder".into()],
+            }),
+        };
+        let report = engine.import_team(&team).unwrap();
+        assert_eq!(report.skipped, ["Coder"]);
+        assert_eq!(report.created.len(), 1);
+        let kept = engine.get_bot(&mine.id).unwrap();
+        assert_eq!(
+            (kept.tier, kept.persona.as_str()),
+            (ModelTier::Strong, "我自己写的")
+        );
+        // 已有的同名 Bot 照样进房间；没写入口时第一个成员是入口。
+        let room = report.room.unwrap();
+        assert_eq!(room.member_bot_ids.len(), 2);
+        assert!(room.member_bot_ids.contains(&mine.id));
+        assert_eq!(room.host_bot_id.as_ref(), Some(&report.created[0].id));
+        // 再导一次：Bot 都在了，只多一个房间。
+        let again = engine.import_team(&team).unwrap();
+        assert!(again.created.is_empty());
+        assert_eq!(again.skipped, ["Coder", "Tester"]);
+        assert_eq!(engine.list_bots().unwrap().len(), 2);
+
+        // 只导出挑中的 Bot；不挑就是全部。
+        let one = engine.export_bots(std::slice::from_ref(&kept.id)).unwrap();
+        assert_eq!(one.bots, [bot("coder", ModelTier::Strong, "我自己写的")]);
+        assert_eq!(one.room, None);
+        assert_eq!(engine.export_bots(&[]).unwrap().bots.len(), 2);
+        assert!(engine.export_bots(&[BotId::new()]).is_err());
+    }
+
+    #[test]
+    fn a_template_with_anything_wrong_changes_nothing() {
+        let engine = engine();
+        let good = || TeamTemplate {
+            version: 1,
+            bots: vec![bot("A", ModelTier::Mid, ""), bot("B", ModelTier::Mid, "")],
+            room: Some(RoomTemplate {
+                name: "房间".into(),
+                host: Some("A".into()),
+                members: vec!["A".into(), "B".into()],
+            }),
+        };
+        let cases: Vec<(&str, Box<dyn Fn(&mut TeamTemplate)>)> = vec![
+            ("版本", Box::new(|t| t.version = 2)),
+            ("都叫", Box::new(|t| t.bots[1].name = " a ".into())),
+            (
+                "空格",
+                Box::new(|t| {
+                    t.bots[1].name = "B C".into();
+                    t.room = None;
+                }),
+            ),
+            (
+                "人设",
+                Box::new(|t| t.bots[1].persona = "字".repeat(100_000)),
+            ),
+            (
+                "不在模板里",
+                Box::new(|t| t.room.as_mut().unwrap().members.push("C".into())),
+            ),
+            (
+                "写了两次",
+                Box::new(|t| t.room.as_mut().unwrap().members.push("a".into())),
+            ),
+            (
+                "入口",
+                Box::new(|t| t.room.as_mut().unwrap().host = Some("C".into())),
+            ),
+            (
+                "房间名",
+                Box::new(|t| t.room.as_mut().unwrap().name = "  ".into()),
+            ),
+            (
+                "最多",
+                Box::new(|t| {
+                    t.bots = (0..=MAX_TEMPLATE_BOTS)
+                        .map(|n| bot(&format!("b{n}"), ModelTier::Mid, ""))
+                        .collect();
+                    t.room = None;
+                }),
+            ),
+            (
+                "最多",
+                Box::new(|t| {
+                    t.bots = (0..7)
+                        .map(|n| bot(&format!("b{n}"), ModelTier::Mid, ""))
+                        .collect();
+                    t.room.as_mut().unwrap().members = (0..7).map(|n| format!("b{n}")).collect();
+                    t.room.as_mut().unwrap().host = None;
+                }),
+            ),
+        ];
+        for (expect, spoil) in cases {
+            let mut team = good();
+            spoil(&mut team);
+            let error = engine.import_team(&team).unwrap_err().to_string();
+            assert!(error.contains(expect), "{expect}: {error}");
+            assert!(engine.list_bots().unwrap().is_empty(), "{expect}");
+            assert!(engine.list_rooms().unwrap().is_empty(), "{expect}");
+        }
+        assert_eq!(engine.import_team(&good()).unwrap().created.len(), 2);
     }
 }
