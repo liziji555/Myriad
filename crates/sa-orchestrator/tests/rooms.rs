@@ -1379,6 +1379,14 @@ async fn stop_ends_the_whole_exchange_and_a_restart_does_not_replay_it() {
                 m.content == "@Reviewer 帮我看看"
             })
             .await;
+        // 等 Coder 开始写后面的话再停：这时它的第二次模型调用已经发出去了。
+        for _ in 0..500 {
+            if t.rig.messages().iter().any(|m| m.content == "还在写") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(t.rig.provider.requests().len(), 2);
         assert!(t.rig.orchestrator.stop(&t.rig.room));
         t.rig.until_idle().await;
         let all = t.rig.messages();
