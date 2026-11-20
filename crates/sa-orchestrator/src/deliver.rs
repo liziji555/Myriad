@@ -8,11 +8,16 @@ use crate::room::db;
 use crate::{workdir, Shared};
 use async_trait::async_trait;
 use sa_engine::Workdir;
-use sa_protocol::{ArtifactKind, RunId, Task};
+use sa_protocol::{ArtifactKind, RunId, Task, TaskId};
 use sa_tools::{Permission, Tool, ToolCtx, ToolError, ToolResult};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::Arc;
+
+/// 「这个任务的这个提交推送过」记在 effects 表里的名字。
+pub(crate) fn push_key(task_id: &TaskId, sha: &str) -> String {
+    format!("git_push:{task_id}:{sha}")
+}
 
 /// 这一次运行里，工具要用到的任务信息。
 #[derive(Clone)]
@@ -29,7 +34,7 @@ impl Delivery {
     }
 
     fn push_key(&self, sha: &str) -> String {
-        format!("git_push:{}:{sha}", self.task.id)
+        push_key(&self.task.id, sha)
     }
 
     fn pr_key(&self) -> String {
@@ -76,12 +81,16 @@ impl Tool for GitPushTool {
     }
 
     async fn check_permission(&self, _input: &Value, _ctx: &ToolCtx) -> Permission {
-        match workdir::origin_url(&self.0.workdir).await {
-            Ok(url) => Permission::Ask(format!(
-                "要把分支 {} 推送到 {}",
-                self.0.branch(),
-                github::redact(&url)
-            )),
+        // 卡片上要写全：origin 配了几个推送地址，就会推到几个地方。
+        match workdir::origin_urls(&self.0.workdir).await {
+            Ok(urls) => {
+                let urls: Vec<String> = urls.iter().map(|url| github::redact(url)).collect();
+                Permission::Ask(format!(
+                    "要把分支 {} 推送到 {}",
+                    self.0.branch(),
+                    urls.join(" 和 ")
+                ))
+            }
             Err(reason) => Permission::Deny(reason),
         }
     }
@@ -159,8 +168,8 @@ impl OpenPrTool {
         let repo = match &github.repo {
             Some(repo) => repo.clone(),
             None => {
-                let url = workdir::origin_url(&delivery.workdir).await?;
-                github::parse_repo(&url).ok_or_else(|| {
+                let urls = workdir::origin_urls(&delivery.workdir).await?;
+                github::parse_repo(&urls[0]).ok_or_else(|| {
                     "从 origin 的地址里认不出 GitHub 仓库。请用户在 config.toml 的 [github] 里写上 repo = \"owner/name\"。".to_string()
                 })?
             }

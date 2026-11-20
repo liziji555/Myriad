@@ -1,3 +1,4 @@
+use crate::process::{kill_tree, own_group, TreeGuard};
 use crate::{arg, parse_input, Permission, Tool, ToolCtx, ToolError, ToolResult};
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -83,8 +84,7 @@ impl Tool for ShellTool {
             .stderr(Stdio::piped())
             .kill_on_drop(true);
         // 自己一个进程组：停止时连同它启动的子进程一起杀掉。
-        #[cfg(unix)]
-        command.process_group(0);
+        own_group(&mut command);
         let mut child = command
             .spawn()
             .map_err(|e| ToolError(format!("命令启动不了：{e}")))?;
@@ -178,48 +178,6 @@ async fn read_capped(mut stream: impl AsyncRead + Unpin) -> Vec<u8> {
     }
     head.extend(tail);
     head
-}
-
-/// 调用还没收尾就被丢弃时（比如人点了停止，上层不再等这个工具），把进程树杀掉。
-///
-/// `kill_on_drop` 只管直接启动的那个进程，它启动的子进程会留下来。
-struct TreeGuard(Option<u32>);
-
-impl Drop for TreeGuard {
-    fn drop(&mut self) {
-        if let Some(pid) = self.0.take() {
-            // 丢弃发生在异步线程上，不能在这里等；另起一个线程去杀。
-            std::thread::spawn(move || {
-                let _ = kill_command(pid).status();
-            });
-        }
-    }
-}
-
-/// 结束进程 `pid` 和它启动的所有进程的命令。
-fn kill_command(pid: u32) -> std::process::Command {
-    let mut killer = if cfg!(windows) {
-        let mut c = std::process::Command::new("taskkill");
-        c.args(["/T", "/F", "/PID", &pid.to_string()]);
-        c
-    } else {
-        // 负号表示整个进程组。
-        let mut c = std::process::Command::new("kill");
-        c.args(["-KILL", "--", &format!("-{pid}")]);
-        c
-    };
-    killer
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    killer
-}
-
-/// 结束这个进程和它启动的所有进程。
-async fn kill_tree(pid: Option<u32>) {
-    if let Some(pid) = pid {
-        let _ = Command::from(kill_command(pid)).status().await;
-    }
 }
 
 #[cfg(test)]
