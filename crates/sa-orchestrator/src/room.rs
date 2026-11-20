@@ -50,11 +50,13 @@ pub(crate) async fn run(
             _ = wake.notified() => {}
             _ = shared.shutdown.cancelled() => return,
         }
+        link.active.store(true, Ordering::SeqCst);
         // 出错就停下等下一次唤醒，避免原地打转。
         if let Err(error) = work(&shared, &room_id, &link, &mut sessions).await {
             tracing::error!(room = %room_id, "这一轮没跑成：{error}");
         }
         announce(&shared, &room_id, &link, None).await;
+        link.active.store(false, Ordering::SeqCst);
     }
 }
 

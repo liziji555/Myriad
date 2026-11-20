@@ -78,6 +78,7 @@ fn build(
         github: None,
         budget: Default::default(),
         watchdog: Default::default(),
+        routines: Default::default(),
     };
     Rig {
         orchestrator: Orchestrator::new(engine.clone(), models, settings),
@@ -974,6 +975,7 @@ fn team(dir: &Path, router: Vec<MockReply>, bots: Vec<MockReply>) -> Team {
         github: None,
         budget: Default::default(),
         watchdog: Default::default(),
+        routines: Default::default(),
     };
     let models = Arc::new(Tiered {
         router: router.clone(),

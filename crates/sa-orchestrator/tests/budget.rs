@@ -86,6 +86,7 @@ fn start(
         github: None,
         budget,
         watchdog,
+        routines: Default::default(),
     };
     let models = Arc::new(Models {
         front: front.clone(),

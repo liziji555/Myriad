@@ -43,6 +43,7 @@ fn app() -> (Router, Arc<Engine>) {
         github: None,
         budget: Default::default(),
         watchdog: Default::default(),
+        routines: Default::default(),
     };
     let orchestrator = Arc::new(Orchestrator::new(
         engine.clone(),
