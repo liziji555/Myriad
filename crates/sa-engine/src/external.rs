@@ -444,8 +444,9 @@ fn is_task_of(task: &Task, repo: &str, pr: Option<u64>, branch: Option<&str>) ->
 /// 送不送看它在回谁：回 Telegram 里说的话，送回那个聊天；定时任务和外面来的事引出的话没有人在界面前等着，
 /// 送到房间连着的每个 Telegram 聊天；回界面里说的话，不送。
 ///
-/// 「在回谁」取它前面最近的一条人话、或者指定交给这个 Bot 的定时任务和事件。拿不准的时候宁可不送：
-/// 只摆在时间线上的事、交给别的 Bot 的事不算数，否则回界面里的话会被当成它们引出来的，送到所有聊天里去。
+/// 「在回谁」取它前面最近的一条可能引出这句话的：人说的话（点了别的 Bot 的名、而它又不是经交接来说的，不算），
+/// 或者指定交给这个 Bot 的定时任务和事件。只摆在时间线上的事、交给别的 Bot 的事不算数，
+/// 否则回界面里的话会被当成它们引出来的，送到所有聊天里去。
 pub(crate) fn relay(tx: &Transaction<'_>, message: &Message) -> sa_store::Result<()> {
     let Sender::Bot { bot_id } = &message.sender else {
         return Ok(());
@@ -463,7 +464,8 @@ pub(crate) fn relay(tx: &Transaction<'_>, message: &Message) -> sa_store::Result
         }
         _ => return Ok(()),
     };
-    let Some(trigger) = messages::last_trigger_before(tx, &message.room_id, message.seq, bot_id)?
+    let Some(trigger) =
+        messages::last_trigger_before(tx, &message.room_id, message.seq, bot_id, message.hop)?
     else {
         return Ok(());
     };
@@ -860,10 +862,27 @@ mod tests {
 
         // 入口 Bot 自己说这件事：照常送出去。
         reply(&engine, &room, &bot, "有个新 issue。");
-        assert_eq!(
-            engine.pending_outbound(Source::Telegram, 10).unwrap().len(),
-            1
-        );
+        let queued = || engine.pending_outbound(Source::Telegram, 10).unwrap();
+        assert_eq!(queued().len(), 1);
+
+        // 事件交给了入口 Bot，它还没说，人在界面里点名问另一个 Bot：两个都会说。
+        // 被点名的回的是界面里的话，不送；入口 Bot 说的是那件事，照常送出去。
+        engine.receive(issue("d-3", "me/app")).unwrap();
+        engine
+            .post_user_message(&room, "@Coder 上个月的账对上了吗")
+            .unwrap();
+        reply(&engine, &room, &other.id, "对上了。");
+        assert_eq!(queued().len(), 1);
+        reply(&engine, &room, &bot, "又有个新 issue。");
+        assert_eq!(queued().len(), 2);
+        assert!(queued()[1].body.ends_with("又有个新 issue。"));
+        // 入口 Bot 被交接过来接着回界面里的话（不是第一手）：不送。
+        let draft = engine.begin_bot_message(&room, &bot, 1).unwrap();
+        engine.append_delta(&draft.id, "补充：账是 Coder 对的。");
+        engine
+            .finish_message(&draft.id, MessageState::Complete, None)
+            .unwrap();
+        assert_eq!(queued().len(), 2);
     }
 
     #[test]

@@ -125,24 +125,30 @@ pub fn list_in_state(conn: &Connection, state: MessageState) -> Result<Vec<Messa
     rows.map(|row| row?).collect()
 }
 
-/// `seq` 之前最近的一条可能引出 `bot_id` 这句回复的话：人说的，或者指定交给它的定时任务、外面来的事。
-/// 交给别的 Bot 的、谁都没交给的（只摆在时间线上的事）不算。
+/// `seq` 之前最近的一条可能引出 `bot_id` 这句回复（它是转到第 `hop` 手说的）的话。
+///
+/// - 人说的话：没点名的谁都可能来答；点了名的，只有被点到的 Bot 会直接来答，
+///   别的 Bot 要经过交接（`hop > 0`）才会接着说。
+/// - 定时任务、外面来的事：只算指定交给它的。交给别的 Bot 的、谁都没交给的（只摆在时间线上的事）不算。
 pub fn last_trigger_before(
     conn: &Connection,
     room_id: &RoomId,
     seq: i64,
     bot_id: &BotId,
+    hop: u32,
 ) -> Result<Option<Message>> {
     let sql = format!(
         "SELECT {COLUMNS} FROM messages
          WHERE room_id = ?1 AND seq < ?2 AND sender_kind = 'user'
-           AND (kind = 'chat'
+           AND ((kind = 'chat'
+                 AND (?4 > 0 OR mentions_json = '[]'
+                      OR EXISTS (SELECT 1 FROM json_each(mentions_json) WHERE value = ?3)))
                 OR (kind IN ('routine', 'event') AND json_extract(mentions_json, '$[0]') = ?3))
          ORDER BY seq DESC LIMIT 1"
     );
     conn.query_row(
         &sql,
-        params![room_id.as_str(), seq, bot_id.as_str()],
+        params![room_id.as_str(), seq, bot_id.as_str(), hop],
         read_row,
     )
     .optional()?
