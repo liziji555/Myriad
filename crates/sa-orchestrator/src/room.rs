@@ -294,6 +294,7 @@ async fn turn(
         session_id: session_id.clone(),
         message_id: draft.id.clone(),
         fence: shared.settings.fence.clone(),
+        rule_scope: None,
         steps: Mutex::new(vec![]),
         held: Mutex::new(Some(String::new())),
     };
@@ -579,6 +580,9 @@ pub(crate) struct RoomObserver {
     pub message_id: MessageId,
     /// 这一轮的文件类工具在哪个目录里干活。「总是允许」记的路径按它来算。
     pub fence: Fence,
+    /// 「总是允许」的命令记在哪个范围里。任务里批准的命令是在任务目录里跑的，
+    /// 不能让同一条命令在对话里（在人的工作目录里跑）也跟着免问，反过来也一样。
+    pub rule_scope: Option<String>,
     pub steps: Mutex<Vec<ToolStep>>,
     /// 回复开头还分不清是不是 `(pass)` 的那几个字，先扣着不显示，免得界面上闪一下。
     /// 一旦确定不是，就变成 `None`，之后的字直接显示。
@@ -685,7 +689,11 @@ impl Observer for RoomObserver {
 
     async fn request_approval(&self, request: ApprovalRequest<'_>) -> bool {
         let engine = &self.shared.engine;
-        let key = rule_key(request.tool, request.input, &self.fence);
+        let key =
+            rule_key(request.tool, request.input, &self.fence).map(|key| match &self.rule_scope {
+                Some(scope) if request.tool == "shell" => format!("{scope}{key}"),
+                _ => key,
+            });
         if let Some(key) = key.clone() {
             let (engine, room, tool) = (
                 engine.clone(),

@@ -14,7 +14,7 @@ use sa_protocol::{
     ArtifactKind, Bot, CreateTaskRequest, MessageKind, MessageState, ModelTier, Report,
     ReportStatus, RoomId, RunState, Sender, Task, TaskId, TaskState,
 };
-use sa_tools::{Fence, Tool, ToolCtx, ToolError, ToolResult};
+use sa_tools::{Tool, ToolCtx, ToolError, ToolResult};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
@@ -40,7 +40,8 @@ pub(crate) struct Works {
     running: Mutex<HashMap<TaskId, (CancellationToken, JoinHandle<()>)>>,
     /// 人点了「停止」的任务。用来区分「被人停下」和「服务在关闭」。
     stopped: Mutex<HashSet<TaskId>>,
-    /// 验收一次只做一个：把改动带回工作目录不能并发。
+    /// 验收一次只做一个：把改动带回工作目录不能并发。打回、继续、取消也拿这把锁，
+    /// 这样验收从检查状态到标成完成的中间，任务不会被别的操作挪走。
     accepting: tokio::sync::Mutex<()>,
 }
 
@@ -133,6 +134,7 @@ async fn ensure_workdir(shared: &Arc<Shared>, task_id: &TaskId) -> Result<Workdi
         .await
         .map_err(|e| e.to_string())?;
     if let Some(workdir) = existing {
+        check_source(shared, &workdir)?;
         if Path::new(&workdir.path).is_dir() {
             return Ok(workdir);
         }
@@ -148,6 +150,20 @@ async fn ensure_workdir(shared: &Arc<Shared>, task_id: &TaskId) -> Result<Workdi
         .await
         .map_err(|e| e.to_string())?;
     Ok(workdir)
+}
+
+/// 任务是从别的工作目录开出来的（服务换了 `--workdir` 重新启动）：不在这里接着做，也不往这里验收。
+fn check_source(shared: &Shared, workdir: &Workdir) -> Result<(), String> {
+    let source = Path::new(&workdir.source).canonicalize().ok();
+    if source.as_deref() == Some(shared.settings.fence.root()) {
+        Ok(())
+    } else {
+        Err(format!(
+            "这个任务是在工作目录 {} 里开的，现在的工作目录是 {}。用原来的工作目录启动服务再继续，或者取消这个任务。",
+            workdir.source,
+            shared.settings.fence.root_display()
+        ))
+    }
 }
 
 /// 跑任务的一次运行，从开工到收尾。
@@ -175,7 +191,7 @@ async fn run_task(shared: &Arc<Shared>, task: Task, cancel: &CancellationToken) 
         Ok(workdir) => workdir,
         Err(reason) => return block(shared, &task.id, reason).await,
     };
-    let fence = match Fence::new(Path::new(&workdir.path), &[]) {
+    let fence = match shared.settings.fence.within(Path::new(&workdir.path)) {
         Ok(fence) => fence,
         Err(error) => {
             return block(shared, &task.id, format!("任务目录打不开：{error}")).await;
@@ -199,6 +215,7 @@ async fn run_task(shared: &Arc<Shared>, task: Task, cancel: &CancellationToken) 
         session_id: session_id.clone(),
         message_id: draft.id.clone(),
         fence: fence.clone(),
+        rule_scope: Some(format!("[任务 {}] ", task.id)),
         steps: Mutex::new(vec![]),
         // 工作会话里没有「不说话」这回事，字直接显示。
         held: Mutex::new(None),
@@ -379,8 +396,7 @@ async fn run_task(shared: &Arc<Shared>, task: Task, cancel: &CancellationToken) 
 async fn cleanup(shared: &Arc<Shared>, task_id: &TaskId) {
     let (engine, id) = (shared.engine.clone(), task_id.clone());
     if let Ok(Some(dir)) = db(move || engine.task_workdir(&id)).await {
-        let settings = &shared.settings;
-        workdir::remove(settings.fence.root(), &settings.work_dir, task_id, &dir).await;
+        workdir::remove(task_id, &dir).await;
     }
 }
 
@@ -672,6 +688,7 @@ impl Orchestrator {
         owner: Option<sa_protocol::BotId>,
     ) -> Result<Task, OrchestratorError> {
         self.check_running()?;
+        let _not_while_accepting = self.shared.works.accepting.lock().await;
         let (engine, task_id) = (self.shared.engine.clone(), id.clone());
         let task = db(move || {
             if engine.get_task(&task_id)?.state == TaskState::Review {
@@ -689,6 +706,7 @@ impl Orchestrator {
     /// 验收不通过：带着意见打回去重做。
     pub async fn reject_task(&self, id: &TaskId, note: String) -> Result<Task, OrchestratorError> {
         self.check_running()?;
+        let _not_while_accepting = self.shared.works.accepting.lock().await;
         let (engine, task_id) = (self.shared.engine.clone(), id.clone());
         let task = db(move || {
             if engine.get_task(&task_id)?.state != TaskState::Review {
@@ -720,7 +738,14 @@ impl Orchestrator {
             return Err(EngineError::Invalid("只有等验收的任务才能验收".into()).into());
         }
         if let Some(dir) = &dir {
-            workdir::apply_to_workspace(shared.settings.fence.root(), dir)
+            check_source(shared, dir).map_err(OrchestratorError::Conflict)?;
+            // 先把任务目录里现在的样子记下来：上一次运行收尾时没记成的改动，不能在验收时悄悄丢掉。
+            workdir::commit_and_diff(dir, &task.title)
+                .await
+                .map_err(|reason| {
+                    OrchestratorError::Conflict(format!("任务目录里的改动没能记下来：{reason}"))
+                })?;
+            workdir::apply_to_workspace(dir)
                 .await
                 .map_err(OrchestratorError::Conflict)?;
         }
@@ -746,6 +771,8 @@ impl Orchestrator {
 
     /// 取消任务：不做了。正在进行的运行会被停下，独立目录删掉。
     pub async fn cancel_task(&self, id: &TaskId, note: String) -> Result<Task, OrchestratorError> {
+        // 验收正在把改动带回工作目录时不能取消：等它做完，结果是「已完成」就取消不了。
+        let _not_while_accepting = self.shared.works.accepting.lock().await;
         let (engine, task_id) = (self.shared.engine.clone(), id.clone());
         let task = db(move || engine.move_task(&task_id, TaskState::Cancelled, &note)).await?;
         // 有运行在进行：停下它，目录由它收尾时删。没有：现在就删。

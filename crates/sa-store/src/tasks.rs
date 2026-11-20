@@ -10,12 +10,19 @@ use sa_protocol::{
 /// 任务的独立工作目录。这些只有后端用，不给界面。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Workdir {
+    /// Bot 在哪个目录里干活。
     pub path: String,
     /// `worktree` 或 `copy`。
     pub kind: String,
     pub branch: Option<String>,
     /// 开工时工作目录所在的提交。
     pub base_ref: String,
+    /// 任务目录的根。工作目录是仓库里的一层时，`path` 是它里面对应的那一层。
+    pub root: String,
+    /// 任务目录的 git 目录。不在 Bot 能写的范围里。
+    pub git_dir: String,
+    /// 任务是从哪个工作目录开出来的；验收时改动带回这里。
+    pub source: String,
 }
 
 const COLUMNS: &str = "id, room_id, title, scope, acceptance, owner_bot_id, state, note, created_by_bot_id, workdir, branch, rev, created_at, updated_at";
@@ -147,7 +154,7 @@ fn read_task(row: &Row<'_>) -> rusqlite::Result<Result<Task>> {
 pub fn workdir(conn: &Connection, id: &TaskId) -> Result<Option<Workdir>> {
     let row = conn
         .query_row(
-            "SELECT workdir, work_kind, branch, base_ref FROM tasks WHERE id = ?1",
+            "SELECT workdir, work_kind, branch, base_ref, work_tree, git_dir, source_dir FROM tasks WHERE id = ?1",
             [id.as_str()],
             |row| {
                 Ok((
@@ -155,16 +162,30 @@ pub fn workdir(conn: &Connection, id: &TaskId) -> Result<Option<Workdir>> {
                     row.get::<_, Option<String>>(1)?,
                     row.get::<_, Option<String>>(2)?,
                     row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
                 ))
             },
         )
         .optional()?;
     Ok(match row {
-        Some((Some(path), Some(kind), branch, Some(base_ref))) => Some(Workdir {
+        Some((
+            Some(path),
+            Some(kind),
+            branch,
+            Some(base_ref),
+            Some(root),
+            Some(git_dir),
+            Some(source),
+        )) => Some(Workdir {
             path,
             kind,
             branch,
             base_ref,
+            root,
+            git_dir,
+            source,
         }),
         _ => None,
     })
@@ -173,13 +194,16 @@ pub fn workdir(conn: &Connection, id: &TaskId) -> Result<Option<Workdir>> {
 /// 记下（或清掉）任务的工作目录。
 pub fn set_workdir(conn: &Connection, id: &TaskId, workdir: Option<&Workdir>) -> Result<()> {
     conn.execute(
-        "UPDATE tasks SET workdir = ?2, work_kind = ?3, branch = ?4, base_ref = ?5 WHERE id = ?1",
+        "UPDATE tasks SET workdir = ?2, work_kind = ?3, branch = ?4, base_ref = ?5, work_tree = ?6, git_dir = ?7, source_dir = ?8 WHERE id = ?1",
         params![
             id.as_str(),
             workdir.map(|w| w.path.as_str()),
             workdir.map(|w| w.kind.as_str()),
             workdir.and_then(|w| w.branch.as_deref()),
-            workdir.map(|w| w.base_ref.as_str())
+            workdir.map(|w| w.base_ref.as_str()),
+            workdir.map(|w| w.root.as_str()),
+            workdir.map(|w| w.git_dir.as_str()),
+            workdir.map(|w| w.source.as_str())
         ],
     )?;
     Ok(())
@@ -534,6 +558,9 @@ mod tests {
             kind: "worktree".into(),
             branch: Some("sa/task-x".into()),
             base_ref: "abc123".into(),
+            root: "/data/work/task_x".into(),
+            git_dir: "/repo/.git/worktrees/task_x".into(),
+            source: "/repo".into(),
         };
         store
             .write(|tx| set_workdir(tx, &task.id, Some(&dir)))

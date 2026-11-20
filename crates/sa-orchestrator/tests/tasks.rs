@@ -56,8 +56,19 @@ fn start(dir: &Path, front: Vec<MockReply>, work: Vec<MockReply>) -> Rig {
 }
 
 fn start_with(dir: &Path, front: Vec<MockReply>, work: Vec<MockReply>, strong: bool) -> Rig {
+    start_in(dir, "ws", front, work, strong)
+}
+
+/// `workspace` 是人的工作目录在 `dir` 下面叫什么。
+fn start_in(
+    dir: &Path,
+    workspace: &str,
+    front: Vec<MockReply>,
+    work: Vec<MockReply>,
+    strong: bool,
+) -> Rig {
     let data = dir.join("data");
-    let workspace = dir.join("ws");
+    let workspace = dir.join(workspace);
     std::fs::create_dir_all(&data).unwrap();
     std::fs::create_dir_all(&workspace).unwrap();
     let engine = Arc::new(Engine::new(Store::open(&data.join("state.db")).unwrap()).unwrap());
@@ -291,9 +302,11 @@ async fn a_bot_opens_a_task_and_the_work_session_delivers_it_for_acceptance() {
     assert_eq!(runs[0].state, RunState::Succeeded);
     assert_eq!(runs[0].report.as_ref().unwrap().status, ReportStatus::Done);
 
-    // 验收通过：改动带回工作目录，任务目录删掉。
+    // 验收通过：改动带回工作目录，任务目录删掉。运行收尾之后才出现在任务目录里的文件也一起带回来。
+    std::fs::write(rig.task_dir(&task.id).join("late.txt"), "后来的\n").unwrap();
     let task = rig.orchestrator.accept_task(&task.id).await.unwrap();
     assert_eq!(task.state, TaskState::Done);
+    assert!(rig.workspace.join("late.txt").exists());
     assert_eq!(
         std::fs::read_to_string(rig.workspace.join("a.txt")).unwrap(),
         "二\n"
@@ -412,7 +425,10 @@ async fn in_a_git_repo_the_task_works_on_its_own_branch_and_commands_need_approv
     let shell = serde_json::json!({ "command": "git status --short" }).to_string();
     let rig = start(
         tmp.path(),
-        vec![],
+        vec![
+            MockReply::tool_calls("我也看一下。", &[("s2", "shell", &shell)]),
+            MockReply::text("看完了。"),
+        ],
         vec![
             write("b.txt", "新文件\n"),
             MockReply::tool_calls("看一下状态。", &[("s1", "shell", &shell)]),
@@ -442,9 +458,28 @@ async fn in_a_git_repo_the_task_works_on_its_own_branch_and_commands_need_approv
         rig.engine.get_task(&task.id).unwrap().state,
         TaskState::Working
     );
-    assert!(rig.orchestrator.decide(&approval, ApprovalDecision::Once));
+    assert!(rig.orchestrator.decide(&approval, ApprovalDecision::Always));
 
     let task = rig.task_in(&task.id, TaskState::Review).await;
+    // 任务里点的「总是允许」只管这个任务：同一条命令在对话里（在人的工作目录里跑）照样要问。
+    rig.orchestrator
+        .post_message(&rig.room, "你也跑一下".into())
+        .await
+        .unwrap();
+    let asked_again = loop {
+        let waiting = rig.messages().into_iter().find_map(|m| {
+            (m.kind == MessageKind::Chat)
+                .then(|| m.steps.into_iter().find(|s| s.state == StepState::Waiting))
+                .flatten()
+        });
+        if let Some(step) = waiting {
+            break step.approval.unwrap().id;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    assert!(rig
+        .orchestrator
+        .decide(&asked_again, ApprovalDecision::Deny));
     let branch = task.branch.clone().expect("git 仓库里的任务有自己的分支");
     let kinds: Vec<_> = task
         .artifacts
@@ -681,5 +716,50 @@ async fn only_a_few_tasks_run_at_once_and_the_rest_wait_their_turn() {
         .await
         .unwrap();
     rig.task_in(&waiting.id, TaskState::Working).await;
+    rig.orchestrator.shutdown().await;
+}
+
+/// 服务换了一个工作目录重新启动：之前的任务不在新的目录里接着做，也不往新的目录里验收。
+#[tokio::test]
+async fn a_task_never_lands_in_a_workspace_it_was_not_opened_in() {
+    let tmp = tempfile::tempdir().unwrap();
+    let rig = start(
+        tmp.path(),
+        vec![],
+        vec![
+            write("a.txt", "二\n"),
+            report("done", "改了"),
+            MockReply::text("交完了。"),
+        ],
+    );
+    std::fs::write(rig.workspace.join("a.txt"), "一\n").unwrap();
+    let task = rig.open_task("改 a.txt").await;
+    rig.task_in(&task.id, TaskState::Review).await;
+    rig.orchestrator.shutdown().await;
+    let original = rig.workspace.clone();
+    drop(rig);
+
+    let rig = start_in(tmp.path(), "elsewhere", vec![], vec![], true);
+    std::fs::write(rig.workspace.join("a.txt"), "一\n").unwrap();
+    let error = rig.orchestrator.accept_task(&task.id).await.unwrap_err();
+    assert!(matches!(error, OrchestratorError::Conflict(_)), "{error}");
+    assert_eq!(
+        rig.engine.get_task(&task.id).unwrap().state,
+        TaskState::Review
+    );
+    for workspace in [&original, &rig.workspace] {
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("a.txt")).unwrap(),
+            "一\n"
+        );
+    }
+    // 打回重做也开不了工：卡住并说明原因，任务目录原样留着。
+    rig.orchestrator
+        .reject_task(&task.id, "再改改".into())
+        .await
+        .unwrap();
+    let blocked = rig.task_in(&task.id, TaskState::Blocked).await;
+    assert!(blocked.note.contains("现在的工作目录"), "{blocked:#?}");
+    assert!(rig.task_dir(&task.id).join("a.txt").exists());
     rig.orchestrator.shutdown().await;
 }

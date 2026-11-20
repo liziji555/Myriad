@@ -14,11 +14,15 @@ CREATE TABLE tasks (
     pending_input     TEXT NOT NULL DEFAULT '',
     -- 谁开的：空表示人，否则是 Bot。Bot 被删了也留着这个 id。
     created_by_bot_id TEXT,
-    -- 独立工作目录：路径、是 git worktree 还是复制出来的、分支、从哪个提交开始。
+    -- 独立工作目录：Bot 在哪个目录里干活、是 git worktree 还是复制出来的、分支、从哪个提交开始。
     workdir           TEXT,
     work_kind         TEXT CHECK (work_kind IN ('worktree', 'copy')),
     branch            TEXT,
     base_ref          TEXT,
+    -- 任务目录的根（workdir 可能是它里面的一层）、它的 git 目录、它是从哪个工作目录开出来的。
+    work_tree         TEXT,
+    git_dir           TEXT,
+    source_dir        TEXT,
     rev               INTEGER NOT NULL DEFAULT 0,
     created_at        INTEGER NOT NULL,
     updated_at        INTEGER NOT NULL
