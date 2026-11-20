@@ -39,6 +39,8 @@ pub struct UsageRecord {
     pub in_tokens: i64,
     pub out_tokens: i64,
     pub cached_tokens: i64,
+    /// 按现在的价格算下来花了多少，单位是百万分之一个货币单位。
+    pub cost_micros: i64,
 }
 
 impl Engine {
@@ -366,6 +368,7 @@ impl Engine {
             in_tokens: record.in_tokens,
             out_tokens: record.out_tokens,
             cached_tokens: record.cached_tokens,
+            cost_micros: record.cost_micros,
             created_at: now_ms(),
         };
         Ok(self.store.write(|tx| usage::insert(tx, &row))?)

@@ -41,6 +41,8 @@ fn app() -> (Router, Arc<Engine>) {
         approval_timeout: std::time::Duration::from_secs(600),
         work_dir: dir.join("tasks"),
         github: None,
+        budget: Default::default(),
+        watchdog: Default::default(),
     };
     let orchestrator = Arc::new(Orchestrator::new(
         engine.clone(),
@@ -925,4 +927,56 @@ async fn a_task_runs_is_rejected_then_accepted_over_http() {
     ] {
         assert!(kinds.contains(&kind), "{kind:?}");
     }
+}
+
+#[tokio::test]
+async fn usage_and_notices_are_served_and_a_notice_can_be_dismissed() {
+    let (app, engine) = app();
+    let response = app.clone().oneshot(get("/api/usage")).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let usage: sa_protocol::UsageSummary = json(response).await;
+    assert_eq!(usage.today.calls, 0);
+    assert_eq!(usage.days.len(), 7);
+
+    let notice = engine
+        .notify(
+            "test:1",
+            sa_engine::NewNotice {
+                kind: sa_protocol::NoticeKind::Budget,
+                level: sa_protocol::NoticeLevel::Warning,
+                room_id: None,
+                task_id: None,
+                text: "今天的花费到上限了".into(),
+            },
+        )
+        .unwrap()
+        .unwrap();
+    // 同一个 key 只记一次。
+    let again = sa_engine::NewNotice {
+        kind: sa_protocol::NoticeKind::Budget,
+        level: sa_protocol::NoticeLevel::Info,
+        room_id: None,
+        task_id: None,
+        text: "重复的".into(),
+    };
+    assert!(engine.notify("test:1", again).unwrap().is_none());
+
+    let response = app.clone().oneshot(get("/api/notices")).await.unwrap();
+    let notices: Vec<sa_protocol::Notice> = json(response).await;
+    assert_eq!(notices, std::slice::from_ref(&notice));
+
+    let path = format!("/api/notices/{}/dismiss", notice.id);
+    let response = app.clone().oneshot(post(&path, "")).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let dismissed: sa_protocol::Notice = json(response).await;
+    assert!(dismissed.dismissed_at.is_some());
+    let response = app.clone().oneshot(get("/api/notices")).await.unwrap();
+    assert!(json::<Vec<sa_protocol::Notice>>(response).await.is_empty());
+
+    let response = app
+        .oneshot(post("/api/notices/ntc_nope/dismiss", ""))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(json::<ApiError>(response).await.code, "not_found");
 }

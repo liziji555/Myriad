@@ -1,11 +1,18 @@
-import type { Bot, BotRef, Event, Room } from "./types";
+import type { Bot, BotRef, Event, Notice, Room, RoomId } from "./types";
 
 export interface Workspace {
   readonly rooms: readonly Room[];
   readonly bots: readonly Bot[];
+  /** 还没收起来的提醒，新的在前。 */
+  readonly notices: readonly Notice[];
 }
 
-export const emptyWorkspace: Workspace = { rooms: [], bots: [] };
+export const emptyWorkspace: Workspace = { rooms: [], bots: [], notices: [] };
+
+/** 在这个房间里要显示的提醒：关于这个房间的，和不专属于哪个房间的。 */
+export function noticesFor(notices: readonly Notice[], roomId: RoomId | null): Notice[] {
+  return notices.filter((notice) => notice.room_id === null || notice.room_id === roomId);
+}
 
 /** 把一条事件应用到本地状态。同一条事件应用多次，结果不变。 */
 export function applyEvent(state: Workspace, event: Event): Workspace {
@@ -35,6 +42,16 @@ export function applyEvent(state: Workspace, event: Event): Workspace {
     case "bot.deleted": {
       const gone = event.payload as BotRef;
       return { ...state, bots: state.bots.filter((b) => b.id !== gone.id) };
+    }
+    case "notice.created":
+    case "notice.updated": {
+      const notice = event.payload as Notice;
+      const others = state.notices.filter((n) => n.id !== notice.id);
+      if (notice.dismissed_at !== null) return { ...state, notices: others };
+      const notices = [notice, ...others].sort(
+        (a, b) => b.created_at - a.created_at || b.id.localeCompare(a.id),
+      );
+      return { ...state, notices };
     }
     default:
       // 消息类事件归 chat.ts 管。

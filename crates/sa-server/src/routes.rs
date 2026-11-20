@@ -8,9 +8,9 @@ use axum::Json;
 use sa_engine::{BotPatch, Engine, EngineError};
 use sa_protocol::{
     ApprovalId, Bot, BotId, CreateBotRequest, CreateRoomRequest, CreateTaskRequest,
-    DecideApprovalRequest, Health, Message, MessagePage, ModelTier, PermissionRule,
-    PostMessageRequest, Room, RoomId, RuleId, StopResponse, Task, TaskActionRequest, TaskDetail,
-    TaskId, UpdateBotRequest, UpdateRoomRequest,
+    DecideApprovalRequest, Health, Message, MessagePage, ModelTier, Notice, NoticeId,
+    PermissionRule, PostMessageRequest, Room, RoomId, RuleId, StopResponse, Task,
+    TaskActionRequest, TaskDetail, TaskId, UpdateBotRequest, UpdateRoomRequest, UsageSummary,
 };
 use serde::Deserialize;
 
@@ -325,6 +325,26 @@ pub async fn cancel_task(
 ) -> Result<Json<Task>, AppError> {
     let note = action_body(&body)?.note.unwrap_or_default();
     Ok(Json(state.orchestrator.cancel_task(&task_id, note).await?))
+}
+
+/// 「用量」面板：今天和最近几天花了多少，按模型、Bot、任务分。
+pub async fn usage(State(state): State<AppState>) -> Result<Json<UsageSummary>, AppError> {
+    Ok(Json(state.orchestrator.usage_summary().await?))
+}
+
+/// 还没收起来的提醒，新的在前。
+pub async fn list_notices(State(state): State<AppState>) -> Result<Json<Vec<Notice>>, AppError> {
+    Ok(Json(blocking(&state, Engine::list_notices).await?))
+}
+
+/// 收起一条提醒。
+pub async fn dismiss_notice(
+    State(state): State<AppState>,
+    Path(notice_id): Path<NoticeId>,
+) -> Result<Json<Notice>, AppError> {
+    Ok(Json(
+        blocking(&state, move |engine| engine.dismiss_notice(&notice_id)).await?,
+    ))
 }
 
 pub async fn api_not_found() -> AppError {

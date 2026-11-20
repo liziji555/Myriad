@@ -21,6 +21,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
@@ -45,6 +46,10 @@ pub(crate) struct Works {
     running: Mutex<HashMap<TaskId, (CancellationToken, JoinHandle<()>)>>,
     /// 人点了「停止」的任务。用来区分「被人停下」和「服务在关闭」。
     stopped: Mutex<HashSet<TaskId>>,
+    /// 被看门狗停下的任务，和停下它的原因（写在任务卡上）。
+    halted: Mutex<HashMap<TaskId, String>>,
+    /// 正在跑的任务最后一次有动静（出字、调用工具、收到用量）是什么时候。
+    pulses: Mutex<HashMap<TaskId, Arc<AtomicI64>>>,
     /// 验收一次只做一个：把改动带回工作目录不能并发。打回、继续、取消也拿这把锁，
     /// 这样验收从检查状态到标成完成的中间，任务不会被别的操作挪走。
     accepting: tokio::sync::Mutex<()>,
@@ -76,6 +81,10 @@ async fn schedule(shared: Arc<Shared>) {
                 continue;
             }
         };
+        // 今天的额度用完了：排着队的先不开工（开了也是立刻卡住）。看门狗每隔一阵会再叫醒这里。
+        if !open.is_empty() && crate::budget::daily_exhausted(&shared).await {
+            continue;
+        }
         // 在同一把锁里「看有没有空位」和「占位」：任务结束时也要拿这把锁才能把自己去掉。
         let mut running = shared.works.running.lock().unwrap();
         for task in open {
@@ -92,6 +101,8 @@ async fn schedule(shared: Arc<Shared>) {
                 run_task(&shared, task, &token).await;
                 shared.works.running.lock().unwrap().remove(&id);
                 shared.works.stopped.lock().unwrap().remove(&id);
+                shared.works.halted.lock().unwrap().remove(&id);
+                shared.works.pulses.lock().unwrap().remove(&id);
                 // 任务到此为止（不用做了，或者被取消）：独立目录不留。
                 // 要在把自己从表里去掉之后再看：之前来的取消指望这里删目录，之后来的取消会自己删。
                 let (engine, task_id) = (shared.engine.clone(), id.clone());
@@ -122,6 +133,34 @@ pub(crate) async fn shutdown(shared: &Arc<Shared>) {
     for handle in handles {
         let _ = handle.await;
     }
+}
+
+/// 看门狗停下一个正在跑的任务。任务变成「卡住了」，`reason` 写在任务卡上。返回是否真的停下了什么。
+pub(crate) fn halt(shared: &Shared, id: &TaskId, reason: String) -> bool {
+    let running = shared.works.running.lock().unwrap();
+    match running.get(id) {
+        Some((cancel, _)) => {
+            shared
+                .works
+                .halted
+                .lock()
+                .unwrap()
+                .entry(id.clone())
+                .or_insert(reason);
+            cancel.cancel();
+            true
+        }
+        None => false,
+    }
+}
+
+/// 正在跑的任务，和每个任务最后一次有动静的时间。
+pub(crate) fn pulses(shared: &Shared) -> Vec<(TaskId, i64)> {
+    let pulses = shared.works.pulses.lock().unwrap();
+    pulses
+        .iter()
+        .map(|(id, pulse)| (id.clone(), pulse.load(Ordering::Relaxed)))
+        .collect()
 }
 
 /// 任务没法开工：标成「卡住了」并写明原因。
@@ -225,6 +264,13 @@ async fn run_task(shared: &Arc<Shared>, task: Task, cancel: &CancellationToken) 
         }
     };
 
+    let pulse = Arc::new(AtomicI64::new(sa_engine::now_ms()));
+    shared
+        .works
+        .pulses
+        .lock()
+        .unwrap()
+        .insert(task.id.clone(), pulse.clone());
     let observer = RoomObserver {
         shared: shared.clone(),
         room_id: task.room_id.clone(),
@@ -236,6 +282,7 @@ async fn run_task(shared: &Arc<Shared>, task: Task, cancel: &CancellationToken) 
         steps: Mutex::new(vec![]),
         // 工作会话里没有「不说话」这回事，字直接显示。
         held: Mutex::new(None),
+        pulse: Some(pulse.clone()),
     };
     let reported: Arc<Mutex<Option<Report>>> = Arc::default();
     let path = shared
@@ -277,6 +324,8 @@ async fn run_task(shared: &Arc<Shared>, task: Task, cancel: &CancellationToken) 
                 room_id: task.room_id.clone(),
                 bot_id: bot.id.clone(),
                 session_id: session_id.clone(),
+                task_id: task.id.clone(),
+                pulse: pulse.clone(),
             });
             // 推送和开 PR 只对有分支的任务（工作目录是 git 仓库）有意义。
             if workdir.branch.is_some() {
@@ -297,9 +346,11 @@ async fn run_task(shared: &Arc<Shared>, task: Task, cancel: &CancellationToken) 
                 fresh: transcript.entries().is_empty(),
                 first: true,
             };
+            let provider =
+                crate::budget::guard(shared, model.provider.clone(), Some(task.id.clone()));
             let outcome = run_turn(
                 &mut transcript,
-                model.provider.as_ref(),
+                provider.as_ref(),
                 &tools,
                 &ctx,
                 &config,
@@ -314,9 +365,10 @@ async fn run_task(shared: &Arc<Shared>, task: Task, cancel: &CancellationToken) 
     };
 
     let stopped = shared.works.stopped.lock().unwrap().contains(&task.id);
+    let halted = shared.works.halted.lock().unwrap().get(&task.id).cloned();
     let (message_state, error) = match &end {
         TurnEnd::Completed => (MessageState::Complete, None),
-        TurnEnd::Cancelled if stopped || !shared.shutdown.is_cancelled() => {
+        TurnEnd::Cancelled if stopped || halted.is_some() || !shared.shutdown.is_cancelled() => {
             (MessageState::Cancelled, None)
         }
         TurnEnd::Cancelled => (MessageState::Interrupted, None),
@@ -382,20 +434,7 @@ async fn run_task(shared: &Arc<Shared>, task: Task, cancel: &CancellationToken) 
                     said.trim().to_string()
                 },
             });
-            let (task_state, note) = match report.status {
-                ReportStatus::Done => (TaskState::Review, String::new()),
-                ReportStatus::NeedsInput => (TaskState::Waiting, report.summary.clone()),
-                ReportStatus::Blocked => (TaskState::Blocked, report.summary.clone()),
-                ReportStatus::Dropped => (TaskState::Dropped, report.summary.clone()),
-            };
-            RunOutcome {
-                state: RunState::Succeeded,
-                report: Some(report),
-                error: None,
-                task_state: Some(task_state),
-                note,
-                artifacts,
-            }
+            delivered(report, artifacts)
         }
         MessageState::Interrupted => RunOutcome {
             state: RunState::Interrupted,
@@ -410,21 +449,49 @@ async fn run_task(shared: &Arc<Shared>, task: Task, cancel: &CancellationToken) 
             report: None,
             error: None,
             task_state: Some(TaskState::Blocked),
-            note: STOPPED_NOTE.into(),
+            // 人点的停止优先：看门狗和人同时停它时，按人停的算。
+            note: halted
+                .filter(|_| !stopped)
+                .unwrap_or_else(|| STOPPED_NOTE.into()),
             artifacts,
         },
-        _ => RunOutcome {
-            state: RunState::Failed,
-            report: None,
-            error: error.clone(),
-            task_state: Some(TaskState::Blocked),
-            note: error.unwrap_or_default(),
-            artifacts,
+        _ => match reported.lock().unwrap().take() {
+            // 结果已经交了，只是收尾那句话没说成（比如正好花到了上限）：按交的结果算。
+            Some(report) => delivered(report, artifacts),
+            None => RunOutcome {
+                state: RunState::Failed,
+                report: None,
+                error: error.clone(),
+                task_state: Some(TaskState::Blocked),
+                note: error.unwrap_or_default(),
+                artifacts,
+            },
         },
     };
     let (engine, run_id) = (shared.engine.clone(), run.id.clone());
     if let Err(error) = db(move || engine.finish_run(&run_id, outcome)).await {
         tracing::error!(task = %task.id, "运行结果没记上：{error}");
+    }
+}
+
+/// 运行交了结果：任务按结果里说的往下走。
+fn delivered(
+    report: Report,
+    artifacts: Option<Vec<(sa_protocol::ArtifactKind, String, String)>>,
+) -> RunOutcome {
+    let (task_state, note) = match report.status {
+        ReportStatus::Done => (TaskState::Review, String::new()),
+        ReportStatus::NeedsInput => (TaskState::Waiting, report.summary.clone()),
+        ReportStatus::Blocked => (TaskState::Blocked, report.summary.clone()),
+        ReportStatus::Dropped => (TaskState::Dropped, report.summary.clone()),
+    };
+    RunOutcome {
+        state: RunState::Succeeded,
+        report: Some(report),
+        error: None,
+        task_state: Some(task_state),
+        note,
+        artifacts,
     }
 }
 

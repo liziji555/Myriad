@@ -1,9 +1,7 @@
 //! 没有点名时由谁来接：先用程序能判断的，判断不了再问便宜的模型。
 
-use crate::room::db;
 use crate::Shared;
 use futures_util::StreamExt;
-use sa_engine::UsageRecord;
 use sa_llm::{open_with_retry, Accumulator, ChatMessage, ChatRequest, LlmError, RetryPolicy};
 use sa_protocol::{Bot, BotId, Message, ModelTier, RoomId, Sender};
 use serde::Deserialize;
@@ -84,13 +82,9 @@ async fn ask(
         session_id: None,
     };
     let mut reply = Accumulator::default();
-    let mut stream = open_with_retry(
-        model.provider.as_ref(),
-        &request,
-        cancel,
-        RetryPolicy::default(),
-    )
-    .await?;
+    let provider = crate::budget::guard(shared, model.provider.clone(), None);
+    let mut stream =
+        open_with_retry(provider.as_ref(), &request, cancel, RetryPolicy::default()).await?;
     let failure = loop {
         let event = tokio::select! {
             biased;
@@ -104,19 +98,7 @@ async fn ask(
         }
     };
     if let Some(usage) = reply.usage {
-        let record = UsageRecord {
-            room_id: room_id.clone(),
-            bot_id: None,
-            session_id: None,
-            model: model.model.clone(),
-            in_tokens: usage.input_tokens as i64,
-            out_tokens: usage.output_tokens as i64,
-            cached_tokens: usage.cached_tokens as i64,
-        };
-        let engine = shared.engine.clone();
-        if let Err(error) = db(move || engine.record_usage(record)).await {
-            tracing::error!(room = %room_id, "路由的用量没记上：{error}");
-        }
+        crate::budget::record(shared, room_id, None, None, &model.model, usage).await;
     }
     match failure {
         Some(error) => Err(error),

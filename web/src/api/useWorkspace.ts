@@ -32,6 +32,7 @@ import type {
   Message,
   MessageDelta,
   MessageRef,
+  NoticeId,
   Room,
   RoomActivity,
   RoomId,
@@ -86,6 +87,8 @@ export interface WorkspaceView extends Workspace {
   sendMessage(roomId: RoomId, content: string): Promise<void>;
   stopReply(roomId: RoomId): Promise<void>;
   decideApproval(id: ApprovalId, decision: ApprovalDecision): Promise<void>;
+  /** 收起一条提醒。 */
+  dismissNotice(id: NoticeId): Promise<void>;
 }
 
 const SNAPSHOT_RETRY_MS = 2000;
@@ -152,9 +155,13 @@ export function useWorkspace(): WorkspaceView {
 
     const loadSnapshot = async (mine: number) => {
       try {
-        const [rooms, bots] = await Promise.all([api.listRooms(), api.listBots()]);
+        const [rooms, bots, notices] = await Promise.all([
+          api.listRooms(),
+          api.listBots(),
+          api.listNotices(),
+        ]);
         if (closed || mine !== generation) return;
-        setWorkspace((buffered ?? []).reduce(applyEvent, { rooms, bots }));
+        setWorkspace((buffered ?? []).reduce(applyEvent, { rooms, bots, notices }));
         buffered = null;
         setPhase("ready");
       } catch (error) {
@@ -307,6 +314,19 @@ export function useWorkspace(): WorkspaceView {
     await api.decideApproval(id, decision);
   }, []);
 
+  const dismissNotice = useCallback(async (id: NoticeId) => {
+    const notice = await api.dismissNotice(id);
+    setWorkspace((current) =>
+      applyEvent(current, {
+        seq: 0,
+        room_id: notice.room_id,
+        kind: "notice.updated",
+        payload: notice,
+        created_at: 0,
+      }),
+    );
+  }, []);
+
   return {
     ...workspace,
     phase,
@@ -322,5 +342,6 @@ export function useWorkspace(): WorkspaceView {
     sendMessage,
     stopReply,
     decideApproval,
+    dismissNotice,
   };
 }

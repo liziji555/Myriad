@@ -3,6 +3,7 @@
 //! 约定：所有状态变更都经过这里，并且「改状态」和「记事件」在同一个事务里。
 //! 这一层不调用模型、不发 HTTP。
 
+mod budget;
 mod messages;
 mod rules;
 mod tasks;
@@ -18,6 +19,7 @@ use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{broadcast, watch};
 
+pub use budget::{micros_to_cost, NewNotice, TaskSpend, UsageBreakdown};
 pub use messages::UsageRecord;
 pub use sa_store::tasks::Workdir;
 pub use tasks::{

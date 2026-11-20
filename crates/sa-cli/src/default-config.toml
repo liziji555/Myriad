@@ -29,10 +29,20 @@ mid = { provider = "deepseek", model = "deepseek-flash" }
 strong = { provider = "deepseek", model = "deepseek-v4-pro" }
 
 [budget]
-# 每天的花费上限。注意：这个版本还不会按它拦截模型调用，花费请在模型服务的控制台里看；
-# 预算守卫做好之后，到了上限会停止调用模型。
+# 所有房间加起来每天最多花多少。到了上限，模型调用暂停到第二天（本机时间零点）；花到 80% 时提醒一次。
+# 0 表示不限。
 daily_limit = 50.0
+# 一个任务最多花多少。到了上限任务会停下等你：让它继续就是再给它一份额度。0 表示不限。
+task_limit = 10.0
 currency = "CNY"
+
+[prices]
+# 算花费用的价格：每一百万 token 多少钱，单位同上。
+# 下面的数不是哪家的真实价格，是故意偏高的占位：请按你用的模型服务的价目表改，
+# 否则算出来的花费偏高，会比实际更早到上限。cached_input 是命中缓存的输入，不写就和 input 一样。
+default = { input = 10.0, cached_input = 10.0, output = 30.0 }
+# 给某个模型单独定价，名字和 [tiers] 里的 model 一样：
+# "deepseek-flash" = { input = 1.0, cached_input = 0.1, output = 2.0 }
 
 [github]
 # 任务里的 Bot 开 PR 用（每次都要你批准）。令牌放在环境变量里，不写进这个文件；

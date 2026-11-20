@@ -218,7 +218,18 @@ pub(crate) async fn wait<F: Future<Output = ()>>(
             .task_runs(&task.id)?
             .iter()
             .any(|run| run.state == RunState::Running);
-        if !running && (interrupted || !matches!(now.state, TaskState::Open | TaskState::Working)) {
+        // 结束了也先把还没打印的步骤打印完再走：任务可能在两次查看之间就做完了。
+        let done =
+            !running && (interrupted || !matches!(now.state, TaskState::Open | TaskState::Working));
+        if !done
+            && !running
+            && now.state == TaskState::Open
+            && app.orchestrator.daily_limit_reached().await
+        {
+            writeln!(
+                out,
+                "今天的花费到上限了，任务先排着队。明天运行 sa serve 时它会自动开工；也可以调高 config.toml 里 [budget] 的 daily_limit。"
+            )?;
             return Ok(now);
         }
         let page = app.engine.list_messages(&now.room_id, None, 50)?;
@@ -269,6 +280,9 @@ pub(crate) async fn wait<F: Future<Output = ()>>(
                     writeln!(out, "  这张审批卡已经过期或者处理过了。")?;
                 }
             }
+        }
+        if done {
+            return Ok(now);
         }
         tokio::select! {
             _ = tokio::time::sleep(Duration::from_millis(100)) => {}

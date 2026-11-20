@@ -40,6 +40,12 @@ pub enum EventKind {
     /// 任务的一次运行开始或结束了。payload 是完整的 [`crate::Run`]。
     #[serde(rename = "run.updated")]
     RunUpdated,
+    /// 多了一条给人看的提醒。payload 是完整的 [`crate::Notice`]。
+    #[serde(rename = "notice.created")]
+    NoticeCreated,
+    /// 提醒被人收起来了。payload 是完整的 [`crate::Notice`]。
+    #[serde(rename = "notice.updated")]
+    NoticeUpdated,
 }
 
 impl EventKind {
@@ -57,6 +63,8 @@ impl EventKind {
             Self::TaskCreated => "task.created",
             Self::TaskUpdated => "task.updated",
             Self::RunUpdated => "run.updated",
+            Self::NoticeCreated => "notice.created",
+            Self::NoticeUpdated => "notice.updated",
         }
     }
 
@@ -74,6 +82,8 @@ impl EventKind {
             "task.created" => Some(Self::TaskCreated),
             "task.updated" => Some(Self::TaskUpdated),
             "run.updated" => Some(Self::RunUpdated),
+            "notice.created" => Some(Self::NoticeCreated),
+            "notice.updated" => Some(Self::NoticeUpdated),
             _ => None,
         }
     }
@@ -119,6 +129,8 @@ mod tests {
             EventKind::MessageUpdated,
             EventKind::TaskCreated,
             EventKind::TaskUpdated,
+            EventKind::NoticeCreated,
+            EventKind::NoticeUpdated,
             EventKind::RunUpdated,
         ] {
             assert_eq!(EventKind::parse(kind.as_str()), Some(kind));

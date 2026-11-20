@@ -10,6 +10,8 @@ import type {
   Health,
   Message,
   MessagePage,
+  Notice,
+  NoticeId,
   Room,
   RoomId,
   StopResponse,
@@ -19,6 +21,7 @@ import type {
   TaskId,
   UpdateBotRequest,
   UpdateRoomRequest,
+  UsageSummary,
 } from "./types";
 
 export class ApiRequestError extends Error {
@@ -107,4 +110,10 @@ export const api = {
     postJson<Task>(taskPath(taskId, "reject"), { note }),
   stopTask: (taskId: TaskId) => postJson<StopResponse>(taskPath(taskId, "stop"), {}),
   cancelTask: (taskId: TaskId) => postJson<Task>(taskPath(taskId, "cancel"), {}),
+  /** 今天和最近几天花了多少。 */
+  usage: () => request<UsageSummary>("/api/usage"),
+  /** 还没收起来的提醒，新的在前。 */
+  listNotices: () => request<Notice[]>("/api/notices"),
+  dismissNotice: (id: NoticeId) =>
+    postJson<Notice>(`/api/notices/${encodeURIComponent(id)}/dismiss`, {}),
 };

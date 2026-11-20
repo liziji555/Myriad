@@ -212,6 +212,26 @@ pub fn source(conn: &Connection, id: &TaskId) -> Result<Option<String>> {
     Ok(source.flatten().filter(|source| !source.is_empty()))
 }
 
+/// 人上一次让任务继续时它已经花了多少。
+pub fn spend_floor(conn: &Connection, id: &TaskId) -> Result<i64> {
+    Ok(conn
+        .query_row(
+            "SELECT spend_floor FROM tasks WHERE id = ?1",
+            [id.as_str()],
+            |row| row.get(0),
+        )
+        .optional()?
+        .unwrap_or(0))
+}
+
+pub fn set_spend_floor(conn: &Connection, id: &TaskId, floor: i64) -> Result<()> {
+    conn.execute(
+        "UPDATE tasks SET spend_floor = ?2 WHERE id = ?1",
+        params![id.as_str(), floor],
+    )?;
+    Ok(())
+}
+
 /// 记下（或清掉）任务的工作目录。清掉时「在哪个工作目录里开的」留着。
 pub fn set_workdir(conn: &Connection, id: &TaskId, workdir: Option<&Workdir>) -> Result<()> {
     conn.execute(
@@ -326,6 +346,16 @@ pub fn list_running(conn: &Connection) -> Result<Vec<Run>> {
     ))?;
     let rows = stmt.query_map([], read_run)?;
     rows.map(|row| row?).collect()
+}
+
+/// `since` 之后结束的运行里，`(失败的, 成功和失败加起来的)` 各有几次。被停下和被中断的不算。
+pub fn run_counts_since(conn: &Connection, since: i64) -> Result<(i64, i64)> {
+    Ok(conn.query_row(
+        "SELECT COALESCE(SUM(state = 'failed'), 0), COUNT(*) FROM runs
+         WHERE ended_at >= ?1 AND state IN ('succeeded', 'failed')",
+        [since],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?)
 }
 
 fn report_to_json(report: Option<&Report>) -> Option<String> {

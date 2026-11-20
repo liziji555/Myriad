@@ -2,8 +2,10 @@ import { useEffect, useState } from "react";
 import { api } from "./api/client";
 import type { RoomId, TaskId } from "./api/types";
 import { useWorkspace } from "./api/useWorkspace";
+import { noticesFor } from "./api/workspace";
 import { Composer } from "./components/Composer";
 import { ContextPanel, type ActivityNode, type PanelTab } from "./components/ContextPanel";
+import { Notices } from "./components/Notices";
 import { RoomHeader } from "./components/RoomHeader";
 import { Sidebar } from "./components/Sidebar";
 import { Timeline } from "./components/Timeline";
@@ -129,6 +131,15 @@ function Shell() {
               onShowMembers={() => showPanel("members")}
               onTogglePanel={() => setPanelOpen((open) => !open)}
             />
+            <Notices
+              notices={noticesFor(workspace.notices, room.id)}
+              onDismiss={workspace.dismissNotice}
+              onShowTask={(taskId) => {
+                setFocusTask(taskId);
+                showPanel("tasks");
+              }}
+              onShowUsage={() => showPanel("usage")}
+            />
             <Timeline
               key={room.id}
               chat={roomChat}
@@ -188,6 +199,7 @@ function Shell() {
           focusTask={focusTask}
           onFocusTask={setFocusTask}
           activity={demoNodes}
+          usageKey={workspace.notices.length}
         />
       )}
     </div>

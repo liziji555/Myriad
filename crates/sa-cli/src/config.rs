@@ -17,7 +17,31 @@ pub struct Config {
     /// 开 PR 用。老的配置文件里没有这一节，用默认值。
     #[serde(default)]
     pub github: GitHub,
+    /// 各个模型每一百万 token 多少钱，算花费用。`default` 是没有单独写的模型的价格。
+    /// 老的配置文件里没有这一节，用内置的偏高的价格。
+    #[serde(default)]
+    pub prices: BTreeMap<String, Price>,
 }
+
+/// 一个模型的价格：每一百万 token 多少钱，单位是 `[budget]` 的货币。
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Price {
+    pub input: f64,
+    /// 命中缓存的输入。不写就和 `input` 一样。
+    pub cached_input: Option<f64>,
+    pub output: f64,
+}
+
+/// 配置里没有写价格时用的：故意偏高，宁可早一点停下。
+pub const FALLBACK_PRICE: Price = Price {
+    input: 10.0,
+    cached_input: None,
+    output: 30.0,
+};
+
+/// 一个任务默认最多花多少。
+pub const DEFAULT_TASK_LIMIT: f64 = 10.0;
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -92,8 +116,16 @@ pub const MIN_CONTEXT_WINDOW: usize = 16_000;
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Budget {
+    /// 所有房间加起来每天最多花多少。0 表示不限。
     pub daily_limit: f64,
+    /// 一个任务最多花多少。0 表示不限。老的配置文件里没有这一项。
+    #[serde(default = "default_task_limit")]
+    pub task_limit: f64,
     pub currency: String,
+}
+
+fn default_task_limit() -> f64 {
+    DEFAULT_TASK_LIMIT
 }
 
 impl Config {
@@ -165,11 +197,61 @@ impl Config {
                 }
             }
         }
-        let limit = self.budget.daily_limit;
-        if !limit.is_finite() || limit < 0.0 {
-            bail!("[budget] 的 daily_limit 必须是不小于 0 的数字");
+        for (name, limit) in [
+            ("daily_limit", self.budget.daily_limit),
+            ("task_limit", self.budget.task_limit),
+        ] {
+            if !limit.is_finite() || limit < 0.0 {
+                bail!("[budget] 的 {name} 必须是不小于 0 的数字");
+            }
+        }
+        for (model, price) in &self.prices {
+            let amounts = [price.input, price.cached_input.unwrap_or(0.0), price.output];
+            if amounts.iter().any(|n| !n.is_finite() || *n < 0.0) {
+                bail!("[prices] 里 {model} 的价格必须是不小于 0 的数字");
+            }
         }
         Ok(())
+    }
+}
+
+impl Config {
+    /// 花费的上限和价格，交给编排层用。
+    pub fn budget(&self) -> sa_orchestrator::Budget {
+        let price = |price: &Price| sa_orchestrator::Price {
+            input: price.input,
+            cached_input: price.cached_input.unwrap_or(price.input),
+            output: price.output,
+        };
+        sa_orchestrator::Budget {
+            currency: self.budget.currency.clone(),
+            daily_limit: self.budget.daily_limit,
+            task_limit: self.budget.task_limit,
+            default_price: price(self.prices.get("default").unwrap_or(&FALLBACK_PRICE)),
+            prices: self
+                .prices
+                .iter()
+                .filter(|(model, _)| model.as_str() != "default")
+                .map(|(model, value)| (model.clone(), price(value)))
+                .collect(),
+        }
+    }
+
+    /// 启动时告诉人现在的上限是多少。
+    pub fn budget_notice(&self) -> String {
+        let currency = &self.budget.currency;
+        let show = |limit: f64| {
+            if limit > 0.0 {
+                format!("{limit} {currency}")
+            } else {
+                "不限".to_string()
+            }
+        };
+        format!(
+            "花费上限：每天 {}，每个任务 {}。花费按 config.toml 里 [prices] 的价格估算，和模型服务实际扣的钱可能有出入。",
+            show(self.budget.daily_limit),
+            show(self.budget.task_limit)
+        )
     }
 }
 
@@ -281,5 +363,60 @@ mod tests {
         );
         std::fs::write(&path, "not toml [").unwrap();
         assert!(Config::load_or_default(&path).is_err());
+    }
+
+    #[test]
+    fn configs_written_before_budgets_were_enforced_still_load() {
+        // M4 及以前生成的配置：[budget] 里没有 task_limit，也没有 [prices]。
+        let start = DEFAULT_CONFIG_TOML.find("[prices]").unwrap();
+        let end = DEFAULT_CONFIG_TOML.find("[github]").unwrap();
+        let old = format!(
+            "{}{}",
+            &DEFAULT_CONFIG_TOML[..start],
+            &DEFAULT_CONFIG_TOML[end..]
+        )
+        .replace("task_limit = 10.0\n", "");
+        assert!(!old.contains("task_limit") && !old.contains("[prices]"));
+        let config = Config::parse(&old).unwrap();
+        assert_eq!(config.budget.task_limit, DEFAULT_TASK_LIMIT);
+        let budget = config.budget();
+        assert_eq!(budget.daily_limit, 50.0);
+        assert_eq!(budget.default_price.input, FALLBACK_PRICE.input);
+        assert_eq!(budget.default_price.cached_input, FALLBACK_PRICE.input);
+        assert!(budget.prices.is_empty());
+    }
+
+    #[test]
+    fn prices_are_per_model_with_a_default_and_checked() {
+        let text = DEFAULT_CONFIG_TOML.replace(
+            r#"# "deepseek-flash" = { input = 1.0, cached_input = 0.1, output = 2.0 }"#,
+            r#""deepseek-flash" = { input = 1.0, output = 2.0 }"#,
+        );
+        let budget = Config::parse(&text).unwrap().budget();
+        assert_eq!(budget.task_limit, 10.0);
+        assert_eq!(budget.default_price.output, 30.0);
+        let flash = budget.prices["deepseek-flash"];
+        assert_eq!(
+            (flash.input, flash.cached_input, flash.output),
+            (1.0, 1.0, 2.0)
+        );
+        assert!(!budget.prices.contains_key("default"));
+
+        let negative = text.replace("output = 2.0", "output = -2.0");
+        let error = Config::parse(&negative).unwrap_err().to_string();
+        assert!(error.contains("deepseek-flash"), "{error}");
+        let negative = DEFAULT_CONFIG_TOML.replace("task_limit = 10.0", "task_limit = -1");
+        let error = Config::parse(&negative).unwrap_err().to_string();
+        assert!(error.contains("task_limit"), "{error}");
+    }
+
+    #[test]
+    fn the_startup_notice_states_the_limits() {
+        let config = Config::parse(DEFAULT_CONFIG_TOML).unwrap();
+        let notice = config.budget_notice();
+        assert!(notice.contains("每天 50 CNY，每个任务 10 CNY"), "{notice}");
+        let unlimited = DEFAULT_CONFIG_TOML.replace("daily_limit = 50.0", "daily_limit = 0");
+        let notice = Config::parse(&unlimited).unwrap().budget_notice();
+        assert!(notice.contains("每天 不限"), "{notice}");
     }
 }
