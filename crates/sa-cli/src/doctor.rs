@@ -121,6 +121,8 @@ fn check_api_keys(config: &Config, env: &dyn Fn(&str) -> Option<String>) -> Vec<
     config
         .providers
         .iter()
+        // 没有档位在用的模型服务不需要密钥。
+        .filter(|(name, _)| config.tiers.iter().any(|(_, tier)| &tier.provider == *name))
         .map(|(name, provider)| {
             let var = &provider.api_key_env;
             match env(var) {
@@ -248,6 +250,25 @@ mod tests {
             .filter(|n| n.starts_with(".doctor-"))
             .collect();
         assert!(leftovers.is_empty(), "试写文件没有清理：{leftovers:?}");
+    }
+
+    #[test]
+    fn only_providers_in_use_need_a_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = data_dir(&dir);
+        std::fs::create_dir_all(data_dir.root()).unwrap();
+        let config = format!(
+            "{}\n[providers.spare]\nkind = \"openai_compat\"\nbase_url = \"https://example.com/v1\"\napi_key_env = \"SPARE_KEY\"\n",
+            config_with_free_port()
+        );
+        std::fs::write(data_dir.config(), config).unwrap();
+        let checks = collect(&data_dir, &|name| {
+            (name == "DEEPSEEK_API_KEY").then(|| "sk-test".to_string())
+        });
+        let keys: Vec<_> = checks.iter().filter(|c| c.name == "模型密钥").collect();
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].status, Status::Ok);
+        assert!(keys[0].detail.contains("deepseek"));
     }
 
     #[test]
