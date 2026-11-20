@@ -96,6 +96,7 @@ impl App {
             max_steps: MAX_STEPS,
             allow_private_network: false,
             approval_timeout: sa_orchestrator::DEFAULT_APPROVAL_TIMEOUT,
+            work_dir: data_dir.work(),
         };
         tune(&mut settings);
         let orchestrator = Arc::new(Orchestrator::new(engine.clone(), models, settings));
@@ -122,6 +123,10 @@ pub fn open_state(data_dir: &DataDir) -> Result<(Arc<Engine>, std::fs::File)> {
     let interrupted = engine.recover_interrupted()?;
     if interrupted > 0 {
         tracing::info!("上次退出时有 {interrupted} 条回复没写完，已标记为中断");
+    }
+    let runs = engine.recover_runs()?;
+    if runs > 0 {
+        tracing::info!("上次退出时有 {runs} 个任务没做完，会接着做");
     }
     Ok((engine, lock))
 }

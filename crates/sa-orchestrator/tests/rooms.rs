@@ -74,6 +74,7 @@ fn build(
         max_steps: 6,
         allow_private_network: false,
         approval_timeout,
+        work_dir: data.join("work"),
     };
     Rig {
         orchestrator: Orchestrator::new(engine.clone(), models, settings),
@@ -965,6 +966,7 @@ fn team(dir: &Path, router: Vec<MockReply>, bots: Vec<MockReply>) -> Team {
         max_steps: 6,
         allow_private_network: false,
         approval_timeout: Duration::from_secs(600),
+        work_dir: data.join("work"),
     };
     let models = Arc::new(Tiered {
         router: router.clone(),

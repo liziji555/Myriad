@@ -10,9 +10,11 @@ mod ask;
 mod episode;
 mod room;
 mod router;
+mod work;
 mod workdir;
 
 pub use episode::{MAX_BOT_TURNS, MAX_HOP, MAX_PAIR_ASKS};
+pub use work::MAX_PARALLEL_RUNS;
 
 use episode::Episode;
 use sa_engine::{Engine, EngineError};
@@ -30,6 +32,7 @@ use tokio_util::sync::CancellationToken;
 
 const DEFAULT_PROMPT: &str = include_str!("../prompts/chat.md");
 const TEAM_RULES: &str = include_str!("../prompts/team.md");
+const WORK_PROMPT: &str = include_str!("../prompts/work.md");
 
 /// 一个档位实际用哪个模型。
 #[derive(Clone)]
@@ -60,6 +63,8 @@ pub struct Settings {
     pub allow_private_network: bool,
     /// 审批卡等多久没人处理就按拒绝算。
     pub approval_timeout: Duration,
+    /// 任务的独立工作目录放在哪。
+    pub work_dir: PathBuf,
 }
 
 /// 审批卡默认等 10 分钟。
@@ -71,6 +76,9 @@ pub enum OrchestratorError {
     Engine(#[from] EngineError),
     #[error("服务正在关闭")]
     ShuttingDown,
+    /// 现在做不了（比如任务的改动带不回工作目录）。文字是给人看的原因。
+    #[error("{0}")]
+    Conflict(String),
 }
 
 pub struct Orchestrator {
@@ -87,6 +95,8 @@ pub(crate) struct Shared {
     pub shutdown: CancellationToken,
     /// 正在等人答复的审批。
     pub approvals: Mutex<HashMap<ApprovalId, oneshot::Sender<ApprovalDecision>>>,
+    /// 正在跑的任务。
+    pub works: work::Works,
 }
 
 struct RoomHandle {
@@ -128,6 +138,7 @@ impl Orchestrator {
                 settings,
                 shutdown: CancellationToken::new(),
                 approvals: Mutex::new(HashMap::new()),
+                works: work::Works::default(),
             }),
             rooms: Mutex::new(HashMap::new()),
         }
@@ -215,6 +226,7 @@ impl Orchestrator {
         for handle in handles {
             let _ = handle.task.await;
         }
+        work::shutdown(&self.shared).await;
     }
 
     fn wake(&self, room_id: &RoomId) {
@@ -277,6 +289,20 @@ pub(crate) fn render_prompt(settings: &Settings, bot: &Bot, others: &[Bot]) -> S
             prompt = format!("{}\n\n{block}", prompt.trim_end());
         }
     }
+    prompt.trim_end().to_string() + "\n"
+}
+
+/// 这个 Bot 在任务的工作会话里的系统提示词。`fence` 是任务的独立目录。
+pub(crate) fn render_work_prompt(bot: &Bot, fence: &Fence) -> String {
+    let persona = if bot.persona.is_empty() {
+        String::new()
+    } else {
+        format!("你的分工和人设：\n{}", bot.persona)
+    };
+    let prompt = WORK_PROMPT
+        .replace("{bot_name}", &bot.name)
+        .replace("{workspace}", &fence.root_display())
+        .replace("{persona}", &persona);
     prompt.trim_end().to_string() + "\n"
 }
 
