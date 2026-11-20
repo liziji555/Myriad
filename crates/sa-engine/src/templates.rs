@@ -443,7 +443,8 @@ mod tests {
                 members: vec!["A".into(), "B".into()],
             }),
         };
-        let cases: Vec<(&str, Box<dyn Fn(&mut TeamTemplate)>)> = vec![
+        type Spoil = Box<dyn Fn(&mut TeamTemplate)>;
+        let cases: Vec<(&str, Spoil)> = vec![
             ("版本", Box::new(|t| t.version = 2)),
             ("都叫", Box::new(|t| t.bots[1].name = " a ".into())),
             (

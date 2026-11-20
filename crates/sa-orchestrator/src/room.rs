@@ -188,47 +188,6 @@ fn trim_outputs(steps: &mut [ToolStep]) {
     }
 }
 
-#[cfg(test)]
-mod output_tests {
-    use super::*;
-
-    fn step(output: Option<String>) -> ToolStep {
-        ToolStep {
-            id: "c".into(),
-            tool: "shell".into(),
-            title: "执行".into(),
-            state: StepState::Ok,
-            approval: None,
-            output,
-        }
-    }
-
-    #[test]
-    fn a_step_keeps_a_short_result_and_cuts_a_long_one() {
-        assert_eq!(step_output("  \n"), None);
-        assert_eq!(step_output("好了\n\n").as_deref(), Some("好了"));
-        let long = step_output(&"字".repeat(MAX_STEP_OUTPUT_CHARS + 5)).unwrap();
-        assert!(long.starts_with(&"字".repeat(MAX_STEP_OUTPUT_CHARS)));
-        assert!(long.ends_with("（后面的没有留在这里）"));
-        let exact = "字".repeat(MAX_STEP_OUTPUT_CHARS);
-        assert_eq!(step_output(&exact).as_deref(), Some(exact.as_str()));
-    }
-
-    #[test]
-    fn a_reply_with_many_steps_drops_the_oldest_results_first() {
-        let full = "x".repeat(MAX_STEP_OUTPUT_CHARS);
-        let count = MAX_MESSAGE_OUTPUT_CHARS / MAX_STEP_OUTPUT_CHARS;
-        let mut steps: Vec<ToolStep> = (0..count + 2).map(|_| step(Some(full.clone()))).collect();
-        trim_outputs(&mut steps);
-        assert!(steps[0].output.is_none() && steps[1].output.is_none());
-        assert!(steps[2..].iter().all(|step| step.output.is_some()));
-        // 没超的不动。
-        let mut few = vec![step(Some(full.clone())), step(None)];
-        trim_outputs(&mut few);
-        assert!(few[0].output.is_some());
-    }
-}
-
 /// 留底时记工具的哪些参数。写文件、改文件只记是哪个文件：内容在文件里，不往审计里抄一份。
 fn audit_arguments(tool: &str, arguments: &str) -> String {
     if !matches!(tool, "write" | "edit") {
@@ -1065,5 +1024,46 @@ fn rule_key(tool: &str, input: &Value, fence: &Fence) -> Option<String> {
             Some(real.display().to_string())
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod output_tests {
+    use super::*;
+
+    fn step(output: Option<String>) -> ToolStep {
+        ToolStep {
+            id: "c".into(),
+            tool: "shell".into(),
+            title: "执行".into(),
+            state: StepState::Ok,
+            approval: None,
+            output,
+        }
+    }
+
+    #[test]
+    fn a_step_keeps_a_short_result_and_cuts_a_long_one() {
+        assert_eq!(step_output("  \n"), None);
+        assert_eq!(step_output("好了\n\n").as_deref(), Some("好了"));
+        let long = step_output(&"字".repeat(MAX_STEP_OUTPUT_CHARS + 5)).unwrap();
+        assert!(long.starts_with(&"字".repeat(MAX_STEP_OUTPUT_CHARS)));
+        assert!(long.ends_with("（后面的没有留在这里）"));
+        let exact = "字".repeat(MAX_STEP_OUTPUT_CHARS);
+        assert_eq!(step_output(&exact).as_deref(), Some(exact.as_str()));
+    }
+
+    #[test]
+    fn a_reply_with_many_steps_drops_the_oldest_results_first() {
+        let full = "x".repeat(MAX_STEP_OUTPUT_CHARS);
+        let count = MAX_MESSAGE_OUTPUT_CHARS / MAX_STEP_OUTPUT_CHARS;
+        let mut steps: Vec<ToolStep> = (0..count + 2).map(|_| step(Some(full.clone()))).collect();
+        trim_outputs(&mut steps);
+        assert!(steps[0].output.is_none() && steps[1].output.is_none());
+        assert!(steps[2..].iter().all(|step| step.output.is_some()));
+        // 没超的不动。
+        let mut few = vec![step(Some(full.clone())), step(None)];
+        trim_outputs(&mut few);
+        assert!(few[0].output.is_some());
     }
 }
