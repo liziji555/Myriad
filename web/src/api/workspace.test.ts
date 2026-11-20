@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { Bot, Event, Room } from "./types";
-import { applyEvent, emptyWorkspace } from "./workspace";
+import type { Bot, Event, Notice, Room } from "./types";
+import { applyEvent, emptyWorkspace, noticesFor } from "./workspace";
 
 const bot: Bot = {
   id: "bot_1",
@@ -71,5 +71,38 @@ describe("applyEvent", () => {
     const snapshot = structuredClone(before);
     applyEvent(before, event(2, "room.created", room("room_2", "助理")));
     expect(before).toEqual(snapshot);
+  });
+});
+
+describe("notices", () => {
+  const notice = (id: string, created_at: number, room_id: string | null = null): Notice => ({
+    id,
+    kind: "budget",
+    level: "warning",
+    room_id,
+    task_id: null,
+    text: "今天的花费到上限了",
+    created_at,
+    dismissed_at: null,
+  });
+
+  it("keeps the newest first and does not duplicate a replayed notice", () => {
+    let state = applyEvent(emptyWorkspace, event(1, "notice.created", notice("ntc_1", 10)));
+    state = applyEvent(state, event(2, "notice.created", notice("ntc_2", 20)));
+    state = applyEvent(state, event(1, "notice.created", notice("ntc_1", 10)));
+    expect(state.notices.map((n) => n.id)).toEqual(["ntc_2", "ntc_1"]);
+  });
+
+  it("drops a notice once it is dismissed, even if it was never seen", () => {
+    const state = applyEvent(emptyWorkspace, event(1, "notice.created", notice("ntc_1", 10)));
+    const dismissed = { ...notice("ntc_1", 10), dismissed_at: 30 };
+    expect(applyEvent(state, event(2, "notice.updated", dismissed)).notices).toEqual([]);
+    expect(applyEvent(emptyWorkspace, event(2, "notice.updated", dismissed)).notices).toEqual([]);
+  });
+
+  it("shows a room its own notices and the ones that belong to no room", () => {
+    const all = [notice("ntc_1", 10), notice("ntc_2", 20, "room_1"), notice("ntc_3", 30, "room_2")];
+    expect(noticesFor(all, "room_1").map((n) => n.id)).toEqual(["ntc_1", "ntc_2"]);
+    expect(noticesFor(all, null).map((n) => n.id)).toEqual(["ntc_1"]);
   });
 });

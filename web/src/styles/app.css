@@ -904,3 +904,128 @@ button.sa-row:hover {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+
+/* 提醒：时间线上方的一条条，可以收起。 */
+.sa-notices {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sa-space-1);
+  max-height: 30vh;
+  margin: 0;
+  padding: var(--sa-space-2) var(--sa-space-4) 0;
+  overflow-y: auto;
+  list-style: none;
+}
+.sa-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sa-space-3);
+  padding: var(--sa-space-2) var(--sa-space-3);
+  border: 1px solid var(--sa-border);
+  border-left: 3px solid var(--sa-accent);
+  border-radius: var(--sa-radius-sm);
+  background: var(--sa-hover);
+  font-size: var(--sa-text-sm);
+}
+.sa-notice[data-level="warning"] {
+  border-left-color: var(--sa-warn);
+}
+.sa-notice-text {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.sa-notice-actions {
+  display: flex;
+  flex: none;
+  gap: var(--sa-space-2);
+}
+.sa-notice-error {
+  color: var(--sa-danger);
+  font-size: var(--sa-text-sm);
+}
+
+/* 右栏的「用量」页。 */
+.sa-usage {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sa-space-4);
+  padding: var(--sa-space-3) var(--sa-space-4);
+}
+.sa-usage-headline {
+  margin: 0 0 var(--sa-space-2);
+  font-weight: 600;
+}
+.sa-usage-today[data-level="near"] .sa-usage-headline {
+  color: var(--sa-warn);
+}
+.sa-usage-today[data-level="over"] .sa-usage-headline {
+  color: var(--sa-danger);
+}
+.sa-usage-bar,
+.sa-usage-day-bar {
+  display: block;
+  height: 6px;
+  border-radius: var(--sa-radius-pill);
+  background: var(--sa-hover);
+  overflow: hidden;
+}
+.sa-usage-bar > span,
+.sa-usage-day-bar > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--sa-accent);
+}
+.sa-usage-today[data-level="near"] .sa-usage-bar > span {
+  background: var(--sa-warn);
+}
+.sa-usage-today[data-level="over"] .sa-usage-bar > span {
+  background: var(--sa-danger);
+}
+.sa-usage-note,
+.sa-usage-stale,
+.sa-usage-detail {
+  margin: var(--sa-space-2) 0 0;
+  color: var(--sa-fg-muted);
+  font-size: var(--sa-text-sm);
+}
+.sa-usage-stale {
+  margin: 0;
+  color: var(--sa-warn);
+}
+.sa-usage-title {
+  margin: 0 0 var(--sa-space-2);
+  font-size: var(--sa-text-xs);
+  font-weight: 600;
+  color: var(--sa-fg-faint);
+}
+.sa-usage-days,
+.sa-usage-rows {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sa-space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.sa-usage-day {
+  display: grid;
+  grid-template-columns: 5.5em minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--sa-space-2);
+}
+.sa-usage-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  column-gap: var(--sa-space-2);
+}
+.sa-usage-detail {
+  grid-column: 1 / -1;
+  margin: 0;
+}
+.sa-usage-amount {
+  font-variant-numeric: tabular-nums;
+  font-size: var(--sa-text-sm);
+}
