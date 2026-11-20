@@ -37,7 +37,7 @@
   --sa-active: color-mix(in srgb, var(--sa-fg) 10%, transparent);
 
   --sa-sidebar-width: 248px;
-  --sa-panel-width: 340px;
+  --sa-panel-width: 360px;
   --sa-motion: 0.15s ease-out;
 
   --light-color: var(--sa-accent);

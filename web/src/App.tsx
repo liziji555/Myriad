@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type CSSProperties } from "react";
+import { loadLayout, saveLayout, type Layout } from "./api/layout";
 import { STATE_LABEL } from "./api/tasks";
 import { api } from "./api/client";
 import type { RoomId, TaskId } from "./api/types";
@@ -27,6 +28,13 @@ function Shell() {
   const [selected, setSelected] = useState<RoomId | null>(null);
   const [tab, setTab] = useState<PanelTab>("tasks");
   const [panelOpen, setPanelOpen] = useState(true);
+  const [layout, setLayout] = useState(loadLayout);
+  const changeLayout = (patch: Partial<Layout>) =>
+    setLayout((current) => {
+      const next = { ...current, ...patch };
+      saveLayout(next);
+      return next;
+    });
   const [focusTask, setFocusTask] = useState<TaskId | null>(null);
   const [demoNodes, setDemoNodes] = useState<ActivityNode[]>([]);
   const [version, setVersion] = useState("");
@@ -185,6 +193,12 @@ function Shell() {
           tabAction("audit", "看审计日志：谁批准了什么、做了什么"),
           tabAction("activity", "看任务图"),
           {
+            id: "action:toggle-sidebar",
+            group: "action" as const,
+            title: layout.sidebarCollapsed ? "展开左边的房间列表" : "收起左边的房间列表",
+            run: () => changeLayout({ sidebarCollapsed: !layout.sidebarCollapsed }),
+          },
+          {
             id: "action:toggle-panel",
             group: "action" as const,
             title: panelOpen ? "收起右侧栏" : "展开右侧栏",
@@ -205,7 +219,13 @@ function Shell() {
   ];
 
   return (
-    <div className="sa-shell" data-panel-open={panelOpen}>
+    <div
+      className="sa-shell"
+      data-panel-open={panelOpen}
+      // 没有房间时左栏总是开着：新建房间的入口在那里。
+      data-sidebar={layout.sidebarCollapsed && room ? "collapsed" : "open"}
+      style={{ "--sa-panel-width": `${layout.panelWidth}px` } as CSSProperties}
+    >
       {paletteOpen && <CommandPalette entries={paletteEntries} onClose={() => setPaletteOpen(false)} />}
       <Sidebar
         rooms={workspace.rooms}
@@ -225,6 +245,8 @@ function Shell() {
               room={room}
               memberCount={members.length}
               panelOpen={panelOpen}
+              sidebarCollapsed={layout.sidebarCollapsed}
+              onToggleSidebar={() => changeLayout({ sidebarCollapsed: !layout.sidebarCollapsed })}
               onShowMembers={() => showPanel("members")}
               onTogglePanel={() => setPanelOpen((open) => !open)}
             />
@@ -287,6 +309,8 @@ function Shell() {
           tab={tab}
           onTab={setTab}
           onClose={() => setPanelOpen(false)}
+          width={layout.panelWidth}
+          onResize={(panelWidth) => changeLayout({ panelWidth })}
           room={room}
           members={members}
           bots={workspace.bots}

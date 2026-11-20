@@ -59,6 +59,16 @@ code {
 .sa-shell[data-panel-open="false"] .sa-panel {
   display: none;
 }
+/* 左栏收起：这一列整个不要，中间自动变宽。 */
+.sa-shell[data-sidebar="collapsed"] {
+  grid-template-columns: minmax(0, 1fr) var(--sa-panel-width);
+}
+.sa-shell[data-sidebar="collapsed"][data-panel-open="false"] {
+  grid-template-columns: minmax(0, 1fr);
+}
+.sa-shell[data-sidebar="collapsed"] .sa-sidebar {
+  display: none;
+}
 
 .sa-gate {
   display: grid;
@@ -472,11 +482,25 @@ button.sa-row:hover {
 
 /* ---- 右栏 ---------------------------------------------------------------- */
 .sa-panel {
+  position: relative;
   display: flex;
   flex-direction: column;
   min-height: 0;
   background: var(--sa-bg);
   border-left: 1px solid var(--sa-border);
+}
+/* 右栏左边那条可以拖的线。 */
+.sa-panel-resizer {
+  position: absolute;
+  inset: 0 auto 0 -3px;
+  width: 6px;
+  cursor: col-resize;
+  touch-action: none;
+  z-index: 1;
+}
+.sa-panel-resizer:hover,
+.sa-panel-resizer:focus-visible {
+  background: color-mix(in srgb, var(--sa-accent) 40%, transparent);
 }
 .sa-tabs {
   display: flex;
@@ -538,6 +562,14 @@ button.sa-row:hover {
   .sa-shell,
   .sa-shell[data-panel-open="false"] {
     grid-template-columns: var(--sa-sidebar-width) minmax(0, 1fr);
+  }
+  .sa-shell[data-sidebar="collapsed"],
+  .sa-shell[data-sidebar="collapsed"][data-panel-open="false"] {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  /* 抽屉的宽度跟着屏幕走，不让拖。 */
+  .sa-panel-resizer {
+    display: none;
   }
   .sa-panel {
     position: fixed;
