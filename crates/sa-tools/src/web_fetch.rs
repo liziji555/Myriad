@@ -185,6 +185,9 @@ fn html_title(html: &str) -> Option<String> {
         inside: Cell<bool>,
         /// 标题已经取完，或者已经过了能出现标题的地方。
         done: Cell<bool>,
+        /// 现在在几层 `<svg>` / `<math>` 里面。那里面的 `<title>`、`<style>`、`<script>`
+        /// 是普通元素：不是网页标题，也不会把后面的内容变成原样文本。
+        foreign: Cell<usize>,
     }
 
     impl TokenSink for Sink {
@@ -192,6 +195,15 @@ fn html_title(html: &str) -> Option<String> {
 
         fn process_token(&self, token: Token, _line: u64) -> TokenSinkResult<()> {
             match token {
+                TagToken(tag) if matches!(&*tag.name, "svg" | "math") => {
+                    let depth = self.foreign.get();
+                    if tag.kind == EndTag {
+                        self.foreign.set(depth.saturating_sub(1));
+                    } else if !tag.self_closing {
+                        self.foreign.set(depth + 1);
+                    }
+                }
+                TagToken(_) if self.foreign.get() > 0 => {}
                 TagToken(tag) if tag.kind == StartTag => match &*tag.name {
                     "title" if !self.done.get() => {
                         self.inside.set(true);
@@ -502,6 +514,15 @@ mod tests {
         assert_eq!(
             html_title("<head></head><body><svg><title>图标</title></svg></body>"),
             None
+        );
+        // SVG 里自闭合的 <style/>、<script/> 不会把后面的标题吞掉，SVG 自己的 <title> 也不算。
+        assert_eq!(
+            html_title(
+                "<head><template><svg><title>图标</title><style/><script/></svg></template>\
+                 <title>网页标题</title></head>"
+            )
+            .as_deref(),
+            Some("网页标题")
         );
     }
 
