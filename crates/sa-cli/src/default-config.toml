@@ -19,6 +19,7 @@ mid = { provider = "deepseek", model = "deepseek-flash" }
 strong = { provider = "deepseek", model = "deepseek-v4-pro" }
 
 [budget]
-# 每天的花费硬上限，到了就停止调用模型。
+# 每天的花费上限。注意：这个版本还不会按它拦截模型调用，花费请在模型服务的控制台里看；
+# 预算守卫做好之后，到了上限会停止调用模型。
 daily_limit = 50.0
 currency = "CNY"

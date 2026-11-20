@@ -1,4 +1,4 @@
-use crate::app::{init_logging, write_if_missing, App, RunArgs};
+use crate::app::{init_logging, write_if_missing, App, RunArgs, BUDGET_NOTICE};
 use crate::paths::DataDir;
 use anyhow::{Context, Result};
 use sa_server::AppState;
@@ -41,6 +41,8 @@ pub fn run(data_dir: &DataDir, args: ServeArgs) -> Result<()> {
             println!("Bot 能读取的工作目录：{}", app.workdir);
             if app.mock {
                 println!("当前用的是不联网的假模型（--mock），回复是固定规则生成的。");
+            } else {
+                println!("{BUDGET_NOTICE}");
             }
             println!("在浏览器里打开：{url}");
             println!("按 Ctrl+C 停止。");
