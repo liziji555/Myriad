@@ -8,7 +8,10 @@ mod migrate;
 
 pub mod bots;
 pub mod events;
+pub mod messages;
 pub mod rooms;
+pub mod sessions;
+pub mod usage;
 
 pub use error::StoreError;
 pub use migrate::LATEST_SCHEMA_VERSION;

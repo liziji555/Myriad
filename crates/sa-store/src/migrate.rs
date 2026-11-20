@@ -2,7 +2,10 @@ use crate::{Result, StoreError};
 use rusqlite::Connection;
 
 /// 按顺序排列的迁移脚本。已发布的脚本不能修改，只能在末尾追加。
-const MIGRATIONS: &[&str] = &[include_str!("../migrations/0001_init.sql")];
+const MIGRATIONS: &[&str] = &[
+    include_str!("../migrations/0001_init.sql"),
+    include_str!("../migrations/0002_messages.sql"),
+];
 
 pub const LATEST_SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64;
 

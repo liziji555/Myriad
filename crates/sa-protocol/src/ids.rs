@@ -44,6 +44,8 @@ macro_rules! id_type {
 
 id_type!(RoomId, "room");
 id_type!(BotId, "bot");
+id_type!(MessageId, "msg");
+id_type!(SessionId, "ses");
 
 #[cfg(test)]
 mod tests {

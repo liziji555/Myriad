@@ -1,3 +1,4 @@
+use crate::Message;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
@@ -20,4 +21,18 @@ pub struct CreateRoomRequest {
 pub struct ApiError {
     pub code: String,
     pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct PostMessageRequest {
+    pub content: String,
+}
+
+/// 一页消息，按 `seq` 升序。`has_more` 表示更早的还有。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct MessagePage {
+    pub messages: Vec<Message>,
+    pub has_more: bool,
 }

@@ -1,19 +1,33 @@
-//! 领域层：房间、Bot、事件的业务规则。
+//! 领域层：房间、Bot、消息、事件的业务规则。
 //!
 //! 约定：所有状态变更都经过这里，并且「改状态」和「记事件」在同一个事务里。
 //! 这一层不调用模型、不发 HTTP。
 
-use sa_protocol::{Bot, BotId, BotKind, Event, EventKind, Millis, ModelTier, Room, RoomId};
+mod messages;
+
+use sa_protocol::{
+    Bot, BotId, BotKind, Event, EventKind, Message, MessageDelta, MessageId, Millis, ModelTier,
+    Room, RoomId,
+};
 use sa_store::{bots, events, rooms, Store, StoreError};
+use std::collections::HashMap;
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::sync::watch;
+use tokio::sync::{broadcast, watch};
+
+pub use messages::UsageRecord;
 
 pub const MAX_ROOM_NAME_CHARS: usize = 60;
+pub const MAX_MESSAGE_CHARS: usize = 100_000;
+/// 流式片段的广播缓冲。订阅者落后超过这个数会收到 `Lagged`，应当重新取快照。
+const LIVE_BUFFER: usize = 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
     #[error("{0}")]
     Invalid(String),
+    #[error("{0}")]
+    NotFound(String),
     #[error(transparent)]
     Store(#[from] StoreError),
 }
@@ -24,6 +38,10 @@ pub struct Engine {
     store: Store,
     /// 最新事件的 seq。写入提交后更新，SSE 连接靠它被唤醒。
     head: watch::Sender<i64>,
+    /// 正在写的 Bot 消息。流式片段只改这里并广播，不逐片落库；
+    /// 步骤变化和结束时才把整条消息写回数据库。
+    drafts: Mutex<HashMap<MessageId, Message>>,
+    live: broadcast::Sender<MessageDelta>,
 }
 
 impl Engine {
@@ -32,6 +50,8 @@ impl Engine {
         Ok(Self {
             store,
             head: watch::Sender::new(head),
+            drafts: Mutex::new(HashMap::new()),
+            live: broadcast::Sender::new(LIVE_BUFFER),
         })
     }
 
@@ -76,6 +96,18 @@ impl Engine {
 
     pub fn list_bots(&self) -> Result<Vec<Bot>> {
         Ok(self.store.read(bots::list)?)
+    }
+
+    pub fn get_room(&self, id: &RoomId) -> Result<Room> {
+        self.store
+            .read(|c| rooms::get(c, id))?
+            .ok_or_else(|| EngineError::NotFound("没有这个房间".into()))
+    }
+
+    pub fn get_bot(&self, id: &BotId) -> Result<Bot> {
+        self.store
+            .read(|c| bots::get(c, id))?
+            .ok_or_else(|| EngineError::NotFound("没有这个 Bot".into()))
     }
 
     /// 新建房间。入口 Bot 取最早创建的、已启用的 Bot（没有则为空）。

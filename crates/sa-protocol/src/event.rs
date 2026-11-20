@@ -10,6 +10,12 @@ pub enum EventKind {
     RoomCreated,
     #[serde(rename = "bot.created")]
     BotCreated,
+    /// 房间里多了一条消息。payload 是完整的 [`crate::Message`]。
+    #[serde(rename = "message.created")]
+    MessageCreated,
+    /// 一条消息变了（工具步骤、状态、最终内容）。payload 是完整的 [`crate::Message`]。
+    #[serde(rename = "message.updated")]
+    MessageUpdated,
 }
 
 impl EventKind {
@@ -17,6 +23,8 @@ impl EventKind {
         match self {
             Self::RoomCreated => "room.created",
             Self::BotCreated => "bot.created",
+            Self::MessageCreated => "message.created",
+            Self::MessageUpdated => "message.updated",
         }
     }
 
@@ -24,6 +32,8 @@ impl EventKind {
         match s {
             "room.created" => Some(Self::RoomCreated),
             "bot.created" => Some(Self::BotCreated),
+            "message.created" => Some(Self::MessageCreated),
+            "message.updated" => Some(Self::MessageUpdated),
             _ => None,
         }
     }
@@ -57,7 +67,12 @@ mod tests {
 
     #[test]
     fn event_kind_round_trips_and_matches_serde() {
-        for kind in [EventKind::RoomCreated, EventKind::BotCreated] {
+        for kind in [
+            EventKind::RoomCreated,
+            EventKind::BotCreated,
+            EventKind::MessageCreated,
+            EventKind::MessageUpdated,
+        ] {
             assert_eq!(EventKind::parse(kind.as_str()), Some(kind));
             assert_eq!(
                 serde_json::to_string(&kind).unwrap(),

@@ -57,6 +57,10 @@ pub fn list(conn: &Connection) -> Result<Vec<Room>> {
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
+pub fn get(conn: &Connection, id: &RoomId) -> Result<Option<Room>> {
+    Ok(list(conn)?.into_iter().find(|room| &room.id == id))
+}
+
 pub fn count(conn: &Connection) -> Result<i64> {
     Ok(conn.query_row("SELECT COUNT(*) FROM rooms", [], |row| row.get(0))?)
 }

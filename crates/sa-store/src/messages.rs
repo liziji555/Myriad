@@ -1,0 +1,262 @@
+use crate::{Result, StoreError};
+use rusqlite::{params, Connection, OptionalExtension, Row};
+use sa_protocol::{BotId, Message, MessageId, MessageState, RoomId, Sender, ToolStep};
+
+const COLUMNS: &str =
+    "seq, id, room_id, sender_kind, sender_bot_id, content, steps_json, state, error, rev, created_at, updated_at";
+
+/// 写入一条新消息，返回数据库分配的 `seq`。传入的 `message.seq` 被忽略。
+pub fn insert(conn: &Connection, message: &Message) -> Result<i64> {
+    let (kind, bot_id) = match &message.sender {
+        Sender::User => ("user", None),
+        Sender::Bot { bot_id } => ("bot", Some(bot_id.as_str())),
+    };
+    conn.execute(
+        "INSERT INTO messages (id, room_id, sender_kind, sender_bot_id, content, steps_json, state, error, rev, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        params![
+            message.id.as_str(),
+            message.room_id.as_str(),
+            kind,
+            bot_id,
+            message.content,
+            steps_to_json(&message.steps),
+            message.state.as_str(),
+            message.error,
+            message.rev,
+            message.created_at,
+            message.updated_at
+        ],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// 用 `message` 的可变部分（内容、步骤、状态、错误、版本）覆盖已有的那一行。
+pub fn update(conn: &Connection, message: &Message) -> Result<()> {
+    let changed = conn.execute(
+        "UPDATE messages SET content = ?2, steps_json = ?3, state = ?4, error = ?5, rev = ?6, updated_at = ?7 WHERE id = ?1",
+        params![
+            message.id.as_str(),
+            message.content,
+            steps_to_json(&message.steps),
+            message.state.as_str(),
+            message.error,
+            message.rev,
+            message.updated_at
+        ],
+    )?;
+    if changed == 0 {
+        return Err(StoreError::Corrupt(format!("消息 {} 不存在", message.id)));
+    }
+    Ok(())
+}
+
+pub fn get(conn: &Connection, id: &MessageId) -> Result<Option<Message>> {
+    let row = conn
+        .query_row(
+            &format!("SELECT {COLUMNS} FROM messages WHERE id = ?1"),
+            [id.as_str()],
+            read_row,
+        )
+        .optional()?;
+    row.transpose()
+}
+
+/// 房间里 `seq` 小于 `before` 的最近 `limit` 条，按 `seq` 升序返回。
+pub fn list_before(
+    conn: &Connection,
+    room_id: &RoomId,
+    before: Option<i64>,
+    limit: u32,
+) -> Result<Vec<Message>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {COLUMNS} FROM messages WHERE room_id = ?1 AND seq < ?2 ORDER BY seq DESC LIMIT ?3"
+    ))?;
+    let rows = stmt.query_map(
+        params![room_id.as_str(), before.unwrap_or(i64::MAX), limit],
+        read_row,
+    )?;
+    let mut messages = rows.map(|row| row?).collect::<Result<Vec<_>>>()?;
+    messages.reverse();
+    Ok(messages)
+}
+
+/// 房间里 `seq` 大于 `after` 的、人发的消息，按 `seq` 升序。
+pub fn list_user_after(conn: &Connection, room_id: &RoomId, after: i64) -> Result<Vec<Message>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {COLUMNS} FROM messages WHERE room_id = ?1 AND seq > ?2 AND sender_kind = 'user' ORDER BY seq"
+    ))?;
+    let rows = stmt.query_map(params![room_id.as_str(), after], read_row)?;
+    rows.map(|row| row?).collect()
+}
+
+/// 所有还停在某个状态的消息。
+pub fn list_in_state(conn: &Connection, state: MessageState) -> Result<Vec<Message>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {COLUMNS} FROM messages WHERE state = ?1 ORDER BY seq"
+    ))?;
+    let rows = stmt.query_map([state.as_str()], read_row)?;
+    rows.map(|row| row?).collect()
+}
+
+fn steps_to_json(steps: &[ToolStep]) -> String {
+    serde_json::to_string(steps).expect("步骤总能序列化成 JSON")
+}
+
+fn read_row(row: &Row<'_>) -> rusqlite::Result<Result<Message>> {
+    let seq: i64 = row.get(0)?;
+    let id: String = row.get(1)?;
+    let sender_kind: String = row.get(3)?;
+    let sender_bot_id: Option<String> = row.get(4)?;
+    let steps_json: String = row.get(6)?;
+    let state: String = row.get(7)?;
+    let message = (|| {
+        let sender = match (sender_kind.as_str(), sender_bot_id) {
+            ("user", _) => Sender::User,
+            // Bot 被删掉后 sender_bot_id 变空，消息仍然保留。
+            ("bot", bot_id) => Sender::Bot {
+                bot_id: BotId::from(bot_id.unwrap_or_default()),
+            },
+            (other, _) => {
+                return Err(StoreError::Corrupt(format!(
+                    "消息 {id} 的发送者类型未知：{other}"
+                )))
+            }
+        };
+        let steps = serde_json::from_str(&steps_json)
+            .map_err(|e| StoreError::Corrupt(format!("消息 {id} 的步骤不是合法 JSON：{e}")))?;
+        let state = MessageState::parse(&state)
+            .ok_or_else(|| StoreError::Corrupt(format!("消息 {id} 的状态未知：{state}")))?;
+        Ok((sender, steps, state))
+    })();
+    let (sender, steps, state) = match message {
+        Ok(parts) => parts,
+        Err(e) => return Ok(Err(e)),
+    };
+    Ok(Ok(Message {
+        id: MessageId::from(id),
+        seq,
+        room_id: RoomId::from(row.get::<_, String>(2)?),
+        sender,
+        content: row.get(5)?,
+        steps,
+        state,
+        error: row.get(8)?,
+        rev: row.get(9)?,
+        created_at: row.get(10)?,
+        updated_at: row.get(11)?,
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{bots, rooms, Store};
+    use sa_protocol::{Bot, BotKind, ModelTier, Room, StepState};
+
+    fn seed(store: &Store) -> (RoomId, BotId) {
+        let bot = Bot {
+            id: BotId::new(),
+            name: "助手".into(),
+            kind: BotKind::Assistant,
+            tier: ModelTier::Mid,
+            enabled: true,
+            created_at: 1,
+        };
+        let room = Room {
+            id: RoomId::new(),
+            name: "房间".into(),
+            host_bot_id: Some(bot.id.clone()),
+            member_bot_ids: vec![bot.id.clone()],
+            created_at: 1,
+            updated_at: 1,
+        };
+        store
+            .write(|tx| {
+                bots::insert(tx, &bot)?;
+                rooms::insert(tx, &room)
+            })
+            .unwrap();
+        (room.id, bot.id)
+    }
+
+    fn message(room_id: &RoomId, sender: Sender, content: &str) -> Message {
+        Message {
+            id: MessageId::new(),
+            seq: 0,
+            room_id: room_id.clone(),
+            sender,
+            content: content.into(),
+            steps: vec![],
+            state: MessageState::Complete,
+            error: None,
+            rev: 0,
+            created_at: 5,
+            updated_at: 5,
+        }
+    }
+
+    #[test]
+    fn insert_update_and_page_backwards() {
+        let store = Store::open_in_memory().unwrap();
+        let (room, bot) = seed(&store);
+        let mut seqs = vec![];
+        for i in 0..5 {
+            let m = message(&room, Sender::User, &format!("第 {i} 条"));
+            seqs.push(store.write(|tx| insert(tx, &m)).unwrap());
+        }
+        assert!(seqs.windows(2).all(|w| w[0] < w[1]));
+
+        let latest = store.read(|c| list_before(c, &room, None, 2)).unwrap();
+        assert_eq!(
+            latest.iter().map(|m| m.seq).collect::<Vec<_>>(),
+            seqs[3..].to_vec()
+        );
+        let older = store
+            .read(|c| list_before(c, &room, Some(seqs[3]), 10))
+            .unwrap();
+        assert_eq!(
+            older.iter().map(|m| m.seq).collect::<Vec<_>>(),
+            seqs[..3].to_vec()
+        );
+
+        let mut reply = message(&room, Sender::Bot { bot_id: bot }, "");
+        reply.state = MessageState::Streaming;
+        store.write(|tx| insert(tx, &reply)).unwrap();
+        reply.content = "好的".into();
+        reply.state = MessageState::Complete;
+        reply.rev = 3;
+        reply.steps = vec![ToolStep {
+            id: "call_1".into(),
+            tool: "read".into(),
+            title: "读取 a.txt".into(),
+            state: StepState::Ok,
+        }];
+        store.write(|tx| update(tx, &reply)).unwrap();
+        let stored = store.read(|c| get(c, &reply.id)).unwrap().unwrap();
+        assert_eq!(stored.content, "好的");
+        assert_eq!(stored.steps, reply.steps);
+        assert_eq!(stored.rev, 3);
+        assert_eq!(stored.sender, reply.sender);
+
+        assert_eq!(
+            store
+                .read(|c| list_user_after(c, &room, seqs[2]))
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(store
+            .read(|c| list_in_state(c, MessageState::Streaming))
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn update_of_missing_message_is_an_error() {
+        let store = Store::open_in_memory().unwrap();
+        let (room, _) = seed(&store);
+        let ghost = message(&room, Sender::User, "x");
+        assert!(store.write(|tx| update(tx, &ghost)).is_err());
+    }
+}
