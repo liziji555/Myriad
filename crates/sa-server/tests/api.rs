@@ -504,7 +504,7 @@ async fn slow_stream_readers_are_told_to_resync() {
     let stream = app.clone().oneshot(get("/api/events")).await.unwrap();
 
     // 没人读的时候塞进远超缓冲区的片段。
-    let draft = engine.begin_bot_message(&room.id, &bot.id).unwrap();
+    let draft = engine.begin_bot_message(&room.id, &bot.id, 0).unwrap();
     for _ in 0..5000 {
         engine.append_delta(&draft.id, "字");
     }

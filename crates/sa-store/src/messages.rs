@@ -3,7 +3,7 @@ use rusqlite::{params, Connection, OptionalExtension, Row};
 use sa_protocol::{BotId, Message, MessageId, MessageState, RoomId, Sender, ToolStep};
 
 const COLUMNS: &str =
-    "seq, id, room_id, sender_kind, sender_bot_id, content, steps_json, state, error, rev, created_at, updated_at";
+    "seq, id, room_id, sender_kind, sender_bot_id, content, steps_json, state, error, rev, created_at, updated_at, mentions_json, hop";
 
 /// 写入一条新消息，返回数据库分配的 `seq`。传入的 `message.seq` 被忽略。
 pub fn insert(conn: &Connection, message: &Message) -> Result<i64> {
@@ -12,8 +12,8 @@ pub fn insert(conn: &Connection, message: &Message) -> Result<i64> {
         Sender::Bot { bot_id } => ("bot", Some(bot_id.as_str())),
     };
     conn.execute(
-        "INSERT INTO messages (id, room_id, sender_kind, sender_bot_id, content, steps_json, state, error, rev, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        "INSERT INTO messages (id, room_id, sender_kind, sender_bot_id, content, steps_json, state, error, rev, created_at, updated_at, mentions_json, hop)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         params![
             message.id.as_str(),
             message.room_id.as_str(),
@@ -25,7 +25,9 @@ pub fn insert(conn: &Connection, message: &Message) -> Result<i64> {
             message.error,
             message.rev,
             message.created_at,
-            message.updated_at
+            message.updated_at,
+            serde_json::to_string(&message.mentions).expect("Bot id 列表总能序列化成 JSON"),
+            message.hop
         ],
     )?;
     Ok(conn.last_insert_rowid())
@@ -90,6 +92,20 @@ pub fn list_user_after(conn: &Connection, room_id: &RoomId, after: i64) -> Resul
     rows.map(|row| row?).collect()
 }
 
+/// 房间里 `seq` 大于 `after` 的全部消息（人和 Bot 的都算），按 `seq` 升序。
+pub fn list_after(conn: &Connection, room_id: &RoomId, after: i64) -> Result<Vec<Message>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {COLUMNS} FROM messages WHERE room_id = ?1 AND seq > ?2 ORDER BY seq"
+    ))?;
+    let rows = stmt.query_map(params![room_id.as_str(), after], read_row)?;
+    rows.map(|row| row?).collect()
+}
+
+/// 删掉一条消息。返回是否真的删了。
+pub fn delete(conn: &Connection, id: &MessageId) -> Result<bool> {
+    Ok(conn.execute("DELETE FROM messages WHERE id = ?1", [id.as_str()])? > 0)
+}
+
 /// 所有还停在某个状态的消息。
 pub fn list_in_state(conn: &Connection, state: MessageState) -> Result<Vec<Message>> {
     let mut stmt = conn.prepare(&format!(
@@ -110,6 +126,7 @@ fn read_row(row: &Row<'_>) -> rusqlite::Result<Result<Message>> {
     let sender_bot_id: Option<String> = row.get(4)?;
     let steps_json: String = row.get(6)?;
     let state: String = row.get(7)?;
+    let mentions_json: String = row.get(12)?;
     let message = (|| {
         let sender = match (sender_kind.as_str(), sender_bot_id) {
             ("user", _) => Sender::User,
@@ -127,9 +144,11 @@ fn read_row(row: &Row<'_>) -> rusqlite::Result<Result<Message>> {
             .map_err(|e| StoreError::Corrupt(format!("消息 {id} 的步骤不是合法 JSON：{e}")))?;
         let state = MessageState::parse(&state)
             .ok_or_else(|| StoreError::Corrupt(format!("消息 {id} 的状态未知：{state}")))?;
-        Ok((sender, steps, state))
+        let mentions = serde_json::from_str(&mentions_json)
+            .map_err(|e| StoreError::Corrupt(format!("消息 {id} 的点名不是合法 JSON：{e}")))?;
+        Ok((sender, steps, state, mentions))
     })();
-    let (sender, steps, state) = match message {
+    let (sender, steps, state, mentions) = match message {
         Ok(parts) => parts,
         Err(e) => return Ok(Err(e)),
     };
@@ -139,6 +158,8 @@ fn read_row(row: &Row<'_>) -> rusqlite::Result<Result<Message>> {
         room_id: RoomId::from(row.get::<_, String>(2)?),
         sender,
         content: row.get(5)?,
+        mentions,
+        hop: row.get(13)?,
         steps,
         state,
         error: row.get(8)?,
@@ -160,6 +181,7 @@ mod tests {
             name: "助手".into(),
             kind: BotKind::Assistant,
             tier: ModelTier::Mid,
+            persona: String::new(),
             enabled: true,
             created_at: 1,
         };
@@ -187,6 +209,8 @@ mod tests {
             room_id: room_id.clone(),
             sender,
             content: content.into(),
+            mentions: vec![],
+            hop: 0,
             steps: vec![],
             state: MessageState::Complete,
             error: None,

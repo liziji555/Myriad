@@ -1,4 +1,4 @@
-use crate::{ApprovalDecision, Message};
+use crate::{ApprovalDecision, BotId, Message, ModelTier};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
@@ -48,4 +48,48 @@ pub struct StopResponse {
 #[ts(export)]
 pub struct DecideApprovalRequest {
     pub decision: ApprovalDecision,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct CreateBotRequest {
+    pub name: String,
+    /// 不给就是 `mid`。
+    #[serde(default)]
+    #[ts(optional)]
+    pub tier: Option<ModelTier>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub persona: Option<String>,
+}
+
+/// 只改给出的字段。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct UpdateBotRequest {
+    #[serde(default)]
+    #[ts(optional)]
+    pub name: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub tier: Option<ModelTier>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub persona: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub enabled: Option<bool>,
+}
+
+/// 只改给出的字段。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct UpdateRoomRequest {
+    #[serde(default)]
+    #[ts(optional)]
+    pub name: Option<String>,
+    /// 新的入口 Bot，必须已经是房间成员。
+    #[serde(default)]
+    #[ts(optional)]
+    pub host_bot_id: Option<BotId>,
 }

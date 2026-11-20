@@ -10,6 +10,21 @@ pub enum EventKind {
     RoomCreated,
     #[serde(rename = "bot.created")]
     BotCreated,
+    /// Bot 的资料改了。payload 是完整的 [`crate::Bot`]。
+    #[serde(rename = "bot.updated")]
+    BotUpdated,
+    /// payload 是 [`crate::BotRef`]。
+    #[serde(rename = "bot.deleted")]
+    BotDeleted,
+    /// 房间的名字、入口 Bot 或成员变了。payload 是完整的 [`crate::Room`]。
+    #[serde(rename = "room.updated")]
+    RoomUpdated,
+    /// payload 是 [`crate::RoomActivity`]。
+    #[serde(rename = "room.activity")]
+    RoomActivity,
+    /// payload 是 [`crate::MessageRef`]。
+    #[serde(rename = "message.deleted")]
+    MessageDeleted,
     /// 房间里多了一条消息。payload 是完整的 [`crate::Message`]。
     #[serde(rename = "message.created")]
     MessageCreated,
@@ -23,6 +38,11 @@ impl EventKind {
         match self {
             Self::RoomCreated => "room.created",
             Self::BotCreated => "bot.created",
+            Self::BotUpdated => "bot.updated",
+            Self::BotDeleted => "bot.deleted",
+            Self::RoomUpdated => "room.updated",
+            Self::RoomActivity => "room.activity",
+            Self::MessageDeleted => "message.deleted",
             Self::MessageCreated => "message.created",
             Self::MessageUpdated => "message.updated",
         }
@@ -32,6 +52,11 @@ impl EventKind {
         match s {
             "room.created" => Some(Self::RoomCreated),
             "bot.created" => Some(Self::BotCreated),
+            "bot.updated" => Some(Self::BotUpdated),
+            "bot.deleted" => Some(Self::BotDeleted),
+            "room.updated" => Some(Self::RoomUpdated),
+            "room.activity" => Some(Self::RoomActivity),
+            "message.deleted" => Some(Self::MessageDeleted),
             "message.created" => Some(Self::MessageCreated),
             "message.updated" => Some(Self::MessageUpdated),
             _ => None,
@@ -70,6 +95,11 @@ mod tests {
         for kind in [
             EventKind::RoomCreated,
             EventKind::BotCreated,
+            EventKind::BotUpdated,
+            EventKind::BotDeleted,
+            EventKind::RoomUpdated,
+            EventKind::RoomActivity,
+            EventKind::MessageDeleted,
             EventKind::MessageCreated,
             EventKind::MessageUpdated,
         ] {

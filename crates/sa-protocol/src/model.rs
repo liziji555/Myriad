@@ -59,6 +59,9 @@ pub struct Bot {
     pub name: String,
     pub kind: BotKind,
     pub tier: ModelTier,
+    /// 这个 Bot 的人设和分工，接在系统提示词后面。可以为空。
+    #[serde(default)]
+    pub persona: String,
     pub enabled: bool,
     #[ts(type = "number")]
     pub created_at: Millis,
@@ -187,6 +190,12 @@ pub struct Message {
     pub room_id: RoomId,
     pub sender: Sender,
     pub content: String,
+    /// 这条消息点名了哪些 Bot（人写的 `@名字`，或者 Bot 用 `ask_bot` 找的那一个）。
+    #[serde(default)]
+    pub mentions: Vec<BotId>,
+    /// Bot 之间转了几手：人发的是 0，被人叫到的 Bot 回的是 0，它再去找别的 Bot 是 1，依此类推。
+    #[serde(default)]
+    pub hop: u32,
     pub steps: Vec<ToolStep>,
     pub state: MessageState,
     pub error: Option<String>,
@@ -197,6 +206,33 @@ pub struct Message {
     pub created_at: Millis,
     #[ts(type = "number")]
     pub updated_at: Millis,
+}
+
+/// 房间里现在谁在说话、谁在排队。两个都空表示这一轮交流结束了。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct RoomActivity {
+    pub room_id: RoomId,
+    pub speaking: Option<BotId>,
+    pub queued: Vec<BotId>,
+    /// 房间已经处理到哪条消息（`seq`）。发消息的人据此判断自己那条有没有被处理完。
+    #[ts(type = "number")]
+    pub handled_seq: i64,
+}
+
+/// 一条被撤掉的消息（Bot 决定不说话时，它那条空的回复会被撤掉）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct MessageRef {
+    pub id: MessageId,
+    pub room_id: RoomId,
+}
+
+/// 一个被删掉的 Bot。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct BotRef {
+    pub id: BotId,
 }
 
 /// 流式输出的一小段文字。不落库，只在事件流里即时转发；`rev` 是追加之后的版本号。

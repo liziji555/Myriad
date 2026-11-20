@@ -3,4 +3,8 @@ import type { BotId } from "./BotId";
 import type { BotKind } from "./BotKind";
 import type { ModelTier } from "./ModelTier";
 
-export type Bot = { id: BotId, name: string, kind: BotKind, tier: ModelTier, enabled: boolean, created_at: number, };
+export type Bot = { id: BotId, name: string, kind: BotKind, tier: ModelTier, 
+/**
+ * 这个 Bot 的人设和分工，接在系统提示词后面。可以为空。
+ */
+persona: string, enabled: boolean, created_at: number, };

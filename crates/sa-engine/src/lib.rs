@@ -5,6 +5,7 @@
 
 mod messages;
 mod rules;
+mod team;
 
 use sa_protocol::{
     Bot, BotId, BotKind, Event, EventKind, Message, MessageDelta, MessageId, Millis, ModelTier,
@@ -17,6 +18,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{broadcast, watch};
 
 pub use messages::UsageRecord;
+pub use team::{find_mentions, BotPatch, MAX_BOT_NAME_CHARS, MAX_PERSONA_CHARS, MAX_ROOM_MEMBERS};
 
 pub const MAX_ROOM_NAME_CHARS: usize = 60;
 pub const MAX_MESSAGE_CHARS: usize = 100_000;
@@ -68,6 +70,7 @@ impl Engine {
                 name: "助手".into(),
                 kind: BotKind::Assistant,
                 tier: ModelTier::Mid,
+                persona: String::new(),
                 enabled: true,
                 created_at: now,
             };

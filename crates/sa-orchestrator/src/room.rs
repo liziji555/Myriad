@@ -105,7 +105,7 @@ async fn turn(
 
     let engine = shared.engine.clone();
     let (room, bot_id) = (room_id.clone(), bot.id.clone());
-    let draft = db(move || engine.begin_bot_message(&room, &bot_id))
+    let draft = db(move || engine.begin_bot_message(&room, &bot_id, 0))
         .await
         .map_err(|e| e.to_string())?;
 
@@ -219,7 +219,7 @@ async fn fail_fast(shared: &Arc<Shared>, room_id: &RoomId, bot: &Bot, reason: St
     let engine = shared.engine.clone();
     let (room, bot_id) = (room_id.clone(), bot.id.clone());
     let result = db(move || {
-        let draft = engine.begin_bot_message(&room, &bot_id)?;
+        let draft = engine.begin_bot_message(&room, &bot_id, 0)?;
         engine.finish_message(&draft.id, MessageState::Failed, Some(reason))
     })
     .await;
