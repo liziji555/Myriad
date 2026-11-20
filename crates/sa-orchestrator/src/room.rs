@@ -126,6 +126,11 @@ async fn turn(
                 max_tokens: None,
                 thinking: model.thinking,
                 session_id: Some(session_id.to_string()),
+                spill_dir: shared
+                    .settings
+                    .sessions_dir
+                    .parent()
+                    .map(|d| d.join("spill")),
                 retry: RetryPolicy::default(),
             };
             let mut ctx = ToolCtx::new(shared.settings.fence.clone());

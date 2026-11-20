@@ -27,6 +27,8 @@ pub struct TurnConfig {
     pub thinking: Option<bool>,
     /// 会话 ID，原样带在每次模型请求上。
     pub session_id: Option<String>,
+    /// 工具结果太长被截断时，完整内容存到这个目录里。`None` 表示不存。
+    pub spill_dir: Option<std::path::PathBuf>,
     pub retry: RetryPolicy,
 }
 
@@ -227,7 +229,15 @@ impl Turn {
                 });
             }
 
-            let results = run_tools(&calls, tools, tool_ctx, observer, cancel).await;
+            let results = run_tools(
+                &calls,
+                tools,
+                tool_ctx,
+                config.spill_dir.as_deref(),
+                observer,
+                cancel,
+            )
+            .await;
             let cancelled = results.iter().any(Option::is_none);
             for (call, result) in calls.iter().zip(results) {
                 let (content, is_error) = match result {
@@ -301,6 +311,7 @@ async fn run_tools(
     calls: &[ToolCall],
     tools: &ToolRegistry,
     ctx: &ToolCtx,
+    spill_dir: Option<&std::path::Path>,
     observer: &dyn Observer,
     cancel: &CancellationToken,
 ) -> Vec<Option<Result<String, String>>> {
@@ -319,7 +330,16 @@ async fn run_tools(
             }
         }
         let batch = stream::iter(start..end)
-            .map(|index| run_one(&calls[index], &prepared[index], &ctx, observer, cancel))
+            .map(|index| {
+                run_one(
+                    &calls[index],
+                    &prepared[index],
+                    &ctx,
+                    spill_dir,
+                    observer,
+                    cancel,
+                )
+            })
             .buffered(MAX_PARALLEL_TOOLS)
             .collect::<Vec<_>>()
             .await;
@@ -375,6 +395,7 @@ async fn run_one(
     call: &ToolCall,
     prepared: &Prepared,
     ctx: &ToolCtx,
+    spill_dir: Option<&std::path::Path>,
     observer: &dyn Observer,
     cancel: &CancellationToken,
 ) -> Option<Result<String, String>> {
@@ -404,10 +425,11 @@ async fn run_one(
                         }
                     }
                 }
-                tool.call(input.clone(), ctx)
-                    .await
-                    .map(|text| clip(&text, tool.max_result_chars()))
-                    .map_err(|e| clip(&e.0, tool.max_result_chars()))
+                let max = tool.max_result_chars();
+                match tool.call(input.clone(), ctx).await {
+                    Ok(text) => Ok(clip_and_spill(text, max, spill_dir, &call.id).await),
+                    Err(e) => Err(clip_and_spill(e.0, max, spill_dir, &call.id).await),
+                }
             };
             tokio::select! {
                 biased;
@@ -420,6 +442,42 @@ async fn run_one(
         .tool_finished(&call.id, matches!(result, Some(Ok(_))))
         .await;
     result
+}
+
+/// 超长的结果截短后交给模型，完整内容另存一份，并在结果末尾注明存在哪。
+async fn clip_and_spill(
+    text: String,
+    max_chars: usize,
+    spill_dir: Option<&std::path::Path>,
+    call_id: &str,
+) -> String {
+    let clipped = clip(&text, max_chars);
+    let Some(dir) = spill_dir.filter(|_| clipped.len() != text.len()) else {
+        return clipped;
+    };
+    // 文件名里只留安全的字符；加上时间，同一个调用 id 出现两次也不会互相覆盖。
+    let safe: String = call_id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+        .take(40)
+        .collect();
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_micros());
+    let name = format!("{stamp}-{safe}.txt");
+    let path = dir.join(&name);
+    let dir = dir.to_path_buf();
+    let saved = tokio::task::spawn_blocking(move || {
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(&path, text)
+    })
+    .await;
+    match saved {
+        Ok(Ok(())) => {
+            format!("{clipped}\n\n（完整结果已另存为 spill/{name}，用户可以在数据目录里查看。）")
+        }
+        _ => clipped,
+    }
 }
 
 /// 超长的结果保留开头和结尾，中间换成一句说明。
@@ -624,6 +682,7 @@ mod tests {
                 max_tokens: None,
                 thinking: None,
                 session_id: Some("ses_test".into()),
+                spill_dir: None,
                 retry: RetryPolicy {
                     max_retries: 2,
                     base_delay: Duration::from_millis(1),
@@ -968,6 +1027,61 @@ mod tests {
             // 没批准的那次，工具一次都没跑：只有 c3 跑过。
             assert_eq!(rig.peak.load(Ordering::SeqCst), 1);
         }
+    }
+
+    /// 结果太长：交给模型的是截短的，完整内容另存一份。
+    #[tokio::test]
+    async fn long_results_are_clipped_and_the_full_text_is_spilled() {
+        let mut rig = rig();
+        let spill = rig._dir.path().join("spill");
+        rig.config.spill_dir = Some(spill.clone());
+        let provider = MockProvider::scripted([
+            MockReply::tool_calls(
+                "",
+                &[
+                    ("c/../1", "serial", r#"{"long":true}"#),
+                    ("c2", "serial", r#"{"tag":"短"}"#),
+                ],
+            ),
+            MockReply::text("好"),
+        ]);
+        let outcome = rig
+            .turn(
+                &provider,
+                vec![vec![says("跑", 1)]],
+                &Recorder::default(),
+                &CancellationToken::new(),
+            )
+            .await;
+
+        assert_eq!(outcome.end, TurnEnd::Completed);
+        let results = rig.tool_results();
+        assert!(
+            results[0].0.contains("中间省略了 150 字"),
+            "{}",
+            results[0].0
+        );
+        assert!(
+            results[0].0.contains("完整结果已另存为 spill/"),
+            "{}",
+            results[0].0
+        );
+        assert_eq!(results[1].0, "结果 短");
+        // 只有被截断的那个结果存了文件；文件名里没有路径分隔符，内容是完整的。
+        let files: Vec<_> = std::fs::read_dir(&spill)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        assert_eq!(files.len(), 1, "{files:?}");
+        assert!(files[0]
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .ends_with("-c1.txt"));
+        assert_eq!(
+            std::fs::read_to_string(&files[0]).unwrap(),
+            "长".repeat(200)
+        );
     }
 
     /// 等人批准时点了停止：不再等，调用按取消收尾。
