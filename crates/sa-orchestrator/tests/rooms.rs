@@ -752,11 +752,15 @@ async fn long_conversation_is_compacted_and_survives_a_restart() {
     rig.orchestrator.shutdown().await;
 }
 
-/// 压缩不了又放不下：回复标成失败，原因写清楚，房间还能继续用。
+/// 一条消息就超过了窗口，压缩又失败：回复标成失败，原因写清楚。之后房间还能继续用。
 #[tokio::test]
-async fn context_limit_is_reported_on_the_message() {
+async fn context_limit_is_reported_and_the_room_recovers() {
     let dir = tempfile::tempdir().unwrap();
-    let replies = vec![MockReply::text("不会用到")];
+    let replies = vec![
+        MockReply::Fail(sa_llm::LlmError::BadRequest("太长".into())),
+        MockReply::text("用户贴了一大段文字。"),
+        MockReply::text("现在可以了"),
+    ];
     let rig = build(
         dir.path(),
         replies,
@@ -772,9 +776,19 @@ async fn context_limit_is_reported_on_the_message() {
         reply.error.as_deref().unwrap().contains("对话太长"),
         "{reply:?}"
     );
-    // 刚发的话不会被压缩成摘要，也没有别的可压缩：不白调模型。
-    assert!(reply.steps.is_empty(), "{reply:?}");
-    assert!(rig.provider.requests().is_empty());
+    assert_eq!(reply.steps[0].state, StepState::Error);
+    assert_eq!(rig.provider.requests().len(), 1);
+
+    // 那条放不下的消息不会永远卡在会话里：下一轮把它压缩掉，短消息照常得到回复。
+    rig.say("换个短的问题").await;
+    let reply = rig.settled(4).await.pop().unwrap();
+    assert_eq!(reply.state, MessageState::Complete, "{reply:?}");
+    assert_eq!(reply.content, "现在可以了");
+    let requests = rig.provider.requests();
+    let last = &requests.last().unwrap().messages;
+    assert!(last[1].content.ends_with("用户贴了一大段文字。"));
+    assert_eq!(last.last().unwrap().content, "换个短的问题");
+    assert_eq!(last.len(), 3);
     rig.orchestrator.shutdown().await;
 }
 

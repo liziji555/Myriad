@@ -305,7 +305,17 @@ impl Turn {
             return Ok(None);
         }
         let plan = (self.compact_failures < MAX_COMPACT_FAILURES)
-            .then(|| compact::plan(transcript, limits.keep(), limits.hard))
+            .then(|| {
+                compact::plan(
+                    transcript,
+                    limits.keep(),
+                    // 人刚说的话只要不会单独把对话顶过压缩线，就原样留下。
+                    limits.threshold.saturating_sub(fixed),
+                    limits
+                        .hard
+                        .saturating_sub(compact::estimate(COMPACT_PROMPT)),
+                )
+            })
             .flatten();
         if let Some(plan) = plan {
             self.compactions += 1;

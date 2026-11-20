@@ -110,10 +110,13 @@ pub(crate) struct Plan {
 /// 决定哪些留下、哪些写成摘要。没有东西可压缩时返回 `None`。
 ///
 /// 从最新的一条往回数，在 `keep_budget` 以内的留下；切口不会落在工具调用和它的结果中间。
-/// 人刚说的、模型还没回应的话一定留下，再长也不压缩：模型要回答的是原话，不是它的摘要。
+/// 人刚说的、模型还没回应的话，只要不超过 `verbatim_budget` 就原样留下（哪怕超过 `keep_budget`）：
+/// 模型要回答的是原话，不是它的摘要。超过了就和别的条目一样处理，
+/// 否则一条放不下的消息会永远留在那里，这个会话再也发不出去。
 pub(crate) fn plan(
     transcript: &Transcript,
     keep_budget: usize,
+    verbatim_budget: usize,
     text_budget: usize,
 ) -> Option<Plan> {
     let entries = transcript.entries();
@@ -123,6 +126,9 @@ pub(crate) fn plan(
     while cut > start && matches!(entries[cut - 1].body, EntryBody::User { .. }) {
         total += estimate_entry(&entries[cut - 1].body);
         cut -= 1;
+    }
+    if total > verbatim_budget {
+        (cut, total) = (entries.len(), 0);
     }
     while cut > start {
         total += estimate_entry(&entries[cut - 1].body);
@@ -307,7 +313,7 @@ mod tests {
             user("第二个问题"),
         ]);
         // 预算只够最后一条。
-        let plan = plan(&transcript, 12, 100_000).unwrap();
+        let plan = plan(&transcript, 12, 100_000, 100_000).unwrap();
         assert_eq!(plan.kept, 1);
         assert!(
             plan.text.starts_with("【对话记录】\n用户：第一个问题\n"),
@@ -330,36 +336,41 @@ mod tests {
             result("c1b", "结果二"),
         ]);
         // 预算够最后两条结果，但它们的调用留不下：那就一条都不留。
-        let plan = plan(&transcript, 16, 100_000).unwrap();
+        let plan = plan(&transcript, 16, 100_000, 100_000).unwrap();
         assert_eq!(plan.kept, 0);
         assert!(plan.text.contains("结果二"));
     }
 
     #[test]
-    fn plan_always_keeps_what_the_user_just_said() {
+    fn plan_keeps_what_the_user_just_said_as_long_as_it_fits() {
         let (_dir, log) = transcript(vec![
             user("以前的问题"),
             says("以前的回答"),
             user(&"刚贴的一大段".repeat(500)),
             user("还有一句"),
         ]);
-        // 预算远小于刚发的这两条，它们也要原样留下。
-        let made = plan(&log, 10, 100_000).unwrap();
+        // 留存预算远小于刚发的这两条，但它们放得下：原样留下。
+        let made = plan(&log, 10, 100_000, 100_000).unwrap();
         assert_eq!(made.kept, 2);
         assert_eq!(
             made.text,
             "【对话记录】\n用户：以前的问题\n助手：以前的回答\n"
         );
+        // 放不下：和别的条目一样，只留预算以内的。
+        let made = plan(&log, 10, 1_000, 100_000).unwrap();
+        assert_eq!(made.kept, 1);
+        assert!(made.text.ends_with("刚贴的一大段\n"), "{}", made.text);
 
-        // 只有刚说的话：没有可以压缩的。
+        // 只有刚说的话：放得下就没有可以压缩的；放不下就连它一起压缩，不能卡死在那里。
         let (_dir, only) = transcript(vec![user(&"长".repeat(5_000))]);
-        assert_eq!(plan(&only, 10, 100_000), None);
+        assert_eq!(plan(&only, 10, 100_000, 100_000), None);
+        assert_eq!(plan(&only, 10, 1_000, 100_000).unwrap().kept, 0);
     }
 
     #[test]
     fn plan_has_nothing_to_do_when_everything_fits_in_the_kept_part() {
         let (_dir, transcript) = transcript(vec![user("短"), says("好")]);
-        assert_eq!(plan(&transcript, 1_000, 100_000), None);
+        assert_eq!(plan(&transcript, 1_000, 100_000, 100_000), None);
     }
 
     #[test]
@@ -375,7 +386,7 @@ mod tests {
             says("之后的回答"),
             user("最新的问题"),
         ]);
-        let plan = plan(&transcript, 10, 100_000).unwrap();
+        let plan = plan(&transcript, 10, 100_000, 100_000).unwrap();
         assert_eq!(plan.kept, 1);
         assert_eq!(
             plan.text,
