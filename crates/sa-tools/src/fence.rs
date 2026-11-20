@@ -93,23 +93,24 @@ impl Fence {
             Ok(rest) => (self.root.clone(), rest),
             Err(_) => (PathBuf::new(), joined.as_path()),
         };
-        // 走到了还不存在的地方：后面的不用（也没法）再解析。
-        let mut missing = false;
         for component in rest.components() {
             match component {
                 Component::CurDir => {}
                 Component::ParentDir => {
+                    // 和操作系统一样：文件后面不能跟 `..`。
+                    if real.exists() && !real.is_dir() {
+                        return Err(ToolError(format!(
+                            "路径 {input} 没法解析：`..` 前面的不是目录。"
+                        )));
+                    }
                     real.pop();
                 }
-                Component::Normal(name) if !missing => {
+                Component::Normal(name) => {
                     let next = real.join(name);
-                    match next.canonicalize() {
-                        Ok(resolved) => real = resolved,
-                        Err(_) => {
-                            missing = true;
-                            real = next;
-                        }
-                    }
+                    // 每一段都试着解析，不管前面有没有遇到过不存在的：
+                    // `不存在/../链接` 退回来之后，后面的链接照样要看穿。
+                    // 解析不了（还不存在）就原样接上。
+                    real = next.canonicalize().unwrap_or(next);
                 }
                 other => real.push(other),
             }
@@ -269,6 +270,22 @@ mod tests {
         let (real, inside) = fence.resolve_for_write("in/y.txt").unwrap();
         assert_eq!(real, fence.root().join("docs/y.txt"));
         assert!(inside);
+        // 先经过一段不存在的路径再退回来，后面的链接照样看穿。
+        let (real, inside) = fence.resolve_for_write("没有/../out/a.txt").unwrap();
+        assert_eq!(real, outer_real.join("elsewhere/deep/a.txt"));
+        assert!(!inside);
+        let (real, inside) = fence
+            .resolve_for_write("没有/子/../../out/../a.txt")
+            .unwrap();
+        assert_eq!(real, outer_real.join("elsewhere/a.txt"));
+        assert!(!inside);
+        // 文件后面跟 `..`：操作系统不认，这里也不认（不管是文件本身还是指向文件的链接）。
+        std::os::unix::fs::symlink(outer.path().join("elsewhere/x.txt"), root.join("file-link"))
+            .unwrap();
+        for bad in ["x.txt/../y.txt", "file-link/../y.txt", "docs/y.txt/.."] {
+            let error = fence.resolve_for_write(bad).unwrap_err();
+            assert!(error.0.contains("不是目录"), "{bad}: {error}");
+        }
         // 悬空的链接本身可以被换成普通文件；穿过它写到外面要问。
         std::os::unix::fs::symlink(outer.path().join("nowhere"), root.join("dangling")).unwrap();
         let (real, inside) = fence.resolve_for_write("dangling").unwrap();
