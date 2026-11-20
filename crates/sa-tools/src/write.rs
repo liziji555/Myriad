@@ -109,11 +109,11 @@ pub(crate) fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()>
         .parent()
         .ok_or_else(|| std::io::Error::other("路径没有上级目录"))?;
     std::fs::create_dir_all(dir)?;
-    let name = path
-        .file_name()
-        .ok_or_else(|| std::io::Error::other("路径没有文件名"))?
-        .to_string_lossy();
-    let temp = dir.join(format!(".{name}.sa-tmp-{}", uuid::Uuid::new_v4().simple()));
+    if path.file_name().is_none() {
+        return Err(std::io::Error::other("路径没有文件名"));
+    }
+    // 名字里不带目标文件名：目标的名字已经到了文件系统的长度上限时，临时文件也建得出来。
+    let temp = dir.join(format!(".sa-tmp-{}", uuid::Uuid::new_v4().simple()));
     let result = (|| {
         let mut file = std::fs::OpenOptions::new()
             .write(true)
@@ -288,6 +288,16 @@ mod tests {
             fs::read_to_string(dir.path().join("note.md")).unwrap(),
             "new"
         );
+    }
+
+    /// 文件名已经到了常见文件系统的上限（255 字节）也能写。
+    #[cfg(unix)]
+    #[test]
+    fn longest_allowed_file_names_can_be_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a".repeat(255));
+        write_atomically(&path, b"x").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "x");
     }
 
     #[tokio::test]
