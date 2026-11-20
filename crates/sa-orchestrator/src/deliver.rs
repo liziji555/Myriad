@@ -171,6 +171,14 @@ impl OpenPrTool {
         if base == delivery.branch() {
             return Err("base 不能是任务分支自己。".into());
         }
+        // PR 里显示的是推上去的东西：还没推、或者推完之后又改过，先让它推。
+        workdir::commit_and_diff(&delivery.workdir, &delivery.task.title)
+            .await
+            .map_err(|reason| format!("任务目录里的改动没能提交：{reason}"))?;
+        let sha = workdir::head(&delivery.workdir).await?;
+        if delivery.effect(delivery.push_key(&sha)).await?.is_none() {
+            return Err("任务分支上最新的改动还没有推送。先调用 git_push，再开 PR。".into());
+        }
         Ok(Plan::Open {
             repo,
             title,
@@ -239,21 +247,6 @@ impl Tool for OpenPrTool {
                 base,
             } => (repo, title, body, base),
         };
-        // PR 里显示的是推上去的东西：推完之后又改过的话，先让它再推一次。
-        workdir::commit_and_diff(&delivery.workdir, &delivery.task.title)
-            .await
-            .map_err(|reason| ToolError(format!("任务目录里的改动没能提交：{reason}")))?;
-        let sha = workdir::head(&delivery.workdir).await.map_err(ToolError)?;
-        if delivery
-            .effect(delivery.push_key(&sha))
-            .await
-            .map_err(ToolError)?
-            .is_none()
-        {
-            return Err(ToolError::new(
-                "任务分支上最新的改动还没有推送。先调用 git_push，再开 PR。",
-            ));
-        }
         let Some(github) = &delivery.shared.settings.github else {
             return Err(ToolError::new("这里没有配置 GitHub，开不了 PR。"));
         };
