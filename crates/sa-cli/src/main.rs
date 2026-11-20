@@ -5,6 +5,7 @@ mod doctor;
 mod models;
 mod paths;
 mod serve;
+mod task;
 mod team;
 
 use clap::{Parser, Subcommand};
@@ -38,6 +39,8 @@ enum Command {
         #[command(subcommand)]
         command: team::RoomCommand,
     },
+    /// 任务：列出、开任务、继续、验收、打回、取消（不能和 sa serve 同时运行）
+    Task(task::TaskArgs),
     /// 检查配置、密钥、数据库、端口是否正常
     Doctor,
 }
@@ -49,6 +52,7 @@ fn main() -> ExitCode {
         Command::Chat(args) => chat::run(&data_dir, args),
         Command::Bot { command } => team::run(&data_dir, team::Command::Bot(command)),
         Command::Room { command } => team::run(&data_dir, team::Command::Room(command)),
+        Command::Task(args) => task::run(&data_dir, args),
         Command::Doctor => Ok(doctor::run(&data_dir)),
     });
     match result {

@@ -61,7 +61,7 @@ async fn ctrl_c() {
     let _ = tokio::signal::ctrl_c().await;
 }
 
-fn pick_room(app: &App, wanted: Option<&str>) -> Result<Room> {
+pub(crate) fn pick_room(app: &App, wanted: Option<&str>) -> Result<Room> {
     let mut rooms = app.engine.list_rooms()?;
     // 按创建时间排，第一个是默认房间。
     rooms.sort_by_key(|room| (room.created_at, room.id.to_string()));

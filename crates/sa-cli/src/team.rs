@@ -217,7 +217,7 @@ fn room(engine: &Engine, command: RoomCommand, out: &mut impl Write) -> Result<(
 }
 
 /// 按名字（不分大小写）或 ID 找 Bot。
-fn find_bot(engine: &Engine, wanted: &str) -> Result<Bot> {
+pub(crate) fn find_bot(engine: &Engine, wanted: &str) -> Result<Bot> {
     let bots = engine.list_bots()?;
     let wanted = wanted.strip_prefix('@').unwrap_or(wanted);
     let names: Vec<_> = bots.iter().map(|bot| bot.name.clone()).collect();
