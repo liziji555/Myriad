@@ -67,7 +67,11 @@ export function MembersPanel({ room, members, bots, team }: Props) {
       const text = await file.text();
       summary = importSummary(await api.importTemplate({ text, update_existing: updateExisting }));
     });
-    if (done) setImported(summary);
+    if (done) {
+      setImported(summary);
+      // 「照模板改已有的」只管这一次：下一份模板要改得重新勾。
+      setUpdateExisting(false);
+    }
   };
 
   if (editing) {
@@ -225,7 +229,7 @@ export function MembersPanel({ room, members, bots, team }: Props) {
           disabled={busy}
           onChange={(event) => setUpdateExisting(event.target.checked)}
         />
-        已经有同名的 Bot 时，照模板改它的档位、分工、是否启用（不勾就不动它）
+        已经有同名的 Bot 时，照模板改它的档位、分工、是否启用（不勾就不动它；只管下一次导入）
       </label>
       {imported && (
         <p className="sa-panel-note" role="status">
