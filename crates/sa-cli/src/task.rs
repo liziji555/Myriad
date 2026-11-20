@@ -2,17 +2,18 @@
 //! 和 `sa chat` 一样直接用数据目录，所以不能和 `sa serve` 同时运行；服务开着时请在界面里操作。
 
 use crate::app::{init_logging, App, RunArgs};
-use crate::chat::pick_room;
+use crate::chat::{ctrl_c, parse_decision, pick_room, stdin_lines, Lines};
 use crate::paths::DataDir;
 use crate::team::find_bot;
 use anyhow::{bail, Result};
 use sa_engine::state_label;
 use sa_protocol::{
-    ApprovalDecision, ArtifactKind, CreateTaskRequest, MessageKind, RunState, StepState, Task,
-    TaskState,
+    ArtifactKind, CreateTaskRequest, MessageKind, RunState, StepState, Task, TaskState,
 };
 use std::collections::HashSet;
+use std::future::Future;
 use std::io::Write;
+use std::pin::Pin;
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -108,7 +109,7 @@ async fn execute(app: &App, command: TaskCommand, out: &mut impl Write) -> Resul
                     "{}  [{}]  {}",
                     task.id,
                     state_label(task.state),
-                    task.title
+                    crate::chat::printable(&task.title)
                 )?;
             }
             return Ok(ExitCode::SUCCESS);
@@ -138,7 +139,7 @@ async fn execute(app: &App, command: TaskCommand, out: &mut impl Write) -> Resul
             };
             let task = app.orchestrator.create_task(&room.id, request).await?;
             writeln!(out, "任务 {} 已经开了。", task.id)?;
-            wait(app, task, out).await?
+            wait(app, task, out, &mut stdin_lines(), std::pin::pin!(ctrl_c())).await?
         }
         TaskCommand::Resume { task, note, owner } => {
             let task = find_task(app, &task)?;
@@ -150,12 +151,12 @@ async fn execute(app: &App, command: TaskCommand, out: &mut impl Write) -> Resul
                 .orchestrator
                 .resume_task(&task.id, note.unwrap_or_default(), owner)
                 .await?;
-            wait(app, task, out).await?
+            wait(app, task, out, &mut stdin_lines(), std::pin::pin!(ctrl_c())).await?
         }
         TaskCommand::Reject { task, note } => {
             let task = find_task(app, &task)?;
             let task = app.orchestrator.reject_task(&task.id, note).await?;
-            wait(app, task, out).await?
+            wait(app, task, out, &mut stdin_lines(), std::pin::pin!(ctrl_c())).await?
         }
         TaskCommand::Accept { task } => {
             let task = find_task(app, &task)?;
@@ -198,9 +199,18 @@ fn find_task(app: &App, wanted: &str) -> Result<Task> {
     }
 }
 
-/// 等任务做到需要人处理的地方（等验收、等回答、卡住）或者结束。中间有命令要批准就在终端里问。
-async fn wait(app: &App, task: Task, out: &mut impl Write) -> Result<Task> {
+/// 等任务做到需要人处理的地方（等验收、等回答、卡住）或者结束，边等边打印它做了哪几步。
+/// 中间有命令要批准就在终端里问；`interrupt` 完成时停下任务。
+pub(crate) async fn wait<F: Future<Output = ()>>(
+    app: &App,
+    task: Task,
+    out: &mut impl Write,
+    answers: &mut Lines,
+    mut interrupt: Pin<&mut F>,
+) -> Result<Task> {
     let mut asked = HashSet::new();
+    let mut shown = HashSet::new();
+    let mut interrupted = false;
     loop {
         let now = app.engine.get_task(&task.id)?;
         let running = app
@@ -208,54 +218,86 @@ async fn wait(app: &App, task: Task, out: &mut impl Write) -> Result<Task> {
             .task_runs(&task.id)?
             .iter()
             .any(|run| run.state == RunState::Running);
-        if !running && !matches!(now.state, TaskState::Open | TaskState::Working) {
+        if !running && (interrupted || !matches!(now.state, TaskState::Open | TaskState::Working)) {
             return Ok(now);
         }
         let page = app.engine.list_messages(&now.room_id, None, 50)?;
-        let waiting = page
+        let runs = page
             .messages
             .iter()
-            .filter(|m| m.kind == MessageKind::Run && m.task_id.as_ref() == Some(&task.id))
-            .flat_map(|m| m.steps.iter())
-            .find(|step| step.state == StepState::Waiting);
-        if let Some((step, approval)) = waiting.and_then(|s| Some((s, s.approval.clone()?))) {
-            if asked.insert(approval.id.clone()) {
-                write!(
-                    out,
-                    "任务要{}（{}）。允许吗？[y/N] ",
-                    step.title, approval.reason
-                )?;
-                out.flush()?;
-                let answer = tokio::task::spawn_blocking(|| {
-                    let mut line = String::new();
-                    std::io::stdin().read_line(&mut line).map(|_| line)
-                })
-                .await??;
-                let decision = match answer.trim().to_lowercase().as_str() {
-                    "y" | "yes" | "是" => ApprovalDecision::Once,
-                    _ => ApprovalDecision::Deny,
+            .filter(|m| m.kind == MessageKind::Run && m.task_id.as_ref() == Some(&task.id));
+        for message in runs {
+            for (index, step) in message.steps.iter().enumerate() {
+                if shown.insert((message.id.clone(), index)) {
+                    writeln!(out, "  · {}", crate::chat::printable(&step.title))?;
+                }
+                let (StepState::Waiting, Some(approval)) = (step.state, &step.approval) else {
+                    continue;
                 };
-                app.orchestrator.decide(&approval.id, decision);
+                if interrupted || !asked.insert(approval.id.clone()) {
+                    continue;
+                }
+                // 提示出现之前敲的回车不算数。
+                while answers.try_recv().is_ok() {}
+                writeln!(
+                    out,
+                    "  需要你批准：{}",
+                    crate::chat::printable(&approval.reason)
+                )?;
+                write!(out, "  [y] 允许一次  [a] 总是允许  [n] 拒绝 > ")?;
+                out.flush()?;
+                let left = (approval.expires_at - sa_engine::now_ms()).max(0) as u64;
+                let decision = tokio::select! {
+                    answer = answers.recv() => {
+                        // 输入已经关了（不是人敲的回车）：自己换行。
+                        if answer.is_none() {
+                            writeln!(out)?;
+                        }
+                        parse_decision(answer.as_deref())
+                    }
+                    _ = &mut interrupt => {
+                        interrupted = true;
+                        app.orchestrator.stop_task(&task.id);
+                        continue;
+                    }
+                    _ = tokio::time::sleep(Duration::from_millis(left)) => {
+                        writeln!(out, "\n  太久没有处理，按拒绝算。")?;
+                        continue;
+                    }
+                };
+                if !app.orchestrator.decide(&approval.id, decision) {
+                    writeln!(out, "  这张审批卡已经过期或者处理过了。")?;
+                }
             }
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+            _ = &mut interrupt, if !interrupted => {
+                interrupted = true;
+                app.orchestrator.stop_task(&task.id);
+            }
+        }
     }
 }
 
-fn show(app: &App, task: &Task, out: &mut impl Write) -> Result<()> {
+pub(crate) fn show(app: &App, task: &Task, out: &mut impl Write) -> Result<()> {
     writeln!(
         out,
         "{}  [{}]  {}",
         task.id,
         state_label(task.state),
-        task.title
+        crate::chat::printable(&task.title)
     )?;
     if !task.note.is_empty() {
-        writeln!(out, "  说明：{}", task.note)?;
+        writeln!(out, "  说明：{}", crate::chat::printable(&task.note))?;
     }
-    writeln!(out, "  要做什么：{}", task.scope)?;
+    writeln!(out, "  要做什么：{}", crate::chat::printable(&task.scope))?;
     if !task.acceptance.is_empty() {
-        writeln!(out, "  验收标准：{}", task.acceptance)?;
+        writeln!(
+            out,
+            "  验收标准：{}",
+            crate::chat::printable(&task.acceptance)
+        )?;
     }
     for run in app.engine.task_runs(&task.id)? {
         let state = match run.state {
@@ -270,7 +312,12 @@ fn show(app: &App, task: &Task, out: &mut impl Write) -> Result<()> {
             (None, Some(error)) => error.clone(),
             (None, None) => String::new(),
         };
-        writeln!(out, "  第 {} 次运行（{state}）：{detail}", run.attempt)?;
+        writeln!(
+            out,
+            "  第 {} 次运行（{state}）：{}",
+            run.attempt,
+            crate::chat::printable(&detail)
+        )?;
     }
     for artifact in &task.artifacts {
         let kind = match artifact.kind {
@@ -282,7 +329,8 @@ fn show(app: &App, task: &Task, out: &mut impl Write) -> Result<()> {
         writeln!(
             out,
             "  {kind}：{}（{}）",
-            artifact.reference, artifact.summary
+            crate::chat::printable(&artifact.reference),
+            crate::chat::printable(&artifact.summary)
         )?;
     }
     match task.state {
