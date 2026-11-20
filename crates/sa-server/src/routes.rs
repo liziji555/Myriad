@@ -392,7 +392,8 @@ pub async fn import_team(
 ) -> Result<(StatusCode, Json<ImportReport>), AppError> {
     let Json(body) = body.map_err(|e| AppError::bad_request(e.body_text()))?;
     let report = blocking(&state, move |engine| {
-        engine.import_team(&sa_engine::parse_template(&body.text)?)
+        let team = sa_engine::parse_template(&body.text)?;
+        engine.import_team(&team, body.update_existing.unwrap_or(false))
     })
     .await?;
     Ok((StatusCode::CREATED, Json(report)))

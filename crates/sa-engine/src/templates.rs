@@ -1,6 +1,7 @@
 //! Bot 模板：把几个 Bot（可以连同它们所在的房间）导出成一份不带 ID、时间和密钥的描述，在别处导入。
 //!
-//! 导入是「只加不改」：已经有同名的 Bot 就跳过，不覆盖它；模板有任何一处不对，什么都不建。
+//! 导入默认「只加不改」：已经有同名的 Bot 就跳过，不覆盖它；要照模板改它们得明说（`update_existing`）。
+//! 模板有任何一处不对，什么都不建、什么都不改。
 
 use crate::{Audit, BotPatch, Engine, EngineError, Result, MAX_ROOM_MEMBERS};
 use sa_protocol::{Bot, BotId, BotTemplate, ImportReport, RoomId, RoomTemplate, TeamTemplate};
@@ -122,8 +123,11 @@ impl Engine {
         })
     }
 
-    /// 导入一份模板。已经有同名的 Bot 跳过；模板里带了房间就新建一个房间，把成员拉进去。
-    pub fn import_team(&self, team: &TeamTemplate) -> Result<ImportReport> {
+    /// 导入一份模板。模板里带了房间就新建一个房间，把成员拉进去。
+    ///
+    /// 已经有同名的 Bot：默认跳过；`update_existing` 为真时照模板改它的档位、分工、是否启用
+    /// （换一台机器时，全新数据目录里自带的「助手」就靠这个换成原来那个）。
+    pub fn import_team(&self, team: &TeamTemplate, update_existing: bool) -> Result<ImportReport> {
         let invalid = |text: String| Err(EngineError::Invalid(text));
         if team.version != TEMPLATE_VERSION {
             return invalid(format!(
@@ -179,19 +183,20 @@ impl Engine {
         for bot in &fresh {
             crate::team::check_bot(&bot.name, &bot.persona)?;
         }
-        // 全新的数据目录里自带一个「助手」。它还是出厂的样子、模板里又有同名的，就照模板改它：
-        // 不然换一台机器导入时，原来那个写好了分工的「助手」永远搬不过来。别的已有的 Bot 一律不动。
-        let stock: Vec<(&Bot, &BotTemplate)> = team
+        // 说了要改已有的：和模板不一样的才算改，一样的照旧算跳过。
+        let changed: Vec<(&Bot, &BotTemplate)> = team
             .bots
             .iter()
+            .filter(|_| update_existing)
             .filter_map(|bot| {
                 let have = existing.iter().find(|have| same(&have.name, &bot.name))?;
-                let differs =
-                    bot.tier != have.tier || bot.persona.trim() != have.persona || !bot.enabled;
-                (crate::is_untouched_default(have) && differs).then_some((have, bot))
+                let differs = bot.tier != have.tier
+                    || bot.persona.trim() != have.persona
+                    || bot.enabled != have.enabled;
+                differs.then_some((have, bot))
             })
             .collect();
-        for (_, bot) in &stock {
+        for (_, bot) in &changed {
             crate::team::check_bot(&bot.name, &bot.persona)?;
         }
         if let Some(room) = &team.room {
@@ -205,7 +210,7 @@ impl Engine {
                 .iter()
                 .filter(|bot| existing.iter().any(|have| same(&have.name, &bot.name)))
                 .filter(|bot| {
-                    !stock
+                    !changed
                         .iter()
                         .any(|(_, updated)| same(&updated.name, &bot.name))
                 })
@@ -214,7 +219,7 @@ impl Engine {
             updated: vec![],
             room: None,
         };
-        for (have, bot) in stock {
+        for (have, bot) in changed {
             let patch = BotPatch {
                 tier: Some(bot.tier),
                 persona: Some(bot.persona.clone()),
@@ -261,9 +266,9 @@ impl Engine {
             report.created.len(),
             report.skipped.len(),
             if report.updated.is_empty() {
-                ""
+                String::new()
             } else {
-                "，照模板改了自带的「助手」"
+                format!("，照模板改了 {} 个已有的", report.updated.len())
             },
             if report.room.is_some() {
                 "，新建了一个房间"
@@ -348,7 +353,7 @@ mod tests {
         // 那边已经有一个别的 Bot，新房间不能把它带进来。
         let there = engine();
         there.create_bot("Old", ModelTier::Mid, "原来就在").unwrap();
-        let report = there.import_team(&team).unwrap();
+        let report = there.import_team(&team, false).unwrap();
         assert!(report.skipped.is_empty());
         let names: Vec<&str> = report.created.iter().map(|b| b.name.as_str()).collect();
         assert_eq!(sorted(names), ["Coder", "Reviewer"]);
@@ -450,7 +455,7 @@ mod tests {
                 members: vec!["Tester".into(), "Coder".into()],
             }),
         };
-        let report = engine.import_team(&team).unwrap();
+        let report = engine.import_team(&team, false).unwrap();
         assert_eq!(report.skipped, ["Coder"]);
         assert_eq!(report.created.len(), 1);
         let kept = engine.get_bot(&mine.id).unwrap();
@@ -464,7 +469,7 @@ mod tests {
         assert!(room.member_bot_ids.contains(&mine.id));
         assert_eq!(room.host_bot_id.as_ref(), Some(&report.created[0].id));
         // 再导一次：Bot 都在了，只多一个房间。
-        let again = engine.import_team(&team).unwrap();
+        let again = engine.import_team(&team, false).unwrap();
         assert!(again.created.is_empty());
         assert_eq!(again.skipped, ["Coder", "Tester"]);
         assert_eq!(engine.list_bots().unwrap().len(), 2);
@@ -496,74 +501,68 @@ mod tests {
             .map(|b| b.id)
             .collect();
         let part = engine.export_bots(&some).unwrap();
-        engine.import_team(&part).unwrap();
+        engine.import_team(&part, false).unwrap();
     }
 
     #[test]
-    fn the_stock_assistant_of_a_fresh_install_takes_the_template_s_settings() {
+    fn existing_bots_are_only_changed_when_asked_to() {
         let team = TeamTemplate {
             version: 1,
-            bots: vec![bot("助手", ModelTier::Strong, "总管：拆任务、分给别人")],
+            bots: vec![
+                bot("助手", ModelTier::Strong, "总管：拆任务、分给别人"),
+                bot("Coder", ModelTier::Mid, "写代码"),
+            ],
             room: Some(RoomTemplate {
                 name: "搬过来的房间".into(),
                 host: Some("助手".into()),
-                members: vec!["助手".into()],
+                members: vec!["助手".into(), "Coder".into()],
             }),
         };
-        // 全新的数据目录：自带的「助手」还是出厂的样子，照模板改它。
-        let fresh = engine();
-        fresh.ensure_defaults().unwrap();
-        let stock = fresh.list_bots().unwrap().remove(0);
-        let report = fresh.import_team(&team).unwrap();
-        assert!(report.created.is_empty() && report.skipped.is_empty());
+        // 全新的数据目录里自带一个「助手」。不说要改，它原样留着。
+        let engine = engine();
+        engine.ensure_defaults().unwrap();
+        let stock = engine.list_bots().unwrap().remove(0);
+        let report = engine.import_team(&team, false).unwrap();
+        assert!(report.updated.is_empty());
+        assert_eq!(report.skipped, ["助手"]);
+        assert_eq!(engine.get_bot(&stock.id).unwrap(), stock);
+
+        // 说了要改：照模板改它的档位和分工，名字和 ID 不变；一样的那个算跳过。
+        let report = engine.import_team(&team, true).unwrap();
+        assert!(report.created.is_empty());
+        assert_eq!(report.skipped, ["Coder"]);
         assert_eq!(report.updated.len(), 1);
-        let moved = fresh.get_bot(&stock.id).unwrap();
+        let moved = engine.get_bot(&stock.id).unwrap();
         assert_eq!(moved.tier, ModelTier::Strong);
         assert_eq!(moved.persona, "总管：拆任务、分给别人");
         assert_eq!(report.room.unwrap().host_bot_id.as_ref(), Some(&stock.id));
-        // 再导一次：它已经不是出厂的样子了，不再动它。
-        let again = fresh.import_team(&team).unwrap();
-        assert!(again.updated.is_empty());
-        assert_eq!(again.skipped, ["助手"]);
-
-        // 人改过的「助手」（哪怕只是换了档位）不动。
-        let used = engine();
-        used.ensure_defaults().unwrap();
-        let mine = used.list_bots().unwrap().remove(0);
-        let patch = BotPatch {
-            tier: Some(ModelTier::Cheap),
+        let filter = AuditFilter {
+            action: Some("team.".into()),
             ..Default::default()
         };
-        used.update_bot(&mine.id, patch).unwrap();
-        let report = used.import_team(&team).unwrap();
-        assert!(report.updated.is_empty());
-        assert_eq!(report.skipped, ["助手"]);
-        assert_eq!(used.get_bot(&mine.id).unwrap().persona, "");
+        let audit = engine.list_audit(&filter, 1).unwrap().entries;
+        assert!(
+            audit[0].summary.contains("改了 1 个已有的"),
+            "{}",
+            audit[0].summary
+        );
+        // 再来一次：都和模板一样了，没有可改的。
+        let again = engine.import_team(&team, true).unwrap();
+        assert!(again.updated.is_empty());
+        assert_eq!(again.skipped, ["助手", "Coder"]);
 
-        // 模板里的「助手」和出厂的一样：没什么可改的，算跳过。
-        let same_as_stock = TeamTemplate {
-            version: 1,
-            bots: vec![bot("助手", ModelTier::Mid, "")],
-            room: None,
-        };
-        let plain = engine();
-        plain.ensure_defaults().unwrap();
-        let report = plain.import_team(&same_as_stock).unwrap();
-        assert!(report.updated.is_empty());
-        assert_eq!(report.skipped, ["助手"]);
-
-        // 模板里那个「助手」的人设不合规矩：什么都不改。
+        // 要改的那个人设不合规矩：什么都不改、什么都不建。
         let bad = TeamTemplate {
             version: 1,
-            bots: vec![bot("助手", ModelTier::Strong, &"字".repeat(100_000))],
+            bots: vec![
+                bot("助手", ModelTier::Cheap, &"字".repeat(100_000)),
+                bot("New", ModelTier::Mid, ""),
+            ],
             room: None,
         };
-        let untouched = engine();
-        untouched.ensure_defaults().unwrap();
-        assert!(untouched.import_team(&bad).is_err());
-        assert!(crate::is_untouched_default(
-            &untouched.list_bots().unwrap()[0]
-        ));
+        assert!(engine.import_team(&bad, true).is_err());
+        assert_eq!(engine.get_bot(&stock.id).unwrap(), moved);
+        assert_eq!(engine.list_bots().unwrap().len(), 2);
     }
 
     #[test]
@@ -632,11 +631,11 @@ mod tests {
         for (expect, spoil) in cases {
             let mut team = good();
             spoil(&mut team);
-            let error = engine.import_team(&team).unwrap_err().to_string();
+            let error = engine.import_team(&team, false).unwrap_err().to_string();
             assert!(error.contains(expect), "{expect}: {error}");
             assert!(engine.list_bots().unwrap().is_empty(), "{expect}");
             assert!(engine.list_rooms().unwrap().is_empty(), "{expect}");
         }
-        assert_eq!(engine.import_team(&good()).unwrap().created.len(), 2);
+        assert_eq!(engine.import_team(&good(), false).unwrap().created.len(), 2);
     }
 }

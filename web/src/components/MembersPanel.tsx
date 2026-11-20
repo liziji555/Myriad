@@ -30,6 +30,7 @@ export function MembersPanel({ room, members, bots, team }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [imported, setImported] = useState<string | null>(null);
+  const [updateExisting, setUpdateExisting] = useState(false);
   const filePicker = useRef<HTMLInputElement>(null);
   const outside = bots.filter((bot) => !room.member_bot_ids.includes(bot.id));
   const full = members.length >= MAX_MEMBERS;
@@ -63,7 +64,8 @@ export function MembersPanel({ room, members, bots, team }: Props) {
     let summary = "";
     const done = await run(async () => {
       if (file.size > MAX_TEMPLATE_BYTES) throw new Error("模板文件太大了（超过 1 MB）");
-      summary = importSummary(await api.importTemplate({ text: await file.text() }));
+      const text = await file.text();
+      summary = importSummary(await api.importTemplate({ text, update_existing: updateExisting }));
     });
     if (done) setImported(summary);
   };
@@ -202,7 +204,7 @@ export function MembersPanel({ room, members, bots, team }: Props) {
           type="button"
           className="sa-link"
           disabled={busy}
-          title="新建模板里的 Bot（已经有同名的跳过）；模板带了房间就新建那个房间"
+          title="新建模板里的 Bot；模板带了房间就新建那个房间"
           onClick={() => filePicker.current?.click()}
         >
           导入模板
@@ -216,6 +218,15 @@ export function MembersPanel({ room, members, bots, team }: Props) {
           onChange={(event) => void importFile(event)}
         />
       </div>
+      <label className="sa-panel-note sa-check">
+        <input
+          type="checkbox"
+          checked={updateExisting}
+          disabled={busy}
+          onChange={(event) => setUpdateExisting(event.target.checked)}
+        />
+        已经有同名的 Bot 时，照模板改它的档位、分工、是否启用（不勾就不动它）
+      </label>
       {imported && (
         <p className="sa-panel-note" role="status">
           {imported}

@@ -65,6 +65,9 @@ pub enum BotCommand {
     Import {
         /// 模板文件
         file: std::path::PathBuf,
+        /// 已经有同名的 Bot 时，照模板改它的档位、分工、是否启用（默认不动它）
+        #[arg(long)]
+        update: bool,
     },
 }
 
@@ -193,25 +196,26 @@ fn bot(engine: &Engine, command: BotCommand, out: &mut impl Write) -> Result<()>
                 None => out.write_all(text.as_bytes())?,
             }
         }
-        BotCommand::Import { file } => {
+        BotCommand::Import { file, update } => {
             let text = std::fs::read_to_string(&file)
                 .with_context(|| format!("读不了 {}", file.display()))?;
             let team = sa_engine::parse_template(&text)
                 .with_context(|| format!("读不懂 {}", file.display()))?;
-            let report = engine.import_team(&team)?;
+            let report = engine.import_team(&team, update)?;
             for bot in &report.created {
                 writeln!(out, "已新建 {}（{}）", bot.name, bot.tier.as_str())?;
             }
             for bot in &report.updated {
-                writeln!(
-                    out,
-                    "自带的 {} 还没改过，已照模板改了它（{}）",
-                    bot.name,
-                    bot.tier.as_str()
-                )?;
+                writeln!(out, "已照模板改了 {}（{}）", bot.name, bot.tier.as_str())?;
             }
             for name in &report.skipped {
                 writeln!(out, "已经有 {name}，没有动它")?;
+            }
+            if !update && !report.skipped.is_empty() {
+                writeln!(
+                    out,
+                    "想让已有的同名 Bot 也照模板改，加上 --update 再导一次。"
+                )?;
             }
             if let Some(room) = &report.room {
                 writeln!(out, "已新建房间「{}」（{}）", room.name, room.id)?;
@@ -409,7 +413,21 @@ mod tests {
         );
         // 再导一次不会多出 Bot。
         let out = sa(&there, &format!("bot import {}", file.display())).unwrap();
-        assert!(out.contains("已经有 Coder，没有动它"), "{out}");
+        assert!(
+            out.contains("已经有 Coder，没有动它") && out.contains("--update"),
+            "{out}"
+        );
+        assert_eq!(there.list_bots().unwrap().len(), 2);
+        // 已有的同名 Bot 默认不动；加上 --update 才照模板改。
+        sa(&there, "bot set Coder --tier cheap --enable").unwrap();
+        sa(&there, &format!("bot import {}", file.display())).unwrap();
+        let coder = find_bot(&there, "Coder").unwrap();
+        assert_eq!((coder.tier, coder.enabled), (ModelTier::Cheap, true));
+        let out = sa(&there, &format!("bot import {} --update", file.display())).unwrap();
+        assert!(out.contains("已照模板改了 Coder（strong）"), "{out}");
+        assert!(!out.contains("--update"), "{out}");
+        let coder = find_bot(&there, "Coder").unwrap();
+        assert_eq!((coder.tier, coder.enabled), (ModelTier::Strong, false));
         assert_eq!(there.list_bots().unwrap().len(), 2);
 
         // 不是模板的文件、没有的文件：说清楚，不动数据。

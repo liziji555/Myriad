@@ -10,7 +10,7 @@ export function importSummary(report: ImportReport): string {
     parts.push(`新建了 ${report.created.map((bot) => bot.name).join("、")}`);
   }
   if (report.updated.length > 0) {
-    parts.push(`照模板改了还没动过的 ${report.updated.map((bot) => bot.name).join("、")}`);
+    parts.push(`照模板改了 ${report.updated.map((bot) => bot.name).join("、")}`);
   }
   if (report.skipped.length > 0) {
     parts.push(`已经有 ${report.skipped.join("、")}，没有动`);

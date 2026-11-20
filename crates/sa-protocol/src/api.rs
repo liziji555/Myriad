@@ -274,6 +274,10 @@ pub struct TemplateFile {
 #[ts(export)]
 pub struct ImportTemplateRequest {
     pub text: String,
+    /// 已经有同名的 Bot 时，照模板改它的档位、分工、是否启用。不写就是不改。
+    #[serde(default)]
+    #[ts(optional)]
+    pub update_existing: Option<bool>,
 }
 
 /// 导入的结果。
@@ -284,7 +288,7 @@ pub struct ImportReport {
     pub created: Vec<crate::Bot>,
     /// 已经有同名的 Bot，没有动它们。
     pub skipped: Vec<String>,
-    /// 全新的数据目录里自带的那个「助手」，还没被改过，模板里有同名的：照模板改了它。
+    /// 已经有同名的 Bot，导入时说了要照模板改，改了的这些。
     #[serde(default)]
     pub updated: Vec<crate::Bot>,
     /// 模板里带了房间时新建的房间。

@@ -27,9 +27,9 @@ describe("importSummary", () => {
     expect(importSummary(report({ created: [bot("A")] }))).toBe("新建了 A。");
   });
 
-  it("自带的助手被照模板改了时说出来", () => {
+  it("照模板改了已有的 Bot 时说出来", () => {
     expect(importSummary(report({ updated: [bot("助手")], created: [bot("Coder")] }))).toBe(
-      "新建了 Coder；照模板改了还没动过的 助手。",
+      "新建了 Coder；照模板改了 助手。",
     );
   });
 

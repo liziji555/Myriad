@@ -3,4 +3,8 @@
 /**
  * 导入模板：把模板文件的内容原样交上来。
  */
-export type ImportTemplateRequest = { text: string, };
+export type ImportTemplateRequest = { text: string, 
+/**
+ * 已经有同名的 Bot 时，照模板改它的档位、分工、是否启用。不写就是不改。
+ */
+update_existing?: boolean, };

@@ -721,6 +721,16 @@ button.sa-row:hover {
   font-size: var(--sa-text-xs);
   overflow-wrap: anywhere;
 }
+.sa-check {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sa-space-1);
+  cursor: pointer;
+}
+.sa-check input {
+  flex: none;
+  margin: 2px 0 0;
+}
 .sa-link {
   padding: 0;
   border: 0;

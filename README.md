@@ -193,8 +193,9 @@ host = "Coder"           # 入口 Bot；不写就是第一个成员
 members = ["Coder"]
 ```
 
-- 已经有同名的 Bot（不分大小写）就跳过，不会改它；模板带了房间时它照样被拉进新房间。
-  只有一个例外：全新的数据目录里自带的「助手」，如果还没改过（没写分工、没换档位、没停用），会照模板里同名的那个改，这样换机器时写好了分工的「助手」能搬过来。
+- 已经有同名的 Bot（不分大小写）默认跳过，不会改它；模板带了房间时它照样被拉进新房间。
+- 想让已有的同名 Bot 也照模板改（档位、分工、是否启用），要明说：`sa bot import team.toml --update`，界面上是导入按钮下面的那个勾。
+  全新的数据目录里自带一个「助手」，换机器时原来那个写好了分工的「助手」就靠这个搬过来。
 - 模板有一处不对（版本、重名、成员对不上、名字不合规矩），什么都不建。
 - 里面只有名字、档位、分工、是否启用和房间的成员，没有密钥、聊天记录、任务和技能。
 - 成员在房间里的先后不保证和文件里一样。
@@ -478,7 +479,7 @@ auto_approve = ["read_file"]          # 这些工具不用问；别的每次调�
 |------|------|
 | `sa serve [--port 端口] [--open] [--workdir 目录] [--mock]` | 启动服务和界面 |
 | `sa chat [--room 房间] [--workdir 目录] [--mock]` | 在终端里对话；`-m "内容"` 只发一条就退出 |
-| `sa bot list` / `add <名字> [--tier 档位] [--persona 分工] [--room 房间]` / `set <Bot> [--name] [--tier] [--persona] [--enable\|--disable]` / `rm <Bot>` / `export [Bot…] [--room 房间] [-o 文件]` / `import <文件>` | 管理 Bot；导出、导入模板 |
+| `sa bot list` / `add <名字> [--tier 档位] [--persona 分工] [--room 房间]` / `set <Bot> [--name] [--tier] [--persona] [--enable\|--disable]` / `rm <Bot>` / `export [Bot…] [--room 房间] [-o 文件]` / `import <文件> [--update]` | 管理 Bot；导出、导入模板 |
 | `sa room list` / `add <名字>` / `invite <房间> <Bot>` / `kick <房间> <Bot>` / `host <房间> <Bot>` | 管理房间、成员和入口 Bot |
 | `sa task list [--room 房间]` / `show <任务>` / `add <标题> --scope 做什么 [--acceptance 验收标准] [--owner Bot]` / `resume <任务> [--note 话] [--owner Bot]` / `accept <任务>` / `reject <任务> --note 意见` / `cancel <任务>` | 任务。`<任务>` 可以只写 ID 的开头几位；`add`、`resume`、`reject` 会等到任务需要你处理为止 |
 | `sa routine list` / `add --room 房间 [--bot Bot] --title 名字 --schedule "0 9 * * *" <到点做什么>` / `enable <定时任务>` / `disable <定时任务>` / `remove <定时任务>` | 定时任务。`<定时任务>` 写 ID 或名字 |

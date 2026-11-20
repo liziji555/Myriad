@@ -974,6 +974,25 @@ async fn a_team_is_exported_and_imported_over_the_api() {
     assert_eq!(made.host_bot_id.as_ref(), Some(&coder.id));
     assert_eq!(engine.list_rooms().unwrap().len(), 2);
 
+    // 已有的同名 Bot 默认不动；明说了才照模板改。
+    let stronger =
+        "version = 1\n[[bots]]\nname = \"Coder\"\ntier = \"cheap\"\npersona = \"改过的\"\n";
+    let report: sa_protocol::ImportReport = json(import(stronger).await.unwrap()).await;
+    assert!(report.updated.is_empty());
+    assert_eq!(engine.get_bot(&coder.id).unwrap().persona, "写代码");
+    let body = serde_json::json!({ "text": stronger, "update_existing": true }).to_string();
+    let response = app
+        .clone()
+        .oneshot(post("/api/templates/import", &body))
+        .await
+        .unwrap();
+    let report: sa_protocol::ImportReport = json(response).await;
+    assert_eq!(report.updated.len(), 1);
+    assert!(report.skipped.is_empty());
+    let changed = engine.get_bot(&coder.id).unwrap();
+    assert_eq!(changed.persona, "改过的");
+    assert_eq!(changed.tier, sa_protocol::ModelTier::Cheap);
+
     // 加一个新的 Bot 再导：只建这一个。
     let more = "version = 1\n[[bots]]\nname = \"Tester\"\ntier = \"cheap\"\n";
     let report: sa_protocol::ImportReport = json(import(more).await.unwrap()).await;
