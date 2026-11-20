@@ -6,6 +6,7 @@ import type {
   BotId,
   CreateBotRequest,
   CreateRoomRequest,
+  CreateLinkRequest,
   CreateRoutineRequest,
   CreateTaskRequest,
   Health,
@@ -15,6 +16,9 @@ import type {
   NoticeId,
   Room,
   RoomId,
+  Link,
+  LinkId,
+  Pairing,
   Routine,
   RoutineId,
   StopResponse,
@@ -130,4 +134,12 @@ export const api = {
   deleteRoutine: (id: RoutineId) => request<void>(routinePath(id), { method: "DELETE" }),
   /** 现在就做一次。马上返回；做完之后结果由事件流送来。房间里正在对话时抛出 `conflict`。 */
   runRoutine: (id: RoutineId) => postJson<Routine>(routinePath(id, "run"), {}),
+  listLinks: () => request<Link[]>("/api/links"),
+  /** 把一个 GitHub 仓库连到房间。 */
+  createLink: (body: CreateLinkRequest) => postJson<Link>("/api/links", body),
+  deleteLink: (id: LinkId) =>
+    request<void>(`/api/links/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  /** 给房间生成一个 Telegram 配对码。码只给这一次。 */
+  createPairing: (roomId: RoomId) =>
+    postJson<Pairing>(`/api/rooms/${encodeURIComponent(roomId)}/pairing`, {}),
 };

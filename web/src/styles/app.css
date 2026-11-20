@@ -1052,6 +1052,101 @@ button.sa-row:hover {
   border-color: var(--sa-accent);
   color: var(--sa-accent);
 }
+/* 连接、外面来的事 */
+.sa-links-section {
+  display: grid;
+  gap: var(--sa-space-2);
+}
+.sa-links-section + .sa-links-section {
+  margin-top: var(--sa-space-3);
+  padding-top: var(--sa-space-3);
+  border-top: 1px solid var(--sa-border);
+}
+.sa-section-title {
+  margin: 0;
+  font-size: var(--sa-text-sm);
+  font-weight: 600;
+  color: var(--sa-fg-muted);
+}
+.sa-links-hint {
+  margin: 0;
+  color: var(--sa-fg-faint);
+  font-size: var(--sa-text-xs);
+}
+.sa-links-hint code,
+.sa-pairing code {
+  font-family: var(--sa-font-mono);
+}
+.sa-inline-form {
+  display: flex;
+  gap: var(--sa-space-2);
+}
+.sa-inline-form input {
+  flex: 1;
+  min-width: 0;
+  padding: var(--sa-space-2);
+  border: 1px solid var(--sa-border);
+  border-radius: var(--sa-radius-sm);
+  background: var(--sa-bg);
+  color: var(--sa-fg);
+}
+.sa-row-action {
+  margin-left: auto;
+}
+.sa-pairing {
+  display: grid;
+  gap: var(--sa-space-2);
+  padding: var(--sa-space-2);
+  border: 1px solid var(--sa-border);
+  border-radius: var(--sa-radius-md);
+  font-size: var(--sa-text-sm);
+}
+.sa-pairing p {
+  margin: 0;
+}
+.sa-pairing-code {
+  justify-self: start;
+  padding: var(--sa-space-1) var(--sa-space-2);
+  border-radius: var(--sa-radius-md);
+  background: var(--sa-bg-side);
+  font-size: var(--sa-text-lg);
+  letter-spacing: 0.08em;
+  user-select: all;
+}
+.sa-msg-event {
+  display: grid;
+  gap: var(--sa-space-1);
+  padding: var(--sa-space-2) var(--sa-space-3);
+  border: 1px dashed var(--sa-border);
+  border-radius: var(--sa-radius-md);
+  font-size: var(--sa-text-sm);
+}
+.sa-event-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sa-space-2);
+  color: var(--sa-fg-muted);
+}
+.sa-event-head .sa-msg-time {
+  margin-left: auto;
+}
+.sa-event-summary {
+  margin: 0;
+}
+.sa-event-body summary {
+  cursor: pointer;
+  color: var(--sa-fg-faint);
+  font-size: var(--sa-text-xs);
+}
+.sa-event-body pre {
+  margin: var(--sa-space-1) 0 0;
+  max-height: 16rem;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: inherit;
+  color: var(--sa-fg-muted);
+}
 .sa-msg-trigger {
   justify-self: center;
   color: var(--sa-fg-faint);

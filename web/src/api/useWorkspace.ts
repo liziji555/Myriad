@@ -28,6 +28,9 @@ import type {
   BotId,
   CreateBotRequest,
   CreateRoutineRequest,
+  Link,
+  LinkId,
+  Pairing,
   CreateTaskRequest,
   Event,
   Message,
@@ -81,6 +84,15 @@ export interface RoutineActions {
   runNow(id: RoutineId): Promise<void>;
 }
 
+/** 对连接的操作。结果先放进本地状态，事件流稍后送来同样的内容。失败时抛出。 */
+export interface LinkActions {
+  /** 把一个 GitHub 仓库（`owner/name`）连到房间。 */
+  linkRepo(roomId: RoomId, repo: string): Promise<void>;
+  remove(id: LinkId): Promise<void>;
+  /** 生成一个 Telegram 配对码。连上之后新的连接由事件流送来。 */
+  pair(roomId: RoomId): Promise<Pairing>;
+}
+
 export interface WorkspaceView extends Workspace {
   readonly phase: Phase;
   /** 事件流当前是否连着。断开时浏览器会自动重连。 */
@@ -89,6 +101,7 @@ export interface WorkspaceView extends Workspace {
   readonly board: TaskBoard;
   readonly tasks: TaskActions;
   readonly routineActions: RoutineActions;
+  readonly linkActions: LinkActions;
   /** 每次需要重新拉消息时加一（重新连上、或者片段丢了）。 */
   readonly epoch: number;
   createRoom(name: string): Promise<Room>;
@@ -169,14 +182,17 @@ export function useWorkspace(): WorkspaceView {
 
     const loadSnapshot = async (mine: number) => {
       try {
-        const [rooms, bots, notices, routines] = await Promise.all([
+        const [rooms, bots, notices, routines, links] = await Promise.all([
           api.listRooms(),
           api.listBots(),
           api.listNotices(),
           api.listRoutines(),
+          api.listLinks(),
         ]);
         if (closed || mine !== generation) return;
-        setWorkspace((buffered ?? []).reduce(applyEvent, { rooms, bots, notices, routines }));
+        setWorkspace(
+          (buffered ?? []).reduce(applyEvent, { rooms, bots, notices, routines, links }),
+        );
         buffered = null;
         setPhase("ready");
       } catch (error) {
@@ -325,6 +341,22 @@ export function useWorkspace(): WorkspaceView {
     };
   }, []);
 
+  const linkActions = useMemo<LinkActions>(() => {
+    const apply = (kind: Event["kind"], payload: Link | { id: LinkId }) =>
+      setWorkspace((current) =>
+        applyEvent(current, { seq: 0, room_id: null, kind, payload, created_at: 0 }),
+      );
+    return {
+      linkRepo: async (roomId, repo) =>
+        apply("link.created", await api.createLink({ room_id: roomId, repo })),
+      remove: async (id) => {
+        await api.deleteLink(id);
+        apply("link.deleted", { id });
+      },
+      pair: (roomId) => api.createPairing(roomId),
+    };
+  }, []);
+
   const loadOlder = useCallback(async (roomId: RoomId) => {
     const oldest = chatRef.current.rooms[roomId]?.messages[0];
     if (!oldest) return;
@@ -368,6 +400,7 @@ export function useWorkspace(): WorkspaceView {
     board,
     tasks,
     routineActions,
+    linkActions,
     epoch,
     createRoom,
     team,

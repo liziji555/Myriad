@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { Bot, Event, Notice, Room, Routine } from "./types";
+import type { Bot, Event, Link, Notice, Room, Routine } from "./types";
 import { applyEvent, emptyWorkspace, noticesFor } from "./workspace";
 
 const bot: Bot = {
@@ -104,6 +104,34 @@ describe("notices", () => {
     const all = [notice("ntc_1", 10), notice("ntc_2", 20, "room_1"), notice("ntc_3", 30, "room_2")];
     expect(noticesFor(all, "room_1").map((n) => n.id)).toEqual(["ntc_1", "ntc_2"]);
     expect(noticesFor(all, null).map((n) => n.id)).toEqual(["ntc_1"]);
+  });
+
+  it("keeps one link per repo or chat and drops deleted ones", () => {
+    const link = (id: string, source: Link["source"], external: string, room_id: string): Link => ({
+      id,
+      source,
+      external,
+      room_id,
+      title: external,
+      created_at: 1,
+    });
+    const repo = link("lnk_1", "github", "me/app", "room_1");
+    const chat = link("lnk_2", "telegram", "42", "room_1");
+    let state = [repo, chat].reduce(
+      (current, item, index) => applyEvent(current, event(index + 1, "link.created", item)),
+      emptyWorkspace,
+    );
+    expect(state.links.map((l) => l.id)).toEqual(["lnk_1", "lnk_2"]);
+    // 重放不重复。
+    expect(applyEvent(state, event(1, "link.created", repo)).links).toEqual(state.links);
+
+    // 同一个聊天改连到别的房间：原来那条换掉。
+    const moved = link("lnk_3", "telegram", "42", "room_2");
+    state = applyEvent(state, event(3, "link.created", moved));
+    expect(state.links.map((l) => l.id)).toEqual(["lnk_1", "lnk_3"]);
+
+    state = applyEvent(state, event(4, "link.deleted", { id: "lnk_1", room_id: "room_1" }));
+    expect(state.links).toEqual([moved]);
   });
 
   it("keeps routines in the order they were made and drops them with their Bot", () => {
