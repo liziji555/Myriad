@@ -1,12 +1,13 @@
-//! `sa chat`：在终端里和房间的入口 Bot 对话。和 `sa serve` 用同一份数据，所以两边看到的历史一样。
+//! `sa chat`：在终端里和房间里的 Bot 对话，用 `@名字` 点名。和 `sa serve` 用同一份数据，所以两边看到的历史一样。
 
 use crate::app::{init_logging, App, RunArgs, BUDGET_NOTICE};
 use crate::paths::DataDir;
 use anyhow::{bail, Context, Result};
 use sa_protocol::{
-    ApprovalDecision, Event, EventKind, Message, MessageId, MessageState, Room, Sender, StepState,
-    ToolStep,
+    ApprovalDecision, Event, EventKind, Message, MessageId, MessageRef, MessageState, Room,
+    RoomActivity, Sender, StepState, ToolStep,
 };
+use std::collections::HashMap;
 use std::future::Future;
 use std::io::Write;
 use std::process::ExitCode;
@@ -80,6 +81,20 @@ fn pick_room(app: &App, wanted: Option<&str>) -> Result<Room> {
 async fn interactive(app: &App, room: &Room, out: &mut impl Write) -> Result<()> {
     let earlier = app.engine.list_messages(&room.id, None, 1)?;
     writeln!(out, "房间：{}　工作目录：{}", room.name, app.workdir)?;
+    let bots = app.engine.list_bots()?;
+    let members: Vec<&str> = room
+        .member_bot_ids
+        .iter()
+        .filter_map(|id| bots.iter().find(|bot| &bot.id == id && bot.enabled))
+        .map(|bot| bot.name.as_str())
+        .collect();
+    if members.len() > 1 {
+        writeln!(
+            out,
+            "房间里的 Bot：{}。用 @名字 点名；不点名时会按分工挑一个来回答。",
+            members.join("、")
+        )?;
+    }
     if app.mock {
         writeln!(
             out,
@@ -148,7 +163,8 @@ fn parse_decision(answer: Option<&str>) -> ApprovalDecision {
 
 /// 发一条消息，把回复边写边打印出来，直到写完。`interrupt` 完成时停下回复。
 /// Bot 要做需要批准的事时，从 `answers` 读一行作为答复。
-/// 返回回复最后的状态。
+/// 一条消息可能引出好几个 Bot 接连说话；等房间里没有人在说、也没有人排队了才返回。
+/// 返回回复最后的状态：有哪条没正常结束就是它的状态，否则是「完成」。
 pub async fn converse(
     app: &App,
     room: &Room,
@@ -166,8 +182,17 @@ pub async fn converse(
         .post_message(&room.id, text.to_string())
         .await?;
 
+    let names: HashMap<_, _> = app
+        .engine
+        .list_bots()?
+        .into_iter()
+        .map(|bot| (bot.id, bot.name))
+        .collect();
+    // 正在写的那条回复，和它已经打印到哪里。
     let mut reply: Option<MessageId> = None;
     let mut printer = Printer::default();
+    let mut outcome = MessageState::Complete;
+    let mut replies = 0;
     tokio::pin!(interrupt);
     let mut interrupted = false;
     let mut asked = std::collections::HashSet::new();
@@ -193,11 +218,35 @@ pub async fn converse(
                     let Some(last) = batch.last() else { break };
                     position = last.seq;
                     for event in batch {
+                        if idle(&event, room, sent.seq) {
+                            // 没有人在说，也没有人排队：这条消息引出的对话结束了。
+                            if replies == 0 {
+                                writeln!(out, "\n（没有 Bot 回应）")?;
+                            }
+                            return Ok(outcome);
+                        }
+                        if withdrawn(&event, reply.as_ref()) {
+                            // 它决定不说话，这条回复撤掉了。扣着没显示的字本来就没打印出来。
+                            reply = None;
+                            printer = Printer::default();
+                            continue;
+                        }
                         let Some(message) = bot_message(&event, room, sent.seq) else {
                             continue;
                         };
-                        let id = reply.get_or_insert_with(|| message.id.clone());
-                        if *id != message.id {
+                        if reply.is_none() {
+                            // 一出现就已经写完的，是 Bot 找别的 Bot 时带的话：步骤行里已经有了，不再打一遍。
+                            if message.state != MessageState::Streaming && event.kind == EventKind::MessageCreated {
+                                continue;
+                            }
+                            reply = Some(message.id.clone());
+                            let name = match &message.sender {
+                                Sender::Bot { bot_id } => names.get(bot_id).cloned(),
+                                Sender::User => None,
+                            };
+                            printer = Printer::named(name.unwrap_or_else(|| "Bot".into()));
+                        }
+                        if reply.as_ref() != Some(&message.id) {
                             continue;
                         }
                         printer.steps(out, &message.steps)?;
@@ -239,7 +288,11 @@ pub async fn converse(
                         }
                         if message.state != MessageState::Streaming {
                             printer.finish(out, &message)?;
-                            return Ok(message.state);
+                            replies += 1;
+                            if message.state != MessageState::Complete {
+                                outcome = message.state;
+                            }
+                            reply = None;
                         }
                     }
                 }
@@ -265,9 +318,33 @@ fn bot_message(event: &Event, room: &Room, after_seq: i64) -> Option<Message> {
     (message.room_id == room.id && from_bot && message.seq > after_seq).then_some(message)
 }
 
+/// 事件是不是「这个房间闲下来了，而且 `sent_seq` 这条人类消息已经处理过」。
+fn idle(event: &Event, room: &Room, sent_seq: i64) -> bool {
+    if event.kind != EventKind::RoomActivity {
+        return false;
+    }
+    serde_json::from_value::<RoomActivity>(event.payload.clone()).is_ok_and(|activity| {
+        activity.room_id == room.id
+            && activity.speaking.is_none()
+            && activity.queued.is_empty()
+            && activity.handled_seq >= sent_seq
+    })
+}
+
+/// 事件是不是「正在写的那条回复被撤掉了」。
+fn withdrawn(event: &Event, reply: Option<&MessageId>) -> bool {
+    if event.kind != EventKind::MessageDeleted {
+        return false;
+    }
+    serde_json::from_value::<MessageRef>(event.payload.clone())
+        .is_ok_and(|gone| Some(&gone.id) == reply)
+}
+
 /// 把一条回复打印到终端：文字原样输出，工具步骤各占一行。
 #[derive(Default)]
 struct Printer {
+    /// 说话的 Bot 的名字，打在回复前面。
+    name: String,
     /// 已经打印出来的回复文字。
     printed: String,
     /// 光标是不是在一行的开头。
@@ -280,6 +357,13 @@ struct Printer {
 }
 
 impl Printer {
+    fn named(name: String) -> Self {
+        Self {
+            name,
+            ..Self::default()
+        }
+    }
+
     fn text(&mut self, out: &mut impl Write, text: &str) -> std::io::Result<()> {
         if text.is_empty() {
             return Ok(());
@@ -296,7 +380,7 @@ impl Printer {
         }
         if !self.started {
             self.started = true;
-            write!(out, "\nBot> ")?;
+            write!(out, "\n{}> ", printable(&self.name))?;
         }
         write!(out, "{}", printable(shown))?;
         self.after_step = false;
@@ -307,7 +391,7 @@ impl Printer {
     fn line(&mut self, out: &mut impl Write, line: &str, is_step: bool) -> std::io::Result<()> {
         if !self.started {
             self.started = true;
-            writeln!(out, "\nBot>")?;
+            writeln!(out, "\n{}>", printable(&self.name))?;
             self.at_line_start = true;
         }
         if !self.at_line_start {
@@ -547,6 +631,41 @@ mod tests {
         );
     }
 
+    /// 多个 Bot：每条回复前面是说话的 Bot 的名字；一个 Bot 找了另一个，等两个都说完才算结束。
+    #[tokio::test]
+    async fn several_bots_reply_under_their_own_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = open(dir.path());
+        let room = pick_room(&app, None).unwrap();
+        let coder = app
+            .engine
+            .create_bot("Coder", sa_protocol::ModelTier::Mid, "写代码")
+            .unwrap();
+        app.engine.add_room_member(&room.id, &coder.id).unwrap();
+
+        // 点名 Coder，它转给助手：两个人依次说话。
+        let (state, out) = say(&app, "@Coder 转给 `助手`：帮我看看").await;
+        assert_eq!(state, MessageState::Complete);
+        let coder_at = out.find("\nCoder>").expect(&out);
+        let host_at = out.find("\n助手> ").expect(&out);
+        assert!(coder_at < host_at, "{out}");
+        assert!(out.contains("  ✓ 请 助手：帮我看看"), "{out}");
+        // 带给助手的那句话在步骤行里已经有了，不再单独打一遍。
+        let coder_said = &out[coder_at..host_at];
+        assert!(coder_said.contains("已经转过去了"), "{out}");
+        assert!(!coder_said.contains("@助手 帮我看看"), "{out}");
+
+        // 没点名：假路由按消息里出现的名字挑人。
+        let (_, out) = say(&app, "这个问题 coder 怎么看").await;
+        assert!(out.starts_with("\nCoder> "), "{out}");
+        assert!(!out.contains("助手>"), "{out}");
+
+        // 被点到的 Bot 决定不说话：不会一直等下去。
+        let (state, out) = say(&app, "@Coder 谢谢，不用回了").await;
+        assert_eq!(state, MessageState::Complete);
+        assert_eq!(out, "\n（没有 Bot 回应）\n");
+    }
+
     #[tokio::test]
     async fn prints_the_reply_and_tool_steps() {
         let dir = tempfile::tempdir().unwrap();
@@ -554,7 +673,7 @@ mod tests {
 
         let (state, out) = say(&app, "你好").await;
         assert_eq!(state, MessageState::Complete);
-        assert!(out.starts_with("\nBot> "), "{out:?}");
+        assert!(out.starts_with("\n助手> "), "{out:?}");
         assert!(out.contains("你刚才说的是：「你好」"), "{out}");
         assert!(out.ends_with('\n') && !out.ends_with("\n\n"), "{out:?}");
 
@@ -577,7 +696,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         let expected = stored[0].content.replacen("。\n\n（", "。\n（", 1);
-        assert_eq!(text, format!("\nBot> {expected}"));
+        assert_eq!(text, format!("\n助手> {expected}"));
         app.orchestrator.shutdown().await;
     }
 

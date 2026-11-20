@@ -232,6 +232,10 @@ fn demo_reply(request: &ChatRequest) -> MockReply {
         return MockReply::text("(pass)");
     }
     if last.role == Role::Tool {
+        // 找别的 Bot 的回执：话已经带到，这边说一句就结束。
+        if last.content.starts_with("已经把话带给") {
+            return MockReply::text("（Mock 模型）已经转过去了，等它回答。");
+        }
         let lines: Vec<&str> = last.content.lines().take(6).collect();
         return MockReply::text(&format!(
             "（Mock 模型）工具返回了 {} 个字，开头是：\n\n{}\n\n这是固定规则生成的回复，不是真正的总结；配置好模型密钥后会由真实模型来读。",
