@@ -3,9 +3,13 @@ import type { BotId } from "./BotId";
 import type { RoomId } from "./RoomId";
 
 /**
- * 房间里现在谁在说话、谁在排队。两个都空表示这一轮交流结束了。
+ * 房间里现在谁在说话、谁在排队。没有人说话、没有人排队、也不在挑人，表示这一轮交流结束了。
  */
 export type RoomActivity = { room_id: RoomId, speaking: BotId | null, queued: Array<BotId>, 
+/**
+ * 正在挑由谁来接话（还没有 Bot 开始说）。这时也可以点「停止」。
+ */
+routing: boolean, 
 /**
  * 房间已经处理到哪条消息（`seq`）。发消息的人据此判断自己那条有没有被处理完。
  */

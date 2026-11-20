@@ -208,13 +208,16 @@ pub struct Message {
     pub updated_at: Millis,
 }
 
-/// 房间里现在谁在说话、谁在排队。两个都空表示这一轮交流结束了。
+/// 房间里现在谁在说话、谁在排队。没有人说话、没有人排队、也不在挑人，表示这一轮交流结束了。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct RoomActivity {
     pub room_id: RoomId,
     pub speaking: Option<BotId>,
     pub queued: Vec<BotId>,
+    /// 正在挑由谁来接话（还没有 Bot 开始说）。这时也可以点「停止」。
+    #[serde(default)]
+    pub routing: bool,
     /// 房间已经处理到哪条消息（`seq`）。发消息的人据此判断自己那条有没有被处理完。
     #[ts(type = "number")]
     pub handled_seq: i64,

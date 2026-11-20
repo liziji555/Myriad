@@ -162,6 +162,10 @@ async fn dispatch(
         .unwrap_or_default();
     let cancel = shared.shutdown.child_token();
     *link.current.lock().unwrap() = Some((None, cancel.clone()));
+    if members.len() > 1 {
+        // 挑人要调一次模型：先告诉界面有事情在进行，这段时间里也能点「停止」。
+        publish(shared, &room.id, link, None, true).await;
+    }
     let chosen = router::route(
         shared, &room.id, members, &fallback, &recent, latest, &cancel,
     )
@@ -200,10 +204,22 @@ async fn announce(
     link: &RoomLink,
     speaking: Option<&BotId>,
 ) {
+    publish(shared, room_id, link, speaking, false).await;
+}
+
+/// `routing`：正在挑由谁来接话。
+async fn publish(
+    shared: &Arc<Shared>,
+    room_id: &RoomId,
+    link: &RoomLink,
+    speaking: Option<&BotId>,
+    routing: bool,
+) {
     let activity = RoomActivity {
         room_id: room_id.clone(),
         speaking: speaking.cloned(),
         queued: link.episode().queued(),
+        routing,
         handled_seq: link.handled.load(Ordering::SeqCst).max(0),
     };
     let engine = shared.engine.clone();

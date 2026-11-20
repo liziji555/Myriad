@@ -71,6 +71,7 @@ function Shell() {
   const replying =
     (roomChat?.messages.some((message) => message.state === "streaming") ?? false) ||
     Boolean(roomChat?.activity?.speaking) ||
+    Boolean(roomChat?.activity?.routing) ||
     (roomChat?.activity?.queued.length ?? 0) > 0;
   // 按进房间的先后排，和服务端一致。
   const members = room
@@ -135,10 +136,16 @@ function Shell() {
               onDecide={workspace.decideApproval}
               onLightDemo={runLightDemo}
             />
-            {queued.length > 0 && (
+            {roomChat?.activity?.routing ? (
               <p className="sa-room-status" role="status">
-                接下来：{queued.join("、")}
+                正在挑选由谁来回答…
               </p>
+            ) : (
+              queued.length > 0 && (
+                <p className="sa-room-status" role="status">
+                  接下来：{queued.join("、")}
+                </p>
+              )
             )}
             <Composer
               key={`composer-${room.id}`}

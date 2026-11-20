@@ -159,7 +159,10 @@ impl Rig {
                     serde_json::from_value::<sa_protocol::RoomActivity>(e.payload.clone()).unwrap()
                 })
                 .is_some_and(|a| {
-                    a.speaking.is_none() && a.queued.is_empty() && a.handled_seq >= last_user
+                    a.speaking.is_none()
+                        && a.queued.is_empty()
+                        && !a.routing
+                        && a.handled_seq >= last_user
                 });
             if idle {
                 return;
@@ -1087,6 +1090,18 @@ async fn unaddressed_messages_are_routed_and_fall_back_to_the_host() {
         material.ends_with("【用户刚发的消息】\n帮我审一下这个改动\n"),
         "{material}"
     );
+    // 挑人的这段时间对外是「有事情在进行」，界面上能点停止。
+    let routing = t
+        .rig
+        .engine
+        .events_after(0, 10_000)
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.kind == sa_protocol::EventKind::RoomActivity)
+        .map(|e| serde_json::from_value::<sa_protocol::RoomActivity>(e.payload).unwrap())
+        .filter(|a| a.routing)
+        .count();
+    assert_eq!(routing, 1);
     // 没点名的话，在多 Bot 房间里也标明是用户说的。
     assert_eq!(heard(&t.rig.provider), ["【用户】帮我审一下这个改动"]);
 

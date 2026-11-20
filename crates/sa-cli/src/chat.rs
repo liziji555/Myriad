@@ -327,6 +327,7 @@ fn idle(event: &Event, room: &Room, sent_seq: i64) -> bool {
         activity.room_id == room.id
             && activity.speaking.is_none()
             && activity.queued.is_empty()
+            && !activity.routing
             && activity.handled_seq >= sent_seq
     })
 }

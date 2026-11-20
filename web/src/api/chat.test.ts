@@ -134,7 +134,7 @@ describe("resetChat", () => {
 
 describe("removeMessage / setActivity", () => {
   const watching = watchRoom(emptyChat, ROOM);
-  const activity = { room_id: ROOM, speaking: "bot_1", queued: ["bot_2"], handled_seq: 1 };
+  const activity = { room_id: ROOM, speaking: "bot_1", queued: ["bot_2"], routing: false, handled_seq: 1 };
 
   it("drops a withdrawn message and ignores unknown ones", () => {
     const state = upsertMessage(upsertMessage(watching, message(1)), message(2));
