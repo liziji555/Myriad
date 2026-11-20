@@ -292,6 +292,35 @@ async fn in_a_group_only_what_is_said_to_the_bot_is_taken() {
 }
 
 #[tokio::test]
+async fn guessing_pairing_codes_is_cut_off() {
+    let dir = tempfile::tempdir().unwrap();
+    let rig = start(dir.path(), vec![], Budget::default());
+    let pairing = rig.engine.create_pairing(&rig.room).unwrap();
+    let fake = FakeTelegram::default();
+    for guess in 1..=5 {
+        fake.says(guess, 66, "private", &format!("/pair WRONG{guess}"));
+    }
+    // 猜了五次之后碰对了也不算：这个聊天这十分钟里不再理会。
+    fake.says(6, 66, "private", &format!("/pair {}", pairing.code));
+    // 别的聊天不受连累，码也还在。
+    fake.says(7, 42, "private", &format!("/pair {}", pairing.code));
+    connect(&rig, &fake).await;
+
+    let sent = fake.sent_count(6).await;
+    assert!(
+        sent[..4].iter().all(|text| text.contains("请重新生成一个")),
+        "{sent:?}"
+    );
+    assert!(sent[4].contains("试的次数太多了"), "{sent:?}");
+    assert!(sent[5].starts_with("已经连到房间「"), "{sent:?}");
+    assert_eq!(fake.sent()[5].0, "42");
+    let links = rig.engine.list_links().unwrap();
+    assert_eq!(links.len(), 1);
+    assert_eq!(links[0].external, "42");
+    rig.orchestrator.shutdown().await;
+}
+
+#[tokio::test]
 async fn updates_numbered_below_the_last_one_are_still_taken() {
     let dir = tempfile::tempdir().unwrap();
     let rig = start(

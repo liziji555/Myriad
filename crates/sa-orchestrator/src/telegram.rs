@@ -43,6 +43,41 @@ const STALE_MS: i64 = 60 * 60 * 1000;
 const HINT_PAIR: &str =
     "这个聊天还没有连到房间。请在 SuperAgent 的「连接」页里生成配对码，然后在这里发：/pair 配对码";
 const HINT_BAD_CODE: &str = "配对码不对，或者已经过期了（十分钟内有效）。请重新生成一个。";
+const HINT_LOCKED: &str = "配对码不对。试的次数太多了，过十分钟再试。";
+
+/// 配对码只有六位，不能让人一直猜：这么长的一段时间里……
+const PAIR_WINDOW_MS: i64 = 10 * 60 * 1000;
+/// ……一个聊天最多试错这么多次，
+const PAIR_TRIES_PER_CHAT: u32 = 5;
+/// 所有聊天加起来最多试错这么多次（换着聊天猜也一样被挡住）。
+const PAIR_TRIES_TOTAL: u32 = 20;
+
+/// 记着这一段时间里配对码试错了几次。超了的在这段时间过去之前不再理会。
+#[derive(Debug, Default)]
+struct PairGuard {
+    started: i64,
+    total: u32,
+    per_chat: HashMap<String, u32>,
+}
+
+impl PairGuard {
+    /// 这个聊天现在还能试错几次。
+    fn left(&mut self, chat: &str, now: i64) -> u32 {
+        if now - self.started >= PAIR_WINDOW_MS {
+            *self = Self {
+                started: now,
+                ..Self::default()
+            };
+        }
+        let mine = self.per_chat.get(chat).copied().unwrap_or(0);
+        (PAIR_TRIES_PER_CHAT.saturating_sub(mine)).min(PAIR_TRIES_TOTAL.saturating_sub(self.total))
+    }
+
+    fn wrong(&mut self, chat: &str) {
+        self.total += 1;
+        *self.per_chat.entry(chat.to_string()).or_default() += 1;
+    }
+}
 
 impl Orchestrator {
     /// 连上 Telegram：开始收消息、送回复，直到服务关闭。马上返回。
@@ -87,6 +122,7 @@ impl Orchestrator {
         // 位置只用来告诉 Telegram「这之前的都收到了」，不用存：不带位置去取，拿到的就是还没确认的。
         // 重启后重新拿到的那几条靠幂等键认出来。
         let mut offset: i64 = 0;
+        let mut guard = PairGuard::default();
         let mut wait = options.backoff;
         loop {
             let updates = tokio::select! {
@@ -118,7 +154,7 @@ impl Orchestrator {
             }
             for update in updates {
                 let next = update.update_id + 1;
-                if let Err(error) = self.telegram_update(update, id, me).await {
+                if let Err(error) = self.telegram_update(update, id, me, &mut guard).await {
                     // 库写不进去：不往前挪，等一会儿从这一条重新来。
                     tracing::warn!("处理 Telegram 消息出错：{error}");
                     if self.pause(options.backoff).await {
@@ -132,7 +168,13 @@ impl Orchestrator {
     }
 
     /// 处理一条更新。
-    async fn telegram_update(&self, update: Update, id: i64, me: &str) -> Result<(), EngineError> {
+    async fn telegram_update(
+        &self,
+        update: Update,
+        id: i64,
+        me: &str,
+        guard: &mut PairGuard,
+    ) -> Result<(), EngineError> {
         let Some(message) = update.message else {
             return Ok(());
         };
@@ -143,10 +185,17 @@ impl Orchestrator {
             Intent::Skip(_) => Ok(()),
             Intent::Pair(code) => {
                 let title = chat_title(&message);
-                db(move || {
+                // 试错太多的先不理：不验码，也不回话。
+                let left = guard.left(&chat, now_ms());
+                if !code.is_empty() && left == 0 {
+                    return Ok(());
+                }
+                let target = chat.clone();
+                let wrong = db(move || {
                     if !engine.note_trigger(Source::Telegram, &key, "pair", "")? {
-                        return Ok(());
+                        return Ok(false);
                     }
+                    let mut wrong = false;
                     let answer = if code.is_empty() {
                         HINT_PAIR.to_string()
                     } else {
@@ -158,13 +207,25 @@ impl Orchestrator {
                                     room.name
                                 )
                             }
-                            None => HINT_BAD_CODE.to_string(),
+                            None => {
+                                wrong = true;
+                                let hint = if left == 1 {
+                                    HINT_LOCKED
+                                } else {
+                                    HINT_BAD_CODE
+                                };
+                                hint.to_string()
+                            }
                         }
                     };
                     engine.send_out(Source::Telegram, &chat, &answer, &format!("reply:{key}"))?;
-                    Ok(())
+                    Ok(wrong)
                 })
-                .await
+                .await?;
+                if wrong {
+                    guard.wrong(&target);
+                }
+                Ok(())
             }
             Intent::Say(text) => {
                 let linked = {
@@ -304,5 +365,39 @@ fn chat_title(message: &TgMessage) -> String {
         (Some(title), _) if !title.is_empty() => title.clone(),
         (_, Some(from)) => from.display(),
         _ => format!("聊天 {}", message.chat.id),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wrong_pairing_codes_are_capped_per_chat_and_overall_until_the_window_passes() {
+        let mut guard = PairGuard::default();
+        let start = 1_000_000;
+        for used in 0..PAIR_TRIES_PER_CHAT {
+            assert_eq!(guard.left("42", start), PAIR_TRIES_PER_CHAT - used);
+            guard.wrong("42");
+        }
+        assert_eq!(guard.left("42", start + 1), 0);
+        // 别的聊天不受它连累。
+        assert_eq!(guard.left("43", start + 1), PAIR_TRIES_PER_CHAT);
+
+        // 换着聊天猜：总数到了，谁都不能再试。
+        for chat in 0..PAIR_TRIES_TOTAL {
+            let chat = format!("c{chat}");
+            if guard.left(&chat, start + 2) > 0 {
+                guard.wrong(&chat);
+            }
+        }
+        assert_eq!(guard.left("fresh", start + 3), 0);
+
+        // 过了这一段时间，重新算。
+        assert_eq!(guard.left("fresh", start + PAIR_WINDOW_MS - 1), 0);
+        assert_eq!(
+            guard.left("42", start + PAIR_WINDOW_MS),
+            PAIR_TRIES_PER_CHAT
+        );
     }
 }
