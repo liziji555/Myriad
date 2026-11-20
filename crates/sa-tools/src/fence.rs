@@ -79,31 +79,44 @@ impl Fence {
     /// 把一个要写入的路径变成真实路径。文件可以还不存在。
     ///
     /// 返回真实路径，以及它是否在工作目录里面。SuperAgent 自己的数据目录任何时候都不能写。
-    /// 做法：找到已经存在的最深一层上级目录并解析它（符号链接在这一步被看穿），
-    /// 再把还不存在的那几段接在后面。
+    /// 做法：和操作系统一样一段一段往下走，已经存在的每一段都解析掉符号链接，
+    /// `..` 回到的是解析之后的上一级（`链接/..` 是链接指向的目录的上一级，不是链接所在的目录），
+    /// 这样写到的和 [`Fence::resolve`] 读到的是同一个地方。还不存在的那几段原样接在后面。
     pub fn resolve_for_write(&self, input: &str) -> Result<(PathBuf, bool), ToolError> {
         let input = input.trim();
         if input.is_empty() {
             return Err(ToolError::new("没有给出要写入的路径。"));
         }
-        let joined = lexically_normalized(&self.root.join(input));
-        let mut existing = joined.as_path();
-        let mut rest = vec![];
-        let real_base = loop {
-            match existing.canonicalize() {
-                Ok(real) => break real,
-                Err(_) => {
-                    let (Some(parent), Some(name)) = (existing.parent(), existing.file_name())
-                    else {
-                        return Err(ToolError(format!("路径 {input} 没法解析。")));
-                    };
-                    rest.push(name.to_os_string());
-                    existing = parent;
-                }
-            }
+        let joined = self.root.join(input);
+        // 工作目录本身已经是真实路径，从它下面开始走；绝对路径从头走。
+        let (mut real, rest) = match joined.strip_prefix(&self.root) {
+            Ok(rest) => (self.root.clone(), rest),
+            Err(_) => (PathBuf::new(), joined.as_path()),
         };
-        let mut real = real_base;
-        real.extend(rest.iter().rev());
+        // 走到了还不存在的地方：后面的不用（也没法）再解析。
+        let mut missing = false;
+        for component in rest.components() {
+            match component {
+                Component::CurDir => {}
+                Component::ParentDir => {
+                    real.pop();
+                }
+                Component::Normal(name) if !missing => {
+                    let next = real.join(name);
+                    match next.canonicalize() {
+                        Ok(resolved) => real = resolved,
+                        Err(_) => {
+                            missing = true;
+                            real = next;
+                        }
+                    }
+                }
+                other => real.push(other),
+            }
+        }
+        if real.file_name().is_none() {
+            return Err(ToolError(format!("路径 {input} 没法解析。")));
+        }
         if self.denied.iter().any(|d| real.starts_with(d)) {
             return Err(ToolError(format!(
                 "路径 {input} 在 SuperAgent 自己的数据目录里，不能写。"
@@ -184,6 +197,10 @@ mod tests {
         let (escaped, inside) = fence.resolve_for_write("sub/../../外面.txt").unwrap();
         assert!(!inside && !escaped.starts_with(fence.root()), "{escaped:?}");
         assert!(fence.resolve_for_write("  ").is_err());
+        // 工作目录的上一级：在外面，要问人。
+        let (parent, inside) = fence.resolve_for_write("..").unwrap();
+        assert!(!inside);
+        assert_eq!(Some(parent.as_path()), fence.root().parent());
         // 外面的路径不管存不存在，回答都一样。
         let ghost = fence.resolve("../没有这个文件").unwrap_err();
         assert!(ghost.0.contains("工作目录之外"), "{ghost}");
@@ -217,5 +234,45 @@ mod tests {
 
         assert!(fence.resolve("leak").is_err());
         assert_eq!(fence.display(&fence.resolve("alias").unwrap()), "real.txt");
+        assert!(fence.resolve_for_write("/").is_err());
+    }
+
+    /// `链接/..` 是链接指向的目录的上一级。写和读要落在同一个地方。
+    #[cfg(unix)]
+    #[test]
+    fn parent_of_a_link_is_the_parent_of_its_target_for_writes_too() {
+        let outer = tempfile::tempdir().unwrap();
+        let root = outer.path().join("work");
+        fs::create_dir_all(root.join("docs")).unwrap();
+        fs::create_dir_all(outer.path().join("elsewhere/deep")).unwrap();
+        fs::write(outer.path().join("elsewhere/x.txt"), "外面的").unwrap();
+        fs::write(root.join("x.txt"), "里面的").unwrap();
+        fs::write(root.join("docs/y.txt"), "y").unwrap();
+        std::os::unix::fs::symlink(outer.path().join("elsewhere/deep"), root.join("out")).unwrap();
+        std::os::unix::fs::symlink(root.join("docs"), root.join("in")).unwrap();
+        let fence = Fence::new(&root, &[]).unwrap();
+        let outer_real = outer.path().canonicalize().unwrap();
+
+        // 操作系统会把 out/../x.txt 解析成 elsewhere/x.txt：在外面。
+        let (real, inside) = fence.resolve_for_write("out/../x.txt").unwrap();
+        assert_eq!(real, outer_real.join("elsewhere/x.txt"));
+        assert!(!inside);
+        assert!(fence.resolve("out/../x.txt").is_err());
+        // 还不存在的文件也一样。
+        let (real, inside) = fence.resolve_for_write("out/../新的/a.txt").unwrap();
+        assert_eq!(real, outer_real.join("elsewhere/新的/a.txt"));
+        assert!(!inside);
+        // 指向里面的链接：读和写是同一个文件。
+        let (real, inside) = fence.resolve_for_write("in/../x.txt").unwrap();
+        assert_eq!(real, fence.resolve("in/../x.txt").unwrap());
+        assert!(inside);
+        let (real, inside) = fence.resolve_for_write("in/y.txt").unwrap();
+        assert_eq!(real, fence.root().join("docs/y.txt"));
+        assert!(inside);
+        // 悬空的链接本身可以被换成普通文件；穿过它写到外面要问。
+        std::os::unix::fs::symlink(outer.path().join("nowhere"), root.join("dangling")).unwrap();
+        let (real, inside) = fence.resolve_for_write("dangling").unwrap();
+        assert_eq!(real, fence.root().join("dangling"));
+        assert!(inside);
     }
 }
