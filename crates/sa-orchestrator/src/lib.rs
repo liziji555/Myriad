@@ -10,6 +10,7 @@ mod ask;
 mod episode;
 mod room;
 mod router;
+mod workdir;
 
 pub use episode::{MAX_BOT_TURNS, MAX_HOP, MAX_PAIR_ASKS};
 
