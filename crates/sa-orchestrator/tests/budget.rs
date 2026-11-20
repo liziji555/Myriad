@@ -463,3 +463,52 @@ async fn the_watchdog_reports_failures_and_a_database_that_grew_too_big() {
     assert!(rig.orchestrator.watchdog_tick().await.is_empty());
     rig.orchestrator.shutdown().await;
 }
+
+#[tokio::test]
+async fn the_watchdog_stops_a_task_that_spends_far_more_than_the_others() {
+    let dir = tempfile::tempdir().unwrap();
+    let list = MockReply::tool_calls("", &[("l1", "list_dir", r#"{"path":"."}"#)]);
+    // 第一个任务花 29 块（交结果 15 + 收尾 14）；第二个任务三次调用花 45 块，然后挂住。
+    let rig = start(
+        dir.path(),
+        vec![],
+        vec![
+            report("做完了"),
+            MockReply::text("交完了。"),
+            list.clone(),
+            list.clone(),
+            list,
+            MockReply::Hang(vec![]),
+        ],
+        pricey(0.0, 0.0),
+        Watchdog {
+            spend_samples: 1,
+            spend_factor: 1.5,
+            ..Watchdog::default()
+        },
+    );
+    let first = rig.open_task("普通的任务").await;
+    rig.task_in(&first.id, TaskState::Review).await;
+    // 只有一个做完的任务、没有正在做的：没什么可比的。
+    assert!(rig.orchestrator.watchdog_tick().await.is_empty());
+
+    let second = rig.open_task("花钱的任务").await;
+    rig.work_requests(6).await;
+    let found = rig.orchestrator.watchdog_tick().await;
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].kind, NoticeKind::Spend);
+    assert!(
+        found[0]
+            .text
+            .contains("这一段花了 45.00 CNY，做完的任务平均 29.00 CNY"),
+        "{}",
+        found[0].text
+    );
+    let blocked = rig.task_in(&second.id, TaskState::Blocked).await;
+    assert!(
+        blocked.note.contains("花得比平常多得多"),
+        "{}",
+        blocked.note
+    );
+    rig.orchestrator.shutdown().await;
+}

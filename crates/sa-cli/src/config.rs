@@ -364,4 +364,59 @@ mod tests {
         std::fs::write(&path, "not toml [").unwrap();
         assert!(Config::load_or_default(&path).is_err());
     }
+
+    #[test]
+    fn configs_written_before_budgets_were_enforced_still_load() {
+        // M4 及以前生成的配置：[budget] 里没有 task_limit，也没有 [prices]。
+        let start = DEFAULT_CONFIG_TOML.find("[prices]").unwrap();
+        let end = DEFAULT_CONFIG_TOML.find("[github]").unwrap();
+        let old = format!(
+            "{}{}",
+            &DEFAULT_CONFIG_TOML[..start],
+            &DEFAULT_CONFIG_TOML[end..]
+        )
+        .replace("task_limit = 10.0\n", "");
+        assert!(!old.contains("task_limit") && !old.contains("[prices]"));
+        let config = Config::parse(&old).unwrap();
+        assert_eq!(config.budget.task_limit, DEFAULT_TASK_LIMIT);
+        let budget = config.budget();
+        assert_eq!(budget.daily_limit, 50.0);
+        assert_eq!(budget.default_price.input, FALLBACK_PRICE.input);
+        assert_eq!(budget.default_price.cached_input, FALLBACK_PRICE.input);
+        assert!(budget.prices.is_empty());
+    }
+
+    #[test]
+    fn prices_are_per_model_with_a_default_and_checked() {
+        let text = DEFAULT_CONFIG_TOML.replace(
+            r#"# "deepseek-flash" = { input = 1.0, cached_input = 0.1, output = 2.0 }"#,
+            r#""deepseek-flash" = { input = 1.0, output = 2.0 }"#,
+        );
+        let budget = Config::parse(&text).unwrap().budget();
+        assert_eq!(budget.task_limit, 10.0);
+        assert_eq!(budget.default_price.output, 30.0);
+        let flash = budget.prices["deepseek-flash"];
+        assert_eq!(
+            (flash.input, flash.cached_input, flash.output),
+            (1.0, 1.0, 2.0)
+        );
+        assert!(!budget.prices.contains_key("default"));
+
+        let negative = text.replace("output = 2.0", "output = -2.0");
+        let error = Config::parse(&negative).unwrap_err().to_string();
+        assert!(error.contains("deepseek-flash"), "{error}");
+        let negative = DEFAULT_CONFIG_TOML.replace("task_limit = 10.0", "task_limit = -1");
+        let error = Config::parse(&negative).unwrap_err().to_string();
+        assert!(error.contains("task_limit"), "{error}");
+    }
+
+    #[test]
+    fn the_startup_notice_states_the_limits() {
+        let config = Config::parse(DEFAULT_CONFIG_TOML).unwrap();
+        let notice = config.budget_notice();
+        assert!(notice.contains("每天 50 CNY，每个任务 10 CNY"), "{notice}");
+        let unlimited = DEFAULT_CONFIG_TOML.replace("daily_limit = 50.0", "daily_limit = 0");
+        let notice = Config::parse(&unlimited).unwrap().budget_notice();
+        assert!(notice.contains("每天 不限"), "{notice}");
+    }
 }
