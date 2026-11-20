@@ -32,10 +32,7 @@ impl Server {
             .unwrap();
         let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
         let url = loop {
-            let line = lines
-                .next()
-                .expect("sa serve 没说完地址就退出了")
-                .unwrap();
+            let line = lines.next().expect("sa serve 没说完地址就退出了").unwrap();
             if let Some((_, url)) = line.split_once("在浏览器里打开：") {
                 break url.trim().to_string();
             }
@@ -60,7 +57,9 @@ impl Server {
     fn request(&self, method: &str, path: &str, body: Option<Value>) -> (u16, Value) {
         let body = body.map(|body| body.to_string()).unwrap_or_default();
         let mut stream = TcpStream::connect(&self.addr).unwrap();
-        stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
         write!(
             stream,
             "{method} {path} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {}\r\n\
@@ -121,7 +120,10 @@ fn settled(messages: &[Value]) -> bool {
     let answered = messages.iter().enumerate().all(|(index, message)| {
         !is_human(message) || messages.get(index + 1).is_some_and(|next| !is_human(next))
     });
-    answered && messages.iter().all(|message| message["state"] != "streaming")
+    answered
+        && messages
+            .iter()
+            .all(|message| message["state"] != "streaming")
 }
 
 fn human_texts(messages: &[Value]) -> Vec<String> {
@@ -167,7 +169,10 @@ fn killing_the_server_three_times_loses_no_message() {
         // 没人接的那句，重启之后有了完整的回复。
         let last = messages.last().unwrap();
         assert_eq!(last["state"], "complete", "{last:#}");
-        assert!(last["content"].as_str().unwrap().contains("刚说完就断电"), "{last:#}");
+        assert!(
+            last["content"].as_str().unwrap().contains("刚说完就断电"),
+            "{last:#}"
+        );
     }
 
     // 三次之后照常聊：会话里之前的话都还在（假模型会报这是第几条）。
