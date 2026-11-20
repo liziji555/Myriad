@@ -182,6 +182,7 @@ function Shell() {
           tabAction("links", "连接 GitHub 仓库和 Telegram 聊天"),
           tabAction("extensions", "看技能和 MCP 服务"),
           tabAction("usage", "看用量和花费"),
+          tabAction("audit", "看审计日志：谁批准了什么、做了什么"),
           tabAction("activity", "看任务图"),
           {
             id: "action:toggle-panel",

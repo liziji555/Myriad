@@ -480,15 +480,17 @@ button.sa-row:hover {
 }
 .sa-tabs {
   display: flex;
+  /* 页签多了一行放不下：折到下一行，不把面板撑宽。 */
+  flex-wrap: wrap;
   align-items: center;
   gap: var(--sa-space-1);
   min-height: 52px;
-  padding: 0 var(--sa-space-3);
+  padding: var(--sa-space-2) var(--sa-space-3);
   border-bottom: 1px solid var(--sa-border);
 }
 .sa-tab {
   height: 28px;
-  padding: 0 var(--sa-space-3);
+  padding: 0 var(--sa-space-2);
   border: 0;
   border-radius: var(--sa-radius-sm);
   background: none;
@@ -1329,4 +1331,79 @@ button.sa-row:hover {
   padding: 0 var(--sa-space-1);
   border-radius: var(--sa-radius-sm);
   font-size: var(--sa-text-xs);
+}
+
+/* 审计 */
+.sa-audit {
+  display: grid;
+  gap: var(--sa-space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.sa-audit-entry {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  padding: var(--sa-space-2);
+  border: 1px solid var(--sa-border);
+  border-left: 3px solid var(--sa-border);
+  border-radius: var(--sa-radius-md);
+}
+.sa-audit-entry[data-actor="user"] {
+  border-left-color: var(--sa-accent);
+}
+.sa-audit-entry[data-actor="bot"] {
+  border-left-color: var(--sa-ok);
+}
+.sa-audit-entry[data-actor="system"] {
+  border-left-color: var(--sa-warn);
+}
+.sa-audit-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--sa-space-2);
+  min-width: 0;
+}
+.sa-audit-who {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--sa-text-sm);
+  font-weight: 600;
+}
+.sa-audit-summary {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.sa-audit-action {
+  color: var(--sa-fg-faint);
+  font-family: var(--sa-font-mono);
+  font-size: var(--sa-text-xs);
+}
+.sa-audit-detail summary {
+  cursor: pointer;
+  color: var(--sa-fg-faint);
+  font-size: var(--sa-text-xs);
+}
+.sa-audit-detail pre {
+  margin: var(--sa-space-1) 0 0;
+  max-height: 12rem;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: var(--sa-font-mono);
+  font-size: var(--sa-text-sm);
+  color: var(--sa-fg-muted);
+}
+.sa-audit-chip {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sa-audit-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sa-space-2);
 }
