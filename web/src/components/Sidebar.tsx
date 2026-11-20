@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import type { Bot, Room, RoomId } from "../api/types";
 
 interface Props {
@@ -9,10 +9,26 @@ interface Props {
   version: string;
   onSelect(id: RoomId): void;
   onCreateRoom(name: string): Promise<void>;
+  /** 每加一就打开「新建房间」的输入框（命令面板里点的）。 */
+  createSignal: number;
+  onOpenPalette(): void;
 }
 
-export function Sidebar({ rooms, bots, selectedRoomId, connected, version, onSelect, onCreateRoom }: Props) {
+export function Sidebar({
+  rooms,
+  bots,
+  selectedRoomId,
+  connected,
+  version,
+  onSelect,
+  onCreateRoom,
+  createSignal,
+  onOpenPalette,
+}: Props) {
   const [creating, setCreating] = useState(false);
+  useEffect(() => {
+    if (createSignal > 0) setCreating(true);
+  }, [createSignal]);
   const [name, setName] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -51,6 +67,10 @@ export function Sidebar({ rooms, bots, selectedRoomId, connected, version, onSel
           +
         </button>
       </header>
+      <button type="button" className="sa-search" onClick={onOpenPalette}>
+        <span>搜索、跳转…</span>
+        <kbd className="sa-kbd">Ctrl K</kbd>
+      </button>
 
       <section className="sa-section">
         <h2 className="sa-section-title">房间</h2>
