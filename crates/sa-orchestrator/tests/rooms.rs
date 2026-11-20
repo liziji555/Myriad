@@ -1284,6 +1284,36 @@ async fn mentioning_another_bot_interrupts_the_speaker() {
     t.rig.orchestrator.shutdown().await;
 }
 
+/// 「点名找别人」的消息落库之后、打断信号发出之前，正在说话的 Bot 可能刚好读到它。
+/// 这条消息不能算成它处理过的：等它这一轮结束，被点到的 Bot 仍然要来接。
+#[tokio::test]
+async fn a_message_for_another_bot_is_not_swallowed_by_the_speaker() {
+    let dir = tempfile::tempdir().unwrap();
+    let bots = vec![
+        // Coder 要执行命令，停在审批卡上。
+        MockReply::tool_calls("", &[("c1", "shell", r#"{"command":"echo hi"}"#)]),
+        MockReply::text("命令跑完了"),
+        MockReply::text("我来接"),
+    ];
+    let t = team(dir.path(), vec![], bots);
+    t.rig.say("@Coder 跑一下").await;
+    let approval = t.rig.waiting_approval().await;
+    // 只落库、不发打断信号：就是那个空档里的样子。
+    t.rig
+        .engine
+        .post_user_message(&t.rig.room, "@Reviewer 还是你来")
+        .unwrap();
+    // 命令做完，Coder 在下一步之前读到了这条消息。
+    assert!(t.rig.orchestrator.decide(&approval, ApprovalDecision::Once));
+    t.rig.until_idle().await;
+
+    let all = t.rig.messages();
+    let last = all.last().unwrap();
+    assert_eq!(sender_of(last), Some(&t.reviewer), "{all:#?}");
+    assert_eq!(last.content, "我来接");
+    t.rig.orchestrator.shutdown().await;
+}
+
 /// 「停止」：正在说的停下，排着队的也不再说。重启之后已经处理过的消息不会被再答一遍。
 #[tokio::test]
 async fn stop_ends_the_whole_exchange_and_a_restart_does_not_replay_it() {

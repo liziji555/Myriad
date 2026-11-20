@@ -458,8 +458,10 @@ impl Inbox for RoomInbox {
             if message.content.trim().is_empty() {
                 continue;
             }
-            if speaker.is_none() {
-                // 正在说话的 Bot 看到了这条人类消息：不用再另外挑人来接。
+            // 正在说话的 Bot 看到了这条人类消息：不用再另外挑人来接。
+            // 点名找别的 Bot 的不算：这一轮马上会被打断，那条消息要留给被点到的 Bot。
+            let for_me = message.mentions.first().is_none_or(|id| id == &self.bot_id);
+            if speaker.is_none() && for_me {
                 self.link.handled.fetch_max(message.seq, Ordering::SeqCst);
             }
             let to_me = if message.mentions.contains(&self.bot_id) {
