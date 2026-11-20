@@ -53,7 +53,7 @@ impl App {
         args: &RunArgs,
         models: impl FnOnce(&Config) -> Arc<dyn ModelRouter>,
     ) -> Result<Self> {
-        std::fs::create_dir_all(data_dir.root())
+        create_private_dir(data_dir.root())
             .with_context(|| format!("无法创建数据目录 {}", data_dir.root().display()))?;
         let lock = lock_data_dir(&data_dir.lock())?;
         if write_if_missing(&data_dir.config(), DEFAULT_CONFIG_TOML)? {
@@ -139,6 +139,16 @@ fn lock_data_dir(path: &Path) -> Result<std::fs::File> {
     }
 }
 
+/// 建目录（连同缺的上级）。新建出来的目录只有当前用户能进：里面有令牌、数据库和会话记录。
+/// 已经存在的目录不动它的权限。
+fn create_private_dir(path: &Path) -> std::io::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    builder.create(path)
+}
+
 /// 文件不存在时写入 `contents`；返回是否新建了文件。已有的文件不动。
 pub fn write_if_missing(path: &Path, contents: &str) -> Result<bool> {
     match open_new_private(path) {
@@ -208,6 +218,23 @@ mod tests {
         assert!(err.contains("正被另一个"), "{err}");
         drop(app);
         open(&data, dir.path()).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn new_data_dir_is_private_and_an_existing_one_is_left_alone() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        let dir = tempfile::tempdir().unwrap();
+        let fresh = dir.path().join("fresh");
+        drop(open(&fresh, dir.path()).unwrap());
+        assert_eq!(mode(&fresh), 0o700);
+
+        let existing = dir.path().join("existing");
+        std::fs::create_dir(&existing).unwrap();
+        std::fs::set_permissions(&existing, std::fs::Permissions::from_mode(0o755)).unwrap();
+        drop(open(&existing, dir.path()).unwrap());
+        assert_eq!(mode(&existing), 0o755);
     }
 
     #[test]

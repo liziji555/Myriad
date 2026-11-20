@@ -86,13 +86,12 @@ impl Transcript {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).map_err(io)?;
         }
-        let mut file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(path)
-            .map_err(io)?;
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
+        // 记录里有用户说的话和工具读到的文件内容，只给当前用户读写。
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        let mut file = options.open(path).map_err(io)?;
         let mut raw = Vec::new();
         file.read_to_end(&mut raw).map_err(io)?;
 
@@ -316,6 +315,17 @@ mod tests {
         let first: serde_json::Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
         assert_eq!(first["type"], "user");
         assert_eq!(first["message_seq"], 3);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn new_transcripts_are_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sessions/s.jsonl");
+        Transcript::open(&path).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
     }
 
     #[test]
