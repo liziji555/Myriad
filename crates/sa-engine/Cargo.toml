@@ -1,0 +1,20 @@
+[package]
+name = "sa-engine"
+description = "SuperAgent 的领域层：唯一的状态写入者"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+sa-protocol.workspace = true
+sa-store.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

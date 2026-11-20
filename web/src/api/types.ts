@@ -1,0 +1,10 @@
+// 类型由 Rust 侧生成（`cargo test` 时导出到 ./generated），这里只做汇总。
+export type { ApiError } from "./generated/ApiError";
+export type { Bot } from "./generated/Bot";
+export type { BotId } from "./generated/BotId";
+export type { CreateRoomRequest } from "./generated/CreateRoomRequest";
+export type { Event } from "./generated/Event";
+export type { Health } from "./generated/Health";
+export type { Room } from "./generated/Room";
+export type { RoomId } from "./generated/RoomId";
+export type { StreamReady } from "./generated/StreamReady";

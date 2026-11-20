@@ -1,0 +1,23 @@
+# SuperAgent 配置文件。改完后重启 `sa serve` 生效；用 `sa doctor` 检查写得对不对。
+
+[server]
+# 只监听本机。要从其他设备访问，请放到反向代理后面，不要直接改成 0.0.0.0。
+host = "127.0.0.1"
+port = 4517
+
+# 模型服务。密钥不写在这里，只写「存放密钥的环境变量名」。
+[providers.deepseek]
+kind = "openai_compat"
+base_url = "https://api.deepseek.com"
+api_key_env = "DEEPSEEK_API_KEY"
+
+# 模型档位。Bot 只引用档位（cheap / mid / strong），换模型只改这里。
+[tiers]
+cheap = { provider = "deepseek", model = "deepseek-flash" }
+mid = { provider = "deepseek", model = "deepseek-flash" }
+strong = { provider = "deepseek", model = "deepseek-v4-pro" }
+
+[budget]
+# 每天的花费硬上限，到了就停止调用模型。
+daily_limit = 50.0
+currency = "CNY"
