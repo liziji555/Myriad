@@ -175,3 +175,49 @@ pub struct CreateLinkRequest {
     /// `owner/name`。
     pub repo: String,
 }
+
+/// 一个技能：写在文件里的做事套路。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SkillInfo {
+    pub name: String,
+    pub description: String,
+    /// 给哪些 Bot 用（Bot 的名字）。空着就是谁都能用。
+    pub bots: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum McpState {
+    /// 正在启动、握手。
+    Connecting,
+    /// 连上了，工具能用。
+    Ready,
+    /// 没连上。
+    Failed,
+}
+
+/// 一个外部 MCP 服务现在怎么样。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct McpServerInfo {
+    pub name: String,
+    pub state: McpState,
+    /// 它提供的工具（服务自己的工具名）。
+    pub tools: Vec<String>,
+    /// 没连上的原因。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub error: Option<String>,
+}
+
+/// Bot 多出来的本事：技能和外部 MCP 服务的工具。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct Extensions {
+    pub skills: Vec<SkillInfo>,
+    /// 技能目录里没认出来的文件和原因。
+    pub skill_problems: Vec<String>,
+    pub mcp: Vec<McpServerInfo>,
+}

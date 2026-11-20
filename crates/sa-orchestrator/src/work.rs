@@ -296,9 +296,10 @@ async fn run_task(shared: &Arc<Shared>, task: Task, cancel: &CancellationToken) 
         (Err(error), _) => TurnEnd::Failed(format!("任务的会话记录打不开：{error}")),
         (_, Err(reason)) => TurnEnd::Failed(reason),
         (Ok(mut transcript), Ok(model)) => {
+            let skills = shared.skills_for(&bot.name).await;
             let config = TurnConfig {
                 model: model.model.clone(),
-                system_prompt: render_work_prompt(&bot, &fence),
+                system_prompt: render_work_prompt(&bot, &fence, &skills.prompt),
                 max_steps: shared.settings.max_steps,
                 max_tokens: None,
                 thinking: model.thinking,
@@ -315,7 +316,10 @@ async fn run_task(shared: &Arc<Shared>, task: Task, cancel: &CancellationToken) 
             };
             let mut ctx = ToolCtx::new(fence.clone());
             ctx.allow_private_network = shared.settings.allow_private_network;
-            let mut tools = shared.tools.clone();
+            let mut tools = shared.tools();
+            if let Some(tool) = skills.tool {
+                tools.register(tool);
+            }
             tools.register(ReportTool {
                 reported: reported.clone(),
             });
