@@ -1,5 +1,6 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { RoomChat } from "../api/chat";
+import { shownTriggers, triggerTitle } from "../api/routines";
 import { isLatestDelivery, type TaskBoard } from "../api/tasks";
 import type { TaskActions } from "../api/useWorkspace";
 import type { ApprovalDecision, ApprovalId, Bot, Message, Task, TaskId, ToolStep } from "../api/types";
@@ -76,11 +77,13 @@ export function Timeline({
 
   // 自己刚发的消息总要看得到。
   useEffect(() => {
-    if (last?.sender.kind === "user") {
+    if (last?.sender.kind === "user" && last.kind !== "routine") {
       stick.current = true;
       scroller.current?.scrollTo({ top: scroller.current.scrollHeight });
     }
-  }, [last?.id, last?.sender.kind]);
+  }, [last?.id, last?.sender.kind, last?.kind]);
+
+  const triggers = useMemo(() => shownTriggers(messages), [messages]);
 
   const loadOlder = async () => {
     setLoadingOlder(true);
@@ -134,6 +137,14 @@ export function Timeline({
           </li>
         )}
         {messages.map((message) => {
+          if (message.kind === "routine") {
+            // Bot 没什么可说时什么都不留，这一行也不显示。
+            return triggers.has(message.id) ? (
+              <li key={message.id} className="sa-msg-trigger">
+                定时任务「{triggerTitle(message.content)}」到点了 · {formatTime(message.created_at)}
+              </li>
+            ) : null;
+          }
           const task = tasks.find((t) => t.id === message.task_id);
           if (message.kind === "task" || message.kind === "delivery") {
             return (

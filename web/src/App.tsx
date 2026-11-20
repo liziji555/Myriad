@@ -198,6 +198,8 @@ function Shell() {
           taskActions={workspace.tasks}
           focusTask={focusTask}
           onFocusTask={setFocusTask}
+          routines={workspace.routines.filter((routine) => routine.room_id === room.id)}
+          routineActions={workspace.routineActions}
           activity={demoNodes}
           usageKey={workspace.notices.length}
         />

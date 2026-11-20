@@ -1029,3 +1029,31 @@ button.sa-row:hover {
   font-variant-numeric: tabular-nums;
   font-size: var(--sa-text-sm);
 }
+
+/* 定时任务 */
+.sa-routine-last {
+  margin: 0;
+  padding: 0 var(--sa-space-2) 0 calc(var(--sa-space-2) + 16px);
+  color: var(--sa-fg-muted);
+  font-size: var(--sa-text-sm);
+}
+.sa-routine-last[data-result="failed"] {
+  color: var(--sa-danger);
+}
+.sa-form > .sa-routine-last {
+  padding: 0;
+}
+.sa-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sa-space-1);
+}
+.sa-presets .sa-chip[aria-pressed="true"] {
+  border-color: var(--sa-accent);
+  color: var(--sa-accent);
+}
+.sa-msg-trigger {
+  justify-self: center;
+  color: var(--sa-fg-faint);
+  font-size: var(--sa-text-sm);
+}

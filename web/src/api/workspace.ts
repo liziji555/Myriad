@@ -1,13 +1,15 @@
-import type { Bot, BotRef, Event, Notice, Room, RoomId } from "./types";
+import type { Bot, BotRef, Event, Notice, Room, RoomId, Routine, RoutineRef } from "./types";
 
 export interface Workspace {
   readonly rooms: readonly Room[];
   readonly bots: readonly Bot[];
   /** 还没收起来的提醒，新的在前。 */
   readonly notices: readonly Notice[];
+  /** 所有房间的定时任务，按建的先后。 */
+  readonly routines: readonly Routine[];
 }
 
-export const emptyWorkspace: Workspace = { rooms: [], bots: [], notices: [] };
+export const emptyWorkspace: Workspace = { rooms: [], bots: [], notices: [], routines: [] };
 
 /** 在这个房间里要显示的提醒：关于这个房间的，和不专属于哪个房间的。 */
 export function noticesFor(notices: readonly Notice[], roomId: RoomId | null): Notice[] {
@@ -41,7 +43,27 @@ export function applyEvent(state: Workspace, event: Event): Workspace {
     }
     case "bot.deleted": {
       const gone = event.payload as BotRef;
-      return { ...state, bots: state.bots.filter((b) => b.id !== gone.id) };
+      // 它负责的定时任务跟着一起没了。
+      return {
+        ...state,
+        bots: state.bots.filter((b) => b.id !== gone.id),
+        routines: state.routines.filter((r) => r.bot_id !== gone.id),
+      };
+    }
+    case "routine.created":
+    case "routine.updated": {
+      const routine = event.payload as Routine;
+      const known = state.routines.some((r) => r.id === routine.id);
+      return {
+        ...state,
+        routines: known
+          ? state.routines.map((r) => (r.id === routine.id ? routine : r))
+          : [...state.routines, routine],
+      };
+    }
+    case "routine.deleted": {
+      const gone = event.payload as RoutineRef;
+      return { ...state, routines: state.routines.filter((r) => r.id !== gone.id) };
     }
     case "notice.created":
     case "notice.updated": {

@@ -1,11 +1,12 @@
 import type { TaskBoard } from "../api/tasks";
-import type { TaskActions, Team } from "../api/useWorkspace";
-import type { Bot, Room, TaskId } from "../api/types";
+import type { RoutineActions, TaskActions, Team } from "../api/useWorkspace";
+import type { Bot, Room, Routine, TaskId } from "../api/types";
 import { MembersPanel } from "./MembersPanel";
+import { RoutinesPanel } from "./RoutinesPanel";
 import { TasksPanel } from "./TasksPanel";
 import { UsagePanel } from "./UsagePanel";
 
-export type PanelTab = "tasks" | "members" | "usage" | "files" | "activity";
+export type PanelTab = "tasks" | "routines" | "members" | "usage" | "files" | "activity";
 
 export interface ActivityNode {
   id: string;
@@ -15,6 +16,7 @@ export interface ActivityNode {
 
 const TABS: readonly { id: PanelTab; label: string }[] = [
   { id: "tasks", label: "任务" },
+  { id: "routines", label: "定时" },
   { id: "members", label: "成员" },
   { id: "usage", label: "用量" },
   { id: "files", label: "文件" },
@@ -34,6 +36,9 @@ interface Props {
   /** 任务页里展开的是哪个任务。 */
   focusTask: TaskId | null;
   onFocusTask(taskId: TaskId | null): void;
+  /** 这个房间的定时任务。 */
+  routines: readonly Routine[];
+  routineActions: RoutineActions;
   activity: readonly ActivityNode[];
   /** 变了就让「用量」页重新拉一次。 */
   usageKey: number;
@@ -51,6 +56,8 @@ export function ContextPanel({
   taskActions,
   focusTask,
   onFocusTask,
+  routines,
+  routineActions,
   activity,
   usageKey,
 }: Props) {
@@ -85,6 +92,15 @@ export function ContextPanel({
             actions={taskActions}
             focus={focusTask}
             onFocus={onFocusTask}
+          />
+        )}
+        {tab === "routines" && (
+          <RoutinesPanel
+            room={room}
+            members={members.filter((bot) => bot.enabled)}
+            bots={bots}
+            routines={routines}
+            actions={routineActions}
           />
         )}
         {tab === "usage" && <UsagePanel refreshKey={usageKey} />}

@@ -6,6 +6,7 @@ import type {
   BotId,
   CreateBotRequest,
   CreateRoomRequest,
+  CreateRoutineRequest,
   CreateTaskRequest,
   Health,
   Message,
@@ -14,6 +15,8 @@ import type {
   NoticeId,
   Room,
   RoomId,
+  Routine,
+  RoutineId,
   StopResponse,
   Task,
   TaskActionRequest,
@@ -21,6 +24,7 @@ import type {
   TaskId,
   UpdateBotRequest,
   UpdateRoomRequest,
+  UpdateRoutineRequest,
   UsageSummary,
 } from "./types";
 
@@ -67,6 +71,9 @@ const taskPath = (taskId: TaskId, action?: string) =>
 
 const memberPath = (roomId: RoomId, botId: BotId) =>
   `/api/rooms/${encodeURIComponent(roomId)}/members/${encodeURIComponent(botId)}`;
+
+const routinePath = (id: RoutineId, action?: string) =>
+  `/api/routines/${encodeURIComponent(id)}${action ? `/${action}` : ""}`;
 
 export const api = {
   health: () => request<Health>("/api/health"),
@@ -116,4 +123,11 @@ export const api = {
   listNotices: () => request<Notice[]>("/api/notices"),
   dismissNotice: (id: NoticeId) =>
     postJson<Notice>(`/api/notices/${encodeURIComponent(id)}/dismiss`, {}),
+  listRoutines: () => request<Routine[]>("/api/routines"),
+  createRoutine: (body: CreateRoutineRequest) => postJson<Routine>("/api/routines", body),
+  updateRoutine: (id: RoutineId, body: UpdateRoutineRequest) =>
+    postJson<Routine>(routinePath(id), body, "PATCH"),
+  deleteRoutine: (id: RoutineId) => request<void>(routinePath(id), { method: "DELETE" }),
+  /** 现在就做一次。马上返回；做完之后结果由事件流送来。房间里正在对话时抛出 `conflict`。 */
+  runRoutine: (id: RoutineId) => postJson<Routine>(routinePath(id, "run"), {}),
 };
