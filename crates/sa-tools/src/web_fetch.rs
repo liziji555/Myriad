@@ -87,7 +87,9 @@ async fn fetch(mut url: Url, allow_private: bool) -> ToolResult {
         let _ = rustls::crypto::ring::default_provider().install_default();
         // 把域名钉在刚检查过的地址上：否则解析结果可能在检查之后换成内网地址。
         // 重定向自己处理，每一跳都重新检查。
+        // 不走系统代理：走代理时域名由代理自己解析，上面的地址检查就管不到真正连的是哪。
         let client = reqwest::Client::builder()
+            .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
             .resolve(&host, address)
             .user_agent(concat!("SuperAgent/", env!("CARGO_PKG_VERSION")))
