@@ -140,7 +140,11 @@ async fn dispatch(
     if let Some(bot_id) = mentioned {
         return Some(bot_id.clone());
     }
-    let latest = fresh.last()?;
+    // 定时任务指定的 Bot 不在了：这一次就不做，不另外挑人。人说的话照常挑。
+    let latest = fresh
+        .iter()
+        .rev()
+        .find(|message| message.kind != MessageKind::Routine)?;
     let fallback = room
         .host_bot_id
         .clone()
@@ -474,6 +478,12 @@ impl Inbox for RoomInbox {
             let mine = matches!(&message.sender, Sender::Bot { bot_id } if bot_id == &self.bot_id);
             match message.kind {
                 MessageKind::Chat => {}
+                // 定时任务只交给负责它的那个 Bot，别的 Bot 不用看。
+                MessageKind::Routine if message.mentions.first() != Some(&self.bot_id) => {
+                    self.last_seq = message.seq;
+                    continue;
+                }
+                MessageKind::Routine => {}
                 // 任务的运行过程不进对话：结果会以交付卡的形式出现。它没写完也不挡着后面的消息。
                 MessageKind::Run => continue,
                 // 自己开的任务自己知道（工具结果里有）。别人开的任务、所有的交付结果都要看到：
@@ -543,6 +553,7 @@ impl Inbox for RoomInbox {
                 ""
             };
             let content = match speaker {
+                None if message.kind == MessageKind::Routine => routine_input(&message.content),
                 None if self.solo => message.content,
                 None => format!("【用户{to_me}】{}", message.content),
                 Some(name) => format!("【{name}{to_me}】{}", message.content),
@@ -555,6 +566,14 @@ impl Inbox for RoomInbox {
         }
         inputs
     }
+}
+
+/// 定时任务到点时交给 Bot 的话。`content` 是「名字、空行、要做的事」。
+fn routine_input(content: &str) -> String {
+    let (title, prompt) = content.split_once("\n\n").unwrap_or(("", content));
+    format!(
+        "【定时任务「{title}」到点了】{prompt}\n\n（这是定时触发的，不是用户刚说的话。做完之后没有值得告诉用户的，就只回 {PASS}，不要为了说话而说话。）"
+    )
 }
 
 /// 第一批输入在开始这一轮之前已经取出来了（用来判断要不要开始），这里先把它交出去。
