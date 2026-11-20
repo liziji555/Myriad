@@ -155,6 +155,13 @@ async fn turn(
             (MessageState::Interrupted, None)
         }
         Ok(TurnEnd::Cancelled) => (MessageState::Cancelled, None),
+        Ok(TurnEnd::Truncated) => (
+            MessageState::Failed,
+            Some(
+                "回复太长，到了模型单次输出的上限，后面被截断了。发一句「继续」可以让它接着写。"
+                    .into(),
+            ),
+        ),
         Ok(TurnEnd::MaxSteps) => (
             MessageState::Failed,
             Some(format!(

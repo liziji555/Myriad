@@ -1,7 +1,7 @@
 //! 端到端：真实的 Engine（SQLite 文件）+ 会话记录文件 + 脚本化的假模型。
 
 use sa_engine::Engine;
-use sa_llm::{LlmError, MockProvider, MockReply, StreamEvent};
+use sa_llm::{LlmError, MockProvider, MockReply, StopReason, StreamEvent};
 use sa_orchestrator::{ModelRouter, Orchestrator, ResolvedModel, Settings, SingleModel};
 use sa_protocol::{Message, MessageState, ModelTier, RoomId, Sender, StepState};
 use sa_store::Store;
@@ -283,6 +283,27 @@ async fn model_failures_surface_on_the_message_and_do_not_loop() {
     rig.say("再试一次").await;
     let reply = rig.settled(4).await.pop().unwrap();
     assert_eq!(reply.content, "这次好了");
+    rig.orchestrator.shutdown().await;
+}
+
+#[tokio::test]
+async fn reply_cut_off_at_the_output_limit_is_flagged() {
+    let dir = tempfile::tempdir().unwrap();
+    let rig = start(
+        dir.path(),
+        vec![MockReply::Events(vec![
+            StreamEvent::TextDelta("写到这里就没".into()),
+            StreamEvent::Done {
+                stop: StopReason::MaxTokens,
+            },
+        ])],
+        true,
+    );
+    rig.say("写一篇长文").await;
+    let reply = rig.settled(2).await.pop().unwrap();
+    assert_eq!(reply.state, MessageState::Failed);
+    assert_eq!(reply.content, "写到这里就没");
+    assert!(reply.error.as_deref().unwrap().contains("截断"));
     rig.orchestrator.shutdown().await;
 }
 

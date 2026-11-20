@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use futures_util::stream::{self, StreamExt};
 use sa_llm::{
     open_with_retry, Accumulator, ChatMessage, ChatRequest, LlmError, Provider, RetryPolicy,
-    StreamEvent, ToolCall, ToolSpec, Usage,
+    StopReason, StreamEvent, ToolCall, ToolSpec, Usage,
 };
 use sa_tools::{ToolCtx, ToolRegistry};
 use serde_json::Value;
@@ -55,6 +55,8 @@ pub trait Observer: Send + Sync {
 pub enum TurnEnd {
     /// 模型说完了。
     Completed,
+    /// 回复到了模型的输出长度上限，被截断了。已经写出来的部分在记录里。
+    Truncated,
     /// 被取消（人点了停止，或者服务在关闭）。
     Cancelled,
     /// 调模型的次数到了上限。
@@ -186,6 +188,7 @@ impl Turn {
                 });
             }
 
+            let truncated = reply.stop == Some(StopReason::MaxTokens);
             let calls = reply.tool_calls;
             transcript.append(EntryBody::Assistant {
                 content: reply.text,
@@ -194,7 +197,11 @@ impl Turn {
             })?;
             // 要不要继续只看有没有工具调用，不看模型自己报的结束原因。
             if calls.is_empty() {
-                return Ok(TurnEnd::Completed);
+                return Ok(if truncated {
+                    TurnEnd::Truncated
+                } else {
+                    TurnEnd::Completed
+                });
             }
 
             let results = run_tools(&calls, tools, tool_ctx, observer, cancel).await;
@@ -393,7 +400,7 @@ fn clip(text: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sa_llm::{MockProvider, MockReply, Role, StopReason};
+    use sa_llm::{MockProvider, MockReply, Role};
     use sa_tools::{Fence, Tool, ToolError, ToolResult};
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -923,6 +930,42 @@ mod tests {
             .turn(&provider, vec![vec![says("四", 4)]], &observer, &cancel)
             .await;
         assert!(matches!(&unfinished.end, TurnEnd::Failed(m) if m.contains("没有正常结束")));
+    }
+
+    #[tokio::test]
+    async fn reply_cut_off_at_the_output_limit_is_not_reported_as_complete() {
+        let mut rig = rig();
+        let cut = |text: &str| {
+            MockReply::Events(vec![
+                StreamEvent::TextDelta(text.into()),
+                StreamEvent::Done {
+                    stop: StopReason::MaxTokens,
+                },
+            ])
+        };
+        let provider = MockProvider::scripted([cut("写到这里就没"), MockReply::text("接着写完了")]);
+        let cancel = CancellationToken::new();
+        let outcome = rig
+            .turn(
+                &provider,
+                vec![vec![says("写一篇长文", 1)]],
+                &Recorder::default(),
+                &cancel,
+            )
+            .await;
+        assert_eq!(outcome.end, TurnEnd::Truncated);
+        // 写出来的那部分留在记录里，下一轮模型能接着写。
+        assert_eq!(rig.kinds(), ["user", "assistant"]);
+        let outcome = rig
+            .turn(
+                &provider,
+                vec![vec![says("继续", 2)]],
+                &Recorder::default(),
+                &cancel,
+            )
+            .await;
+        assert_eq!(outcome.end, TurnEnd::Completed);
+        assert_eq!(provider.requests()[1].messages[2].content, "写到这里就没");
     }
 
     #[tokio::test]
