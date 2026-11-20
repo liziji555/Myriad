@@ -218,8 +218,14 @@ fn demo_reply(request: &ChatRequest) -> MockReply {
         );
     }
     let quoted: String = last.content.chars().take(80).collect();
+    // 报出上下文里有几条用户消息：重启之后数字接着涨，说明历史带上了。
+    let turn = request
+        .messages
+        .iter()
+        .filter(|m| m.role == Role::User)
+        .count();
     MockReply::text(&format!(
-        "你好！我是 Mock 模型，只会按固定规则回话，用来在没有密钥时把流程跑通。\n\n你刚才说的是：「{quoted}」\n\n想看工具调用的话，发一条带反引号路径的消息，例如：读一下 `README.md`。"
+        "你好！我是 Mock 模型，只会按固定规则回话，用来在没有密钥时把流程跑通。\n\n你刚才说的是：「{quoted}」（这是这个会话里你的第 {turn} 条消息）\n\n想看工具调用的话，发一条带反引号路径的消息，例如：读一下 `README.md`。"
     ))
 }
 

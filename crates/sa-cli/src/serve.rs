@@ -1,13 +1,10 @@
-use crate::config::{Config, DEFAULT_CONFIG_TOML};
+use crate::app::{init_logging, write_if_missing, App, RunArgs};
 use crate::paths::DataDir;
 use anyhow::{Context, Result};
-use sa_engine::Engine;
 use sa_server::AppState;
-use sa_store::Store;
-use std::io::{ErrorKind, Write};
+use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::path::Path;
-use std::sync::Arc;
 use tokio::net::TcpListener;
 
 #[derive(clap::Args)]
@@ -18,25 +15,17 @@ pub struct ServeArgs {
     /// 启动后自动打开浏览器
     #[arg(long)]
     open: bool,
+    #[command(flatten)]
+    run: RunArgs,
 }
 
 pub fn run(data_dir: &DataDir, args: ServeArgs) -> Result<()> {
-    init_logging();
-    std::fs::create_dir_all(data_dir.root())
-        .with_context(|| format!("无法创建数据目录 {}", data_dir.root().display()))?;
-    let _lock = lock_data_dir(&data_dir.lock())?;
-    if write_if_missing(&data_dir.config(), DEFAULT_CONFIG_TOML)? {
-        tracing::info!("已生成默认配置 {}", data_dir.config().display());
-    }
-    let config = Config::load(&data_dir.config())?;
+    init_logging(tracing::Level::INFO);
+    let app = App::open(data_dir, &args.run)?;
     let token = load_or_create_token(&data_dir.token())?;
 
-    let store = Store::open(&data_dir.database())
-        .with_context(|| format!("无法打开数据库 {}", data_dir.database().display()))?;
-    let engine = Arc::new(Engine::new(store)?);
-    engine.ensure_defaults()?;
-
-    let addr = SocketAddr::new(config.server.host, args.port.unwrap_or(config.server.port));
+    let server = &app.config.server;
+    let addr = SocketAddr::new(server.host, args.port.unwrap_or(server.port));
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
@@ -49,6 +38,10 @@ pub fn run(data_dir: &DataDir, args: ServeArgs) -> Result<()> {
             })?;
             let url = format!("http://{}/auth?token={token}", listener.local_addr()?);
             println!("SuperAgent 已启动，数据目录：{}", data_dir.root().display());
+            println!("Bot 能读取的工作目录：{}", app.workdir);
+            if app.mock {
+                println!("当前用的是不联网的假模型（--mock），回复是固定规则生成的。");
+            }
             println!("在浏览器里打开：{url}");
             println!("按 Ctrl+C 停止。");
             if args.open {
@@ -56,65 +49,16 @@ pub fn run(data_dir: &DataDir, args: ServeArgs) -> Result<()> {
                     tracing::warn!("无法自动打开浏览器：{e}");
                 }
             }
-            sa_server::serve(listener, AppState::new(engine, token), async {
+            let state = AppState::new(app.engine.clone(), app.orchestrator.clone(), token);
+            let orchestrator = app.orchestrator.clone();
+            sa_server::serve(listener, state, async move {
                 let _ = tokio::signal::ctrl_c().await;
+                // 先让 Bot 停笔、把没写完的回复标成「中断」，再关连接：浏览器还来得及收到这个状态。
+                orchestrator.shutdown().await;
             })
             .await?;
             Ok(())
         })
-}
-
-fn init_logging() {
-    let level = std::env::var("SA_LOG")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(tracing::Level::INFO);
-    tracing_subscriber::fmt()
-        .with_max_level(level)
-        .with_writer(std::io::stderr)
-        .init();
-}
-
-/// 独占数据目录，直到返回的文件被关闭（进程退出时系统会自动释放）。
-/// 引擎假定自己是唯一的写入者，两个服务共用一个目录会互相看不到对方的事件。
-fn lock_data_dir(path: &Path) -> Result<std::fs::File> {
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(path)
-        .with_context(|| format!("无法创建 {}", path.display()))?;
-    match file.try_lock() {
-        Ok(()) => Ok(file),
-        Err(std::fs::TryLockError::WouldBlock) => anyhow::bail!(
-            "这个数据目录正被另一个 sa serve 使用：请先停掉它，或用 --data-dir 换一个目录"
-        ),
-        Err(std::fs::TryLockError::Error(e)) => {
-            Err(e).with_context(|| format!("无法锁定 {}", path.display()))
-        }
-    }
-}
-
-/// 文件不存在时写入 `contents`；返回是否新建了文件。已有的文件不动。
-fn write_if_missing(path: &Path, contents: &str) -> Result<bool> {
-    match open_new_private(path) {
-        Ok(mut file) => {
-            file.write_all(contents.as_bytes())
-                .with_context(|| format!("写入 {} 失败", path.display()))?;
-            Ok(true)
-        }
-        Err(e) if e.kind() == ErrorKind::AlreadyExists => Ok(false),
-        Err(e) => Err(e).with_context(|| format!("无法创建 {}", path.display())),
-    }
-}
-
-/// 新建一个只有当前用户能读写的文件；已存在则报 `AlreadyExists`。
-fn open_new_private(path: &Path) -> std::io::Result<std::fs::File> {
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    options.open(path)
 }
 
 /// 访问令牌保存在数据目录里，重启后链接不变。
@@ -157,16 +101,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn data_dir_lock_is_exclusive_until_released() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("serve.lock");
-        let held = lock_data_dir(&path).unwrap();
-        assert!(lock_data_dir(&path).is_err());
-        drop(held);
-        lock_data_dir(&path).unwrap();
-    }
-
-    #[test]
     fn token_is_created_once_and_reused() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("token");
@@ -181,15 +115,6 @@ mod tests {
         let path = dir.path().join("token");
         std::fs::write(&path, "short").unwrap();
         assert!(load_or_create_token(&path).is_err());
-    }
-
-    #[test]
-    fn write_if_missing_keeps_existing_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.toml");
-        assert!(write_if_missing(&path, "a").unwrap());
-        assert!(!write_if_missing(&path, "b").unwrap());
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "a");
     }
 
     #[cfg(unix)]

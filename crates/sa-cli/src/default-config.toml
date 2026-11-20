@@ -12,8 +12,9 @@ base_url = "https://api.deepseek.com"
 api_key_env = "DEEPSEEK_API_KEY"
 
 # 模型档位。Bot 只引用档位（cheap / mid / strong），换模型只改这里。
+# thinking 控制思考模式：true 开、false 关，不写就用模型服务的默认值。
 [tiers]
-cheap = { provider = "deepseek", model = "deepseek-flash" }
+cheap = { provider = "deepseek", model = "deepseek-flash", thinking = false }
 mid = { provider = "deepseek", model = "deepseek-flash" }
 strong = { provider = "deepseek", model = "deepseek-v4-pro" }
 

@@ -51,6 +51,9 @@ pub struct Tiers {
 pub struct TierModel {
     pub provider: String,
     pub model: String,
+    /// 是否开启思考模式。不写就用模型服务自己的默认值。
+    #[serde(default)]
+    pub thinking: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -137,6 +140,13 @@ mod tests {
             config.providers["deepseek"].kind,
             ProviderKind::OpenaiCompat
         );
+    }
+
+    #[test]
+    fn tier_thinking_is_optional() {
+        let config = Config::parse(DEFAULT_CONFIG_TOML).unwrap();
+        assert_eq!(config.tiers.cheap.thinking, Some(false));
+        assert_eq!(config.tiers.strong.thinking, None);
     }
 
     #[test]

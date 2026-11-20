@@ -29,6 +29,15 @@ impl Fence {
         Ok(Self { root, denied })
     }
 
+    /// 给人看的根目录。Windows 上去掉规范化路径带的 `\\?\` 前缀。
+    pub fn root_display(&self) -> String {
+        let text = self.root.display().to_string();
+        match text.strip_prefix(r"\\?\") {
+            Some(rest) if !rest.starts_with("UNC\\") => rest.to_string(),
+            _ => text,
+        }
+    }
+
     pub fn root(&self) -> &Path {
         &self.root
     }

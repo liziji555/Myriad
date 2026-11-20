@@ -172,7 +172,7 @@ pub(crate) fn render_prompt(settings: &Settings, bot_name: &str) -> String {
         .as_deref()
         .unwrap_or(DEFAULT_PROMPT)
         .replace("{bot_name}", bot_name)
-        .replace("{workspace}", &settings.fence.root().display().to_string())
+        .replace("{workspace}", &settings.fence.root_display())
 }
 
 /// 所有档位都用同一个模型。测试和 `--mock` 用。
