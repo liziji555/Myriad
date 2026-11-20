@@ -606,6 +606,29 @@ button.sa-row:hover {
 .sa-mention-menu li[aria-selected="true"] {
   background: var(--sa-active);
 }
+/* 一步交回来的结果：默认只露出开头几行，展开后自己滚，不把时间线撑开。 */
+.sa-step-output {
+  display: grid;
+  justify-items: start;
+  gap: 2px;
+  min-width: 0;
+  padding: 2px 0 var(--sa-space-1) 16px;
+}
+.sa-step-output pre {
+  box-sizing: border-box;
+  width: 100%;
+  max-height: 320px;
+  margin: 0;
+  padding: var(--sa-space-1) var(--sa-space-2);
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  border-radius: var(--sa-radius-sm);
+  background: var(--sa-hover);
+  color: var(--sa-fg-muted);
+  font-family: var(--sa-font-mono);
+  font-size: var(--sa-text-xs);
+}
 /* 往上翻走之后浮在时间线底部的「回到最新」。 */
 .sa-to-latest {
   position: sticky;

@@ -1,3 +1,4 @@
+import { outputPreview } from "../api/steps";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { RoomChat } from "../api/chat";
 import { safeUrl, sourceName, splitEvent } from "../api/links";
@@ -476,6 +477,8 @@ function Steps({ steps, onDecide }: { steps: readonly ToolStep[]; onDecide: Deci
 }
 
 function StepItem({ step, onDecide }: { step: ToolStep; onDecide: Decide }) {
+  const [full, setFull] = useState(false);
+  const preview = step.output ? outputPreview(step.output) : null;
   return (
     <li className="sa-step" data-state={step.state}>
       <div className="sa-step-line">
@@ -485,6 +488,16 @@ function StepItem({ step, onDecide }: { step: ToolStep; onDecide: Decide }) {
         </span>
         <span className="sa-step-state">{STEP_LABEL[step.state]}</span>
       </div>
+      {preview && (
+        <div className="sa-step-output">
+          <pre tabIndex={full ? 0 : undefined}>{full ? step.output : preview.text}</pre>
+          {preview.cut && (
+            <button type="button" className="sa-link" aria-expanded={full} onClick={() => setFull(!full)}>
+              {full ? "收起" : "查看完整"}
+            </button>
+          )}
+        </div>
+      )}
       {step.state === "waiting" && step.approval && (
         <ApprovalCard
           id={step.approval.id}
