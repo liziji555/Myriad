@@ -63,3 +63,19 @@ issue_labels = []
 # 不设令牌就不连 Telegram。哪个聊天进哪个房间，在界面的「连接」页里生成配对码来定。
 token_env = "TELEGRAM_BOT_TOKEN"
 api_base = "https://api.telegram.org"
+
+# 外部 MCP 服务：它们的工具会加给每个 Bot，名字是 mcp__<服务名>__<工具名>。
+# 只支持在本机启动、通过标准输入输出说话的服务。每一节是一个服务，例如：
+#
+# [mcp.files]
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-filesystem", "."]
+# # 服务拿不到 sa 的环境变量（模型密钥之类），只有 PATH、HOME 这几个基本的。要给的写在这里：
+# env = { LOG_LEVEL = "warn" }
+# # 或者把 sa 自己环境里的变量原样传过去（密钥放环境变量里，不写进这个文件）：
+# env_from = ["FILES_TOKEN"]
+# # 它的工具每次调用都要你批准；这里列出的不用问：
+# auto_approve = ["read_file", "list_directory"]
+# # enabled = false   # 先停用
+#
+# 用 sa mcp test 试一下能不能连上、有哪些工具。

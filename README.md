@@ -2,7 +2,7 @@
 
 Rust 多 Bot Agent Harness：房间里的 AI 团队。一个可执行文件，自带内核、本机服务和三栏界面。
 
-## 现在能做什么（M6a）
+## 现在能做什么（M6b）
 
 - 任务：Bot 把要花些功夫的事开成任务，在独立的目录里做，做完交给你验收；验收通过，改动才回到你的工作目录
 - 任务里可以派子代理去查资料（只读），可以把任务分支推到远端、在 GitHub 上开 PR（每次都要你批准）
@@ -27,7 +27,8 @@ Rust 多 Bot Agent Harness：房间里的 AI 团队。一个可执行文件，�
 - Telegram：把聊天连到房间，在 Telegram 里对机器人说的话进房间，Bot 的回复送回那个聊天
 - `sa doctor`：检查数据目录、配置、模型密钥、git、GitHub 令牌、数据库、端口和前端页面
 
-还不能做：技能、MCP。这些在后面的里程碑里。
+- 技能：把做事的套路写成文件放进数据目录，Bot 碰到对得上的事会先读它再照着做
+- MCP：接本机启动的外部 MCP 服务，它们的工具加给每个 Bot，每次调用都要你批准
 
 ## 运行
 
@@ -349,6 +350,47 @@ Telegram 的机器人在群里默认开着隐私模式：只收得到带它名�
 接口：`GET /api/links`、`POST /api/links`（连仓库）、`DELETE /api/links/{id}`、`POST /api/rooms/{id}/pairing`（生成配对码）、
 `POST /hooks/github`（不用访问令牌，靠签名）。
 
+### 技能
+
+技能是事先写好的做事套路。放在数据目录的 `skills/` 里：`<名字>/SKILL.md`（旁边可以带别的文件），或者单独一个 `<名字>.md`。
+
+```markdown
+---
+name: 发版
+description: 发新版本之前要做的检查
+bots: Coder, 助手
+---
+1. 跑测试
+2. 改版本号
+```
+
+- 开头两行 `---` 之间的三项都可以不写：名字默认是文件名，说明默认是正文第一行，`bots` 不写就是所有 Bot 都能用。
+- Bot 的提示词里只有「名字 + 一句话说明」；它觉得对得上了，用 `skill` 工具读全文（不用你批准），技能带着的别的文件也用它读。
+- 每一轮对话都从磁盘上重新读：加、改、删技能不用重启。在对话里和任务里都能用。
+- 最多 50 个技能，一个文件最多 64 KB。没认出来的文件和原因在界面右侧「扩展」页、`sa skill list` 和 `sa doctor` 里看。
+- 自定义了 `prompts/chat.md` 的话，可以用 `{skills}` 指定这一段放在哪；没写就接在最后。
+
+### 外部 MCP 服务
+
+在 `config.toml` 里每个服务写一节，重新启动之后它的工具会加给每个 Bot，名字是 `mcp__<服务名>__<工具名>`：
+
+```toml
+[mcp.files]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "."]
+env = { LOG_LEVEL = "warn" }          # 给它的环境变量
+env_from = ["FILES_TOKEN"]            # 把 sa 自己环境里的这几个变量原样传过去
+auto_approve = ["read_file"]          # 这些工具不用问；别的每次调用都要你批准
+```
+
+- 只支持在本机启动、通过标准输入输出说话的服务；通过网址连接的远程服务还不支持。只用它的工具，资源和提示词模板不管。
+- 服务在工作目录里启动，拿不到 `sa` 的环境变量（模型密钥、GitHub 令牌……），只有 `PATH`、`HOME` 这几个基本的，要给的在配置里写明。
+- `sa serve` 启动时在后台连，连上了工具才出现；哪个没连上只在「扩展」页里写明原因，不耽误别的。服务中途退出了，下一次调用时重新启动一次。
+- 一次调用最多等 120 秒；「停止」会通知服务取消。服务不在路径围栏里：它能做什么由它自己决定，所以默认每次都问你。
+- `sa mcp test` 连一下试试、列出工具；`sa mcp list` 看配置了哪些。
+
+接口：`GET /api/extensions`（技能和 MCP 服务现在的样子）。
+
 ### 对话太长怎么办
 
 对话快占满模型的上下文窗口时，Bot 会先把前面的部分总结成一份摘要（时间线上显示「对话太长，压缩前面的内容」），
@@ -369,13 +411,17 @@ Telegram 的机器人在群里默认开着隐私模式：只收得到带它名�
 | `sa task list [--room 房间]` / `show <任务>` / `add <标题> --scope 做什么 [--acceptance 验收标准] [--owner Bot]` / `resume <任务> [--note 话] [--owner Bot]` / `accept <任务>` / `reject <任务> --note 意见` / `cancel <任务>` | 任务。`<任务>` 可以只写 ID 的开头几位；`add`、`resume`、`reject` 会等到任务需要你处理为止 |
 | `sa routine list` / `add --room 房间 [--bot Bot] --title 名字 --schedule "0 9 * * *" <到点做什么>` / `enable <定时任务>` / `disable <定时任务>` / `remove <定时任务>` | 定时任务。`<定时任务>` 写 ID 或名字 |
 | `sa link list` / `github <房间> <owner/name>` / `rm <连接>` | 和外面的连接。`<连接>` 写 ID、仓库名或聊天的名字；Telegram 聊天在界面里用配对码来连 |
+| `sa skill list` | 列出技能，以及没认出来的文件 |
+| `sa mcp list` / `test [服务名]` | 外部 MCP 服务：看配置了哪些、连一下试试并列出工具 |
 | `sa usage` | 今天和最近 7 天花了多少，按模型、Bot、任务分 |
 | `sa doctor` | 体检 |
 
 所有命令都可以加 `--data-dir <目录>` 指定数据目录。`sa serve`、`sa chat`、`sa task`、`sa routine`、`sa link`、`sa usage`、`sa bot`、`sa room` 用同一份数据，同一个数据目录同一时刻只能有一个在运行；
 `sa serve` 开着的时候，Bot 和房间在界面的「成员」面板里管理，定时任务在「定时」面板里管理。
 
-数据目录里：`config.toml` 配置，`state.db` 房间和消息，`sessions/*.jsonl` 每个会话发给模型的完整记录，`spill/` 被截短的工具结果的完整内容，`work/` 任务的独立目录，
+`sa skill`、`sa mcp`、`sa doctor` 不占数据目录，服务开着也能用。
+
+数据目录里：`config.toml` 配置，`skills/` 技能，`state.db` 房间和消息，`sessions/*.jsonl` 每个会话发给模型的完整记录，`spill/` 被截短的工具结果的完整内容，`work/` 任务的独立目录，
 `prompts/chat.md`（可选）替换内置的系统提示词。里面可以用 `{bot_name}`、`{workspace}`、`{persona}`（这个 Bot 的分工）、`{team}`（房间里别的 Bot 和协作规则）；
 没写后两个时，它们会接在提示词最后。
 
@@ -397,7 +443,7 @@ pnpm --dir web dev              # 前端热更新，/api 转发到 127.0.0.1:451
 | `crates/sa-store` | SQLite 持久层和迁移 |
 | `crates/sa-engine` | 领域层，唯一的状态写入者 |
 | `crates/sa-llm` | 模型接口：DeepSeek（OpenAI 兼容）流式调用、重试、测试用的假模型 |
-| `crates/sa-tools` | 工具（读、搜、抓网页、写、改、执行命令、待办）和路径围栏 |
+| `crates/sa-tools` | 工具（读、搜、抓网页、写、改、执行命令、待办）和路径围栏；技能；MCP 客户端 |
 | `crates/sa-kernel` | 会话记录（JSONL）、「模型—工具」循环、审批关口、自动压缩 |
 | `crates/sa-orchestrator` | 房间里来了消息，决定谁来接、让它跑一轮并把结果写回房间；Bot 之间的点名和次数上限；任务的调度、独立目录和工作会话 |
 | `crates/sa-adapters` | 和外面的接口：GitHub Webhook 的验签和解析、Telegram Bot API |

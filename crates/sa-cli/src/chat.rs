@@ -36,6 +36,8 @@ pub fn run(data_dir: &DataDir, args: ChatArgs) -> Result<ExitCode> {
         .block_on(async move {
             // 上次退出时没做完的任务接着排队。
             app.orchestrator.resume_tasks();
+            // 先把外部 MCP 服务连上再开始聊：第一句话就可能用到它们的工具。
+            app.connect_mcp().await;
             let mut out = std::io::stdout();
             let result = match args.message {
                 Some(text) => {

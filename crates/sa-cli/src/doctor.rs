@@ -105,6 +105,16 @@ pub fn collect(data_dir: &DataDir, env: &dyn Fn(&str) -> Option<String>) -> Vec<
             checks.push(Check::new(name, Status::Ok, detail));
         }
     }
+    checks.push(check_skills(data_dir));
+    if let Some(config) = &config {
+        let enabled = config.mcp.values().filter(|server| server.enabled).count();
+        let detail = match (config.mcp.len(), enabled) {
+            (0, _) => "没有配置（可选）".to_string(),
+            (all, on) if all == on => format!("配置了 {all} 个。用 sa mcp test 试能不能连上"),
+            (all, on) => format!("配置了 {all} 个，启用 {on} 个。用 sa mcp test 试能不能连上"),
+        };
+        checks.push(Check::new("MCP 服务", Status::Ok, detail));
+    }
     checks.push(check_database(data_dir));
     if let Some(config) = &config {
         checks.push(check_port(SocketAddr::new(
@@ -182,6 +192,22 @@ fn check_budget(config: &Config) -> Check {
 }
 
 /// 任务要用 git：给每个任务开独立目录、算改了什么、把改动带回来。
+fn check_skills(data_dir: &DataDir) -> Check {
+    let set = sa_tools::SkillSet::load(&data_dir.skills());
+    match (set.skills.len(), set.problems.first()) {
+        (0, None) => Check::new("技能", Status::Ok, "还没有（可选）"),
+        (count, None) => Check::new("技能", Status::Ok, format!("{count} 个")),
+        (count, Some(problem)) => Check::new(
+            "技能",
+            Status::Warn,
+            format!(
+                "{count} 个能用，{} 个没认出来，例如 {problem}",
+                set.problems.len()
+            ),
+        ),
+    }
+}
+
 fn check_git() -> Check {
     let found = std::process::Command::new("git").arg("--version").output();
     match found {

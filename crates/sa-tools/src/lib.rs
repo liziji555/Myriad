@@ -1,16 +1,18 @@
 //! 工具：模型能调用的动作。
 //!
-//! 这一版只有只读工具（读文件、列目录、按名字找、按内容搜、抓网页）。
 //! 文件类工具只能看工作目录里面的东西，见 [`fence`]。
+//! 技能（写在文件里的做事套路）见 [`skills`]，外部 MCP 服务提供的工具见 [`mcp`]。
 
 mod edit;
 mod fence;
 mod glob;
 mod grep;
 mod list_dir;
+pub mod mcp;
 pub mod process;
 mod read;
 mod shell;
+mod skills;
 mod todo;
 mod walk;
 mod web_fetch;
@@ -23,6 +25,7 @@ pub use grep::GrepTool;
 pub use list_dir::ListDirTool;
 pub use read::ReadTool;
 pub use shell::ShellTool;
+pub use skills::{Skill, SkillSet, SkillTool, MAX_SKILLS};
 pub use todo::TodoTool;
 pub use web_fetch::WebFetchTool;
 pub use write::WriteTool;
@@ -78,7 +81,7 @@ pub enum Permission {
 
 #[async_trait]
 pub trait Tool: Send + Sync {
-    fn name(&self) -> &'static str;
+    fn name(&self) -> &str;
 
     /// 给模型看的说明。
     fn description(&self) -> String;

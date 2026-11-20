@@ -8,6 +8,7 @@ import type {
   CreateRoomRequest,
   CreateLinkRequest,
   CreateRoutineRequest,
+  Extensions,
   CreateTaskRequest,
   Health,
   Message,
@@ -134,6 +135,8 @@ export const api = {
   deleteRoutine: (id: RoutineId) => request<void>(routinePath(id), { method: "DELETE" }),
   /** 现在就做一次。马上返回；做完之后结果由事件流送来。房间里正在对话时抛出 `conflict`。 */
   runRoutine: (id: RoutineId) => postJson<Routine>(routinePath(id, "run"), {}),
+  /** 现在有哪些技能、哪些外部 MCP 服务。 */
+  extensions: () => request<Extensions>("/api/extensions"),
   listLinks: () => request<Link[]>("/api/links"),
   /** 把一个 GitHub 仓库连到房间。 */
   createLink: (body: CreateLinkRequest) => postJson<Link>("/api/links", body),

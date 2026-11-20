@@ -180,6 +180,7 @@ function Shell() {
           tabAction("routines", "打开定时任务"),
           tabAction("members", "管理 Bot 和房间成员"),
           tabAction("links", "连接 GitHub 仓库和 Telegram 聊天"),
+          tabAction("extensions", "看技能和 MCP 服务"),
           tabAction("usage", "看用量和花费"),
           tabAction("activity", "看任务图"),
           {

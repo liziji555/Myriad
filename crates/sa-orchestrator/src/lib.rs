@@ -11,6 +11,7 @@ mod ask;
 mod budget;
 mod deliver;
 mod episode;
+mod extensions;
 mod github;
 mod room;
 mod router;
@@ -112,7 +113,12 @@ pub struct Orchestrator {
 pub(crate) struct Shared {
     pub engine: Arc<Engine>,
     pub models: Arc<dyn ModelRouter>,
-    pub tools: ToolRegistry,
+    /// 每个 Bot 都有的工具。连上外部 MCP 服务之后会变多，所以每一轮开始时取一份当时的。
+    pub tools: std::sync::RwLock<ToolRegistry>,
+    /// 技能放在哪个目录。没有设就是没有技能。
+    pub skills_dir: Mutex<Option<PathBuf>>,
+    /// 外部 MCP 服务，和它们现在怎么样。
+    pub mcp: Mutex<Vec<extensions::Mcp>>,
     pub settings: Settings,
     /// 触发后所有房间停下手里的事并退出。
     pub shutdown: CancellationToken,
@@ -166,7 +172,9 @@ impl Orchestrator {
             shared: Arc::new(Shared {
                 engine,
                 models,
-                tools: ToolRegistry::standard(),
+                tools: std::sync::RwLock::new(ToolRegistry::standard()),
+                skills_dir: Mutex::default(),
+                mcp: Mutex::default(),
                 settings,
                 shutdown: CancellationToken::new(),
                 approvals: Mutex::new(HashMap::new()),
@@ -296,6 +304,7 @@ impl Orchestrator {
             let _ = handle.task.await;
         }
         work::shutdown(&self.shared).await;
+        extensions::shutdown(&self.shared).await;
     }
 
     fn wake(&self, room_id: &RoomId) {
@@ -319,7 +328,14 @@ impl Orchestrator {
 /// 这个 Bot 在这个房间里的系统提示词。`others` 是房间里别的 Bot。
 ///
 /// 自定义的提示词里没有写 `{persona}`、`{team}` 时，这两段接在最后：换了提示词，协作规则也不会丢。
-pub(crate) fn render_prompt(settings: &Settings, bot: &Bot, others: &[Bot]) -> String {
+///
+/// `skills` 是这个 Bot 能用的技能那一段（没有就是空的），同样可以用 `{skills}` 指定放在哪。
+pub(crate) fn render_prompt(
+    settings: &Settings,
+    bot: &Bot,
+    others: &[Bot],
+    skills: &str,
+) -> String {
     let template = settings.prompt.as_deref().unwrap_or(DEFAULT_PROMPT);
     let persona = if bot.persona.is_empty() {
         String::new()
@@ -352,8 +368,14 @@ pub(crate) fn render_prompt(settings: &Settings, bot: &Bot, others: &[Bot]) -> S
         .replace("{bot_name}", &bot.name)
         .replace("{workspace}", &settings.fence.root_display())
         .replace("{persona}", &persona)
-        .replace("{team}", &team);
-    for (placeholder, block) in [("{persona}", persona), ("{team}", team)] {
+        .replace("{team}", &team)
+        .replace("{skills}", skills);
+    let skills = skills.to_string();
+    for (placeholder, block) in [
+        ("{persona}", persona),
+        ("{team}", team),
+        ("{skills}", skills),
+    ] {
         if !template.contains(placeholder) && !block.is_empty() {
             prompt = format!("{}\n\n{block}", prompt.trim_end());
         }
@@ -362,7 +384,7 @@ pub(crate) fn render_prompt(settings: &Settings, bot: &Bot, others: &[Bot]) -> S
 }
 
 /// 这个 Bot 在任务的工作会话里的系统提示词。`fence` 是任务的独立目录。
-pub(crate) fn render_work_prompt(bot: &Bot, fence: &Fence) -> String {
+pub(crate) fn render_work_prompt(bot: &Bot, fence: &Fence, skills: &str) -> String {
     let persona = if bot.persona.is_empty() {
         String::new()
     } else {
@@ -372,7 +394,11 @@ pub(crate) fn render_work_prompt(bot: &Bot, fence: &Fence) -> String {
         .replace("{bot_name}", &bot.name)
         .replace("{workspace}", &fence.root_display())
         .replace("{persona}", &persona);
-    prompt.trim_end().to_string() + "\n"
+    let mut prompt = prompt.trim_end().to_string();
+    if !skills.is_empty() {
+        prompt = format!("{prompt}\n\n{skills}");
+    }
+    prompt + "\n"
 }
 
 /// 所有档位都用同一个模型。测试和 `--mock` 用。

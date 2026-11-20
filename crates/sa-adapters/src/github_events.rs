@@ -210,9 +210,12 @@ pub fn parse(event: &str, delivery: &str, payload: &Value, options: &Options) ->
     if found.body.contains(MARKER) {
         return Parsed::Ignored("是 SuperAgent 自己发的".into());
     }
-    let body = match found.body.trim() {
-        "" => found.head,
-        text => format!("{}\n\n{text}", found.head),
+    // 只去掉前后的空行：正文第一行开头的空格是缩进（缩进四格的代码块），要留着。
+    let text = found.body.trim_end().trim_start_matches(['\r', '\n']);
+    let body = if text.trim().is_empty() {
+        found.head
+    } else {
+        format!("{}\n\n{text}", found.head)
     };
     Parsed::Event(Incoming {
         source: Source::Github,
@@ -442,6 +445,20 @@ mod tests {
                 "comment": { "body": format!("已经在修了。\n{MARKER}") },
             }))
         ));
+        // 正文开头的缩进（代码块）原样留着，只去掉前后的空行。
+        let code = base(json!({
+            "action": "created",
+            "issue": { "number": 7, "title": "t" },
+            "comment": { "body": "\n    let a = 1;\n    let b = 2;\n\n" },
+        }));
+        let Parsed::Event(incoming) = parse("issue_comment", "d", &code, &options) else {
+            panic!("应该收下");
+        };
+        let IncomingKind::Event { body, .. } = incoming.kind else {
+            panic!("应该是事件");
+        };
+        assert_eq!(body, "标题：t\n\n    let a = 1;\n    let b = 2;");
+
         // 记号只认评论正文里的：标题里写了这几个字的 issue，下面的评论照常收。
         assert!(!ignored(
             "issue_comment",

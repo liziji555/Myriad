@@ -2,6 +2,7 @@ mod app;
 mod chat;
 mod config;
 mod doctor;
+mod extensions;
 mod link;
 mod models;
 mod paths;
@@ -52,6 +53,16 @@ enum Command {
         #[command(subcommand)]
         command: link::LinkCommand,
     },
+    /// 技能：列出技能目录里的技能
+    Skill {
+        #[command(subcommand)]
+        command: extensions::SkillCommand,
+    },
+    /// 外部 MCP 服务：列出配置里的、连一下试试
+    Mcp {
+        #[command(subcommand)]
+        command: extensions::McpCommand,
+    },
     /// 任务：列出、开任务、继续、验收、打回、取消（不能和 sa serve 同时运行）
     Task(task::TaskArgs),
     /// 看今天和最近几天花了多少（不能和 sa serve 同时运行）
@@ -69,6 +80,8 @@ fn main() -> ExitCode {
         Command::Room { command } => team::run(&data_dir, team::Command::Room(command)),
         Command::Routine { command } => routine::run(&data_dir, command),
         Command::Link { command } => link::run(&data_dir, command),
+        Command::Skill { command } => extensions::skill(&data_dir, command),
+        Command::Mcp { command } => extensions::mcp(&data_dir, command),
         Command::Task(args) => task::run(&data_dir, args),
         Command::Usage => usage::run(&data_dir),
         Command::Doctor => Ok(doctor::run(&data_dir)),

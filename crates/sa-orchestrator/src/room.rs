@@ -328,9 +328,10 @@ async fn turn(
             Err(recorded.err().unwrap_or(reason))
         }
         Ok(model) => {
+            let skills = shared.skills_for(&bot.name).await;
             let config = TurnConfig {
                 model: model.model.clone(),
-                system_prompt: render_prompt(&shared.settings, bot, others),
+                system_prompt: render_prompt(&shared.settings, bot, others, &skills.prompt),
                 max_steps: shared.settings.max_steps,
                 max_tokens: None,
                 thinking: model.thinking,
@@ -347,7 +348,10 @@ async fn turn(
             };
             let mut ctx = ToolCtx::new(shared.settings.fence.clone());
             ctx.allow_private_network = shared.settings.allow_private_network;
-            let mut tools = shared.tools.clone();
+            let mut tools = shared.tools();
+            if let Some(tool) = skills.tool {
+                tools.register(tool);
+            }
             tools.register(CreateTaskTool {
                 shared: shared.clone(),
                 room_id: room_id.clone(),

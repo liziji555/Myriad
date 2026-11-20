@@ -113,6 +113,7 @@ impl App {
         };
         tune(&mut settings);
         let orchestrator = Arc::new(Orchestrator::new(engine.clone(), models, settings));
+        orchestrator.use_skills(data_dir.skills());
         Ok(Self {
             config,
             engine,
@@ -121,6 +122,26 @@ impl App {
             mock: args.mock,
             _lock: lock,
         })
+    }
+}
+
+impl App {
+    /// 配置里启用着的 MCP 服务。它们在工作目录里启动。
+    pub fn mcp_specs(&self) -> Vec<sa_tools::mcp::McpSpec> {
+        let env = |key: &str| std::env::var(key).ok().filter(|value| !value.is_empty());
+        self.config
+            .mcp_specs(std::path::Path::new(&self.workdir), env)
+    }
+
+    /// 把配置里的 MCP 服务连上再往下走：接下来的第一步就可能用到它们的工具。没连上的说一声，不拦着。
+    pub async fn connect_mcp(&self) {
+        for spec in self.mcp_specs() {
+            let name = spec.name.clone();
+            let server = Arc::new(sa_tools::mcp::McpServer::spawned(spec));
+            if let Err(error) = self.orchestrator.connect_mcp(server).await {
+                eprintln!("MCP 服务「{name}」没连上：{error}");
+            }
+        }
     }
 }
 
