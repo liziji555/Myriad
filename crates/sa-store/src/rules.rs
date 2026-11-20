@@ -45,6 +45,16 @@ pub fn list(conn: &Connection, room_id: &RoomId) -> Result<Vec<PermissionRule>> 
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
+pub fn get(conn: &Connection, id: &RuleId) -> Result<Option<PermissionRule>> {
+    Ok(conn
+        .query_row(
+            "SELECT id, room_id, tool, pattern, created_at FROM permission_rules WHERE id = ?1",
+            [id.as_str()],
+            from_row,
+        )
+        .optional()?)
+}
+
 /// 删除一条。返回是否真的删掉了。
 pub fn delete(conn: &Connection, id: &RuleId) -> Result<bool> {
     Ok(conn.execute("DELETE FROM permission_rules WHERE id = ?1", [id.as_str()])? > 0)

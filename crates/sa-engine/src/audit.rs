@@ -172,4 +172,145 @@ mod tests {
         // 刚记的不会被当成太旧的清掉。
         assert_eq!(engine.prune_audit().unwrap(), 0);
     }
+
+    #[test]
+    fn what_people_change_and_what_the_program_decides_is_on_record() {
+        use crate::{BotPatch, NewNotice, NewTask};
+        use sa_protocol::{ModelTier, NoticeKind, NoticeLevel, Sender, TaskState};
+
+        let engine = Engine::new(Store::open_in_memory().unwrap()).unwrap();
+        engine.ensure_defaults().unwrap();
+        let before = engine.list_audit(&AuditFilter::default(), 200).unwrap();
+        let skip = before.entries.len();
+
+        let room = engine.create_room("发布").unwrap();
+        let bot = engine
+            .create_bot("Coder", ModelTier::Mid, "写代码")
+            .unwrap();
+        engine.add_room_member(&room.id, &bot.id).unwrap();
+        let patch = BotPatch {
+            enabled: Some(false),
+            ..Default::default()
+        };
+        engine.update_bot(&bot.id, patch).unwrap();
+        let patch = BotPatch {
+            enabled: Some(true),
+            ..Default::default()
+        };
+        engine.update_bot(&bot.id, patch).unwrap();
+        let rule = engine
+            .allow_always(&room.id, "shell", "cargo test")
+            .unwrap();
+        assert!(engine.delete_rule(&rule.id).unwrap());
+        assert!(!engine.delete_rule(&rule.id).unwrap());
+        let link = engine.link_repo(&room.id, "Acme/Web").unwrap();
+        engine.delete_link(&link.id).unwrap();
+        let pairing = engine.create_pairing(&room.id).unwrap();
+        engine
+            .redeem_pairing(&pairing.code, "42", "家里的群")
+            .unwrap()
+            .unwrap();
+        let routine = engine
+            .create_routine(
+                &room.id,
+                Some(&bot.id),
+                "早报",
+                "看看有什么新 issue",
+                "0 9 * * *",
+            )
+            .unwrap();
+        engine.delete_routine(&routine.id).unwrap();
+        let task = engine
+            .create_task(NewTask {
+                room_id: room.id.clone(),
+                title: "修登录".into(),
+                scope: "登录页点了没反应".into(),
+                acceptance: String::new(),
+                owner_bot_id: Some(bot.id.clone()),
+                created_by: Sender::Bot {
+                    bot_id: bot.id.clone(),
+                },
+                workspace: String::new(),
+            })
+            .unwrap();
+        engine
+            .move_task(&task.id, TaskState::Cancelled, "不做了")
+            .unwrap();
+        let notice = NewNotice {
+            kind: NoticeKind::Budget,
+            level: NoticeLevel::Warning,
+            room_id: None,
+            task_id: None,
+            text: "今天的花费到上限了".into(),
+        };
+        engine.notify("budget:today", notice.clone()).unwrap();
+        // 同一条提醒不重复发，也就不重复留底。
+        engine.notify("budget:today", notice).unwrap();
+        engine.delete_bot(&bot.id).unwrap();
+
+        let mut entries = engine
+            .list_audit(&AuditFilter::default(), 200)
+            .unwrap()
+            .entries;
+        entries.reverse();
+        let entries = &entries[skip..];
+        let actions: Vec<&str> = entries.iter().map(|e| e.action.as_str()).collect();
+        assert_eq!(
+            actions,
+            [
+                "room.created",
+                "bot.created",
+                "room.updated",
+                "bot.updated",
+                "bot.updated",
+                "rule.removed",
+                "link.created",
+                "link.removed",
+                "pairing.created",
+                "link.created",
+                "routine.created",
+                "routine.deleted",
+                "task.created",
+                "task.cancelled",
+                "notice.budget",
+                "bot.deleted",
+            ]
+        );
+        let by = |action: &str| {
+            let found = entries.iter().rev().find(|e| e.action == action);
+            found.unwrap_or_else(|| panic!("没有 {action}")).clone()
+        };
+        assert_eq!(by("rule.removed").detail.as_deref(), Some("cargo test"));
+        // Telegram 那边用配对码连进来的，算外面来的；配对码本身哪里都不记。
+        let paired = by("link.created");
+        assert_eq!(
+            (paired.actor, paired.actor_name.as_str()),
+            (AuditActor::Outside, "Telegram")
+        );
+        assert!(entries.iter().all(|e| {
+            !e.summary.contains(&pairing.code)
+                && !e
+                    .detail
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains(&pairing.code)
+        }));
+        // Bot 开的任务记在 Bot 名下，带着房间和任务。
+        let created = by("task.created");
+        assert_eq!(
+            (created.actor, created.actor_name.as_str()),
+            (AuditActor::Bot, "Coder")
+        );
+        assert_eq!(created.task_id.as_ref(), Some(&task.id));
+        let cancelled = by("task.cancelled");
+        assert_eq!(cancelled.detail.as_deref(), Some("不做了"));
+        assert_eq!(by("notice.budget").actor, AuditActor::System);
+        assert_eq!(by("bot.deleted").summary, "删掉了 Bot「Coder」");
+        // 按任务找：这个任务从头到尾发生过什么。
+        let of_task = AuditFilter {
+            task_id: Some(task.id.clone()),
+            ..Default::default()
+        };
+        assert_eq!(engine.list_audit(&of_task, 50).unwrap().entries.len(), 2);
+    }
 }

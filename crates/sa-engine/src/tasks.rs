@@ -128,6 +128,20 @@ impl Engine {
             Ok(Ok((task, seq)))
         })??;
         self.publish(seq);
+        let summary = format!("开了任务「{}」", task.title);
+        let entry = match &task.created_by {
+            Sender::User => crate::Audit::user("task.created", summary),
+            Sender::Bot { bot_id } => {
+                let name = self.get_bot(bot_id).map(|bot| bot.name).unwrap_or_default();
+                crate::Audit::bot(&name, "task.created", summary)
+            }
+        };
+        self.audit(
+            entry
+                .room(&task.room_id)
+                .task(Some(&task.id))
+                .detail(&task.scope),
+        );
         Ok(task)
     }
 
@@ -199,7 +213,7 @@ impl Engine {
                 "补充的话不能超过 {MAX_TASK_TEXT_CHARS} 个字"
             )));
         }
-        self.change_task(id, |tx, task| {
+        let task = self.change_task(id, |tx, task| {
             if task.state == TaskState::Working {
                 if owner.is_some() {
                     return Err(EngineError::Invalid("任务正在做，先停下再换负责人".into()));
@@ -232,7 +246,15 @@ impl Engine {
                 tasks::push_input(tx, &task.id, note)?;
             }
             Ok(())
-        })
+        })?;
+        let summary = format!("让任务「{}」继续做", task.title);
+        self.audit(
+            crate::Audit::user("task.resumed", summary)
+                .room(&task.room_id)
+                .task(Some(&task.id))
+                .detail(note),
+        );
+        Ok(task)
     }
 
     /// 取走人给这个任务的、工作会话还没读到的话。没有时是空字符串。

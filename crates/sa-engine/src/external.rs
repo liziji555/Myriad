@@ -213,6 +213,8 @@ impl Engine {
                 Ok(Some(()))
             })?
             .ok_or_else(|| EngineError::NotFound("没有这个房间".into()))?;
+        // 码本身不留底：拿到它的人就能把自己的聊天连进来。
+        self.audit(Audit::user("pairing.created", "生成了一个 Telegram 配对码").room(room_id));
         Ok(Pairing {
             code,
             expires_at,
@@ -239,8 +241,13 @@ impl Engine {
         let Some(room) = found else {
             return Ok(None);
         };
-        self.add_link(&room.id, Source::Telegram, chat_id, title, true)
-            .map(Some)
+        let link = self.add_link(&room.id, Source::Telegram, chat_id, title, true)?;
+        let summary = format!(
+            "Telegram 聊天「{}」用配对码连到了房间「{}」",
+            link.title, room.name
+        );
+        self.audit(Audit::outside("Telegram", "link.created", summary).room(&room.id));
+        Ok(Some(link))
     }
 
     fn add_link(
