@@ -280,6 +280,7 @@ async fn run_task(shared: &Arc<Shared>, task: Task, cancel: &CancellationToken) 
         fence: fence.clone(),
         rule_scope: Some(task.id.to_string()),
         steps: Mutex::new(vec![]),
+        saving: tokio::sync::Mutex::new(()),
         // 工作会话里没有「不说话」这回事，字直接显示。
         held: Mutex::new(None),
         pulse: Some(pulse.clone()),

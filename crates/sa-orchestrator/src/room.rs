@@ -376,6 +376,7 @@ async fn turn(
         fence: shared.settings.fence.clone(),
         rule_scope: None,
         steps: Mutex::new(vec![]),
+        saving: tokio::sync::Mutex::new(()),
         held: Mutex::new(Some(String::new())),
         pulse: None,
     };
@@ -731,6 +732,9 @@ pub(crate) struct RoomObserver {
     /// 不能让同一条命令在对话里（在人的工作目录里跑）也跟着免问，反过来也一样。
     pub rule_scope: Option<String>,
     pub steps: Mutex<Vec<ToolStep>>,
+    /// 一次只有一个在往库里写步骤。几个工具同时结束时，各自的快照要按先后落库，
+    /// 不然旧的会盖掉新的，回复里就少了一步的结果。
+    pub saving: tokio::sync::Mutex<()>,
     /// 回复开头还分不清是不是 `(pass)` 的那几个字，先扣着不显示，免得界面上闪一下。
     /// 一旦确定不是，就变成 `None`，之后的字直接显示。
     pub held: Mutex<Option<String>>,
@@ -772,6 +776,8 @@ impl RoomObserver {
     }
 
     async fn save_steps(&self) {
+        // 先排上队再拍快照：轮到自己时写进去的一定不比前一个旧。
+        let _turn = self.saving.lock().await;
         let steps = self.steps.lock().unwrap().clone();
         let engine = self.shared.engine.clone();
         let id = self.message_id.clone();
