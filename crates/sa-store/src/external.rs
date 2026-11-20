@@ -165,7 +165,11 @@ pub struct Outbound {
     pub target: String,
     pub body: String,
     pub attempts: u32,
+    pub created_at: i64,
 }
+
+/// 送完了的、放弃了的记录留多久。
+const OUTBOUND_KEEP_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 
 /// 记下一条要送出去的话。同一个 `key` 已经记过时不改，返回 `false`。
 pub fn enqueue(
@@ -184,11 +188,16 @@ pub fn enqueue(
     Ok(added > 0)
 }
 
-/// 现在该送的，按记下的先后。
+/// 现在该送的，按记下的先后。同一个去处前面还有一条在等重试时，后面的不抢先。
 pub fn pending(conn: &Connection, source: Source, now: i64, limit: u32) -> Result<Vec<Outbound>> {
     let mut stmt = conn.prepare(
-        "SELECT id, target, body, attempts FROM outbound
-         WHERE state = 'pending' AND source = ?1 AND retry_at <= ?2 ORDER BY id LIMIT ?3",
+        "SELECT id, target, body, attempts, created_at FROM outbound AS o
+         WHERE state = 'pending' AND source = ?1 AND retry_at <= ?2
+           AND NOT EXISTS (
+               SELECT 1 FROM outbound AS earlier
+               WHERE earlier.state = 'pending' AND earlier.source = o.source
+                 AND earlier.target = o.target AND earlier.id < o.id AND earlier.retry_at > ?2)
+         ORDER BY id LIMIT ?3",
     )?;
     let rows = stmt.query_map(params![source.as_str(), now, limit], |row| {
         Ok(Outbound {
@@ -197,6 +206,7 @@ pub fn pending(conn: &Connection, source: Source, now: i64, limit: u32) -> Resul
             target: row.get(1)?,
             body: row.get(2)?,
             attempts: row.get(3)?,
+            created_at: row.get(4)?,
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -207,6 +217,10 @@ pub fn mark_sent(conn: &Connection, id: i64, now: i64) -> Result<()> {
         "UPDATE outbound SET state = 'sent', sent_at = ?2, error = NULL, attempts = attempts + 1
          WHERE id = ?1",
         params![id, now],
+    )?;
+    conn.execute(
+        "DELETE FROM outbound WHERE state != 'pending' AND created_at < ?1",
+        [now - OUTBOUND_KEEP_MS],
     )?;
     Ok(())
 }

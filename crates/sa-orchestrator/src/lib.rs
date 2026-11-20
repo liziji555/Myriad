@@ -15,6 +15,7 @@ mod github;
 mod room;
 mod router;
 mod routines;
+mod telegram;
 mod watchdog;
 mod work;
 mod workdir;
@@ -23,6 +24,8 @@ pub use budget::{Budget, Price};
 pub use episode::{MAX_BOT_TURNS, MAX_HOP, MAX_PAIR_ASKS};
 pub use github::{GitHub, DEFAULT_API_BASE};
 pub use routines::Routines;
+pub use sa_adapters::telegram::Telegram;
+pub use telegram::TelegramOptions;
 pub use watchdog::Watchdog;
 pub use work::MAX_PARALLEL_RUNS;
 

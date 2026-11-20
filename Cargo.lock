@@ -1756,6 +1756,7 @@ dependencies = [
  "futures-util",
  "reqwest",
  "rustls",
+ "sa-adapters",
  "sa-engine",
  "sa-kernel",
  "sa-llm",
