@@ -616,6 +616,13 @@ button.sa-row:hover {
   font-weight: 600;
   color: var(--sa-fg-muted);
 }
+.sa-panel-note {
+  margin: 0;
+  padding: 0 var(--sa-space-2);
+  color: var(--sa-fg-faint);
+  font-size: var(--sa-text-xs);
+  overflow-wrap: anywhere;
+}
 .sa-link {
   padding: 0;
   border: 0;

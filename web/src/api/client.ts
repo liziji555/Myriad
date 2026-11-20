@@ -12,6 +12,8 @@ import type {
   Extensions,
   CreateTaskRequest,
   Health,
+  ImportReport,
+  ImportTemplateRequest,
   Message,
   MessagePage,
   Notice,
@@ -28,6 +30,7 @@ import type {
   TaskActionRequest,
   TaskDetail,
   TaskId,
+  TemplateFile,
   UpdateBotRequest,
   UpdateRoomRequest,
   UpdateRoutineRequest,
@@ -137,6 +140,14 @@ export const api = {
   deleteRoutine: (id: RoutineId) => request<void>(routinePath(id), { method: "DELETE" }),
   /** 现在就做一次。马上返回；做完之后结果由事件流送来。房间里正在对话时抛出 `conflict`。 */
   runRoutine: (id: RoutineId) => postJson<Routine>(routinePath(id, "run"), {}),
+  /** 这个房间的团队写成的模板文件：成员、谁是入口、房间叫什么。 */
+  exportRoom: (roomId: RoomId) =>
+    request<TemplateFile>(`/api/templates/rooms/${encodeURIComponent(roomId)}`),
+  /** 所有 Bot 写成的模板文件。 */
+  exportBots: () => request<TemplateFile>("/api/templates/bots"),
+  /** 导入一份模板。已经有同名的 Bot 跳过；模板有一处不对就什么都不建，抛出原因。 */
+  importTemplate: (body: ImportTemplateRequest) =>
+    postJson<ImportReport>("/api/templates/import", body),
   /** 审计日志的一页，新的在前。 */
   audit: (query: AuditQuery) => request<AuditPage>(`/api/audit${auditSearch(query)}`),
   /** 现在有哪些技能、哪些外部 MCP 服务。 */

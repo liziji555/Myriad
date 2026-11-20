@@ -1,4 +1,6 @@
-import { useState, type FormEvent } from "react";
+import { useRef, useState, type ChangeEvent, type FormEvent } from "react";
+import { api } from "../api/client";
+import { importSummary, MAX_TEMPLATE_BYTES, saveTextFile } from "../api/templates";
 import type { Team } from "../api/useWorkspace";
 import type { Bot, ModelTier, Room } from "../api/types";
 
@@ -27,11 +29,14 @@ export function MembersPanel({ room, members, bots, team }: Props) {
   const [editing, setEditing] = useState<Editing>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [imported, setImported] = useState<string | null>(null);
+  const filePicker = useRef<HTMLInputElement>(null);
   const outside = bots.filter((bot) => !room.member_bot_ids.includes(bot.id));
   const full = members.length >= MAX_MEMBERS;
 
   const run = async (action: () => Promise<unknown>) => {
     setError(null);
+    setImported(null);
     setBusy(true);
     try {
       await action();
@@ -42,6 +47,25 @@ export function MembersPanel({ room, members, bots, team }: Props) {
     } finally {
       setBusy(false);
     }
+  };
+
+  const exportTeam = () =>
+    run(async () => {
+      const file = await api.exportRoom(room.id);
+      saveTextFile(file.name, file.text);
+    });
+
+  const importFile = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    // 清掉选择：同一个文件改完再选一次也要触发。
+    event.target.value = "";
+    if (!file) return;
+    let summary = "";
+    const done = await run(async () => {
+      if (file.size > MAX_TEMPLATE_BYTES) throw new Error("模板文件太大了（超过 1 MB）");
+      summary = importSummary(await api.importTemplate({ text: await file.text() }));
+    });
+    if (done) setImported(summary);
   };
 
   if (editing) {
@@ -160,6 +184,43 @@ export function MembersPanel({ room, members, bots, team }: Props) {
       <button type="button" className="sa-button sa-button-quiet" onClick={() => setEditing("new")}>
         新建 Bot
       </button>
+
+      <h3 className="sa-panel-heading">模板</h3>
+      <p className="sa-panel-note">
+        把这个房间的 Bot 存成一个文件，换一台机器或者另开一个房间时导入。文件里只有名字、档位、分工，没有密钥和聊天记录。
+      </p>
+      <div className="sa-member-actions">
+        <button
+          type="button"
+          className="sa-link"
+          disabled={busy || members.length === 0}
+          onClick={() => void exportTeam()}
+        >
+          导出这个房间的团队
+        </button>
+        <button
+          type="button"
+          className="sa-link"
+          disabled={busy}
+          title="新建模板里的 Bot（已经有同名的跳过）；模板带了房间就新建那个房间"
+          onClick={() => filePicker.current?.click()}
+        >
+          导入模板
+        </button>
+        <input
+          ref={filePicker}
+          type="file"
+          accept=".toml,.json,text/plain,application/json"
+          hidden
+          aria-label="选择模板文件"
+          onChange={(event) => void importFile(event)}
+        />
+      </div>
+      {imported && (
+        <p className="sa-panel-note" role="status">
+          {imported}
+        </p>
+      )}
     </div>
   );
 }
