@@ -89,6 +89,8 @@ impl Tool for ShellTool {
             .spawn()
             .map_err(|e| ToolError(format!("命令启动不了：{e}")))?;
         let pid = child.id();
+        // 这次调用不管怎么结束（包括整个调用被丢弃），进程树都要收干净。
+        let mut tree = TreeGuard(pid);
         let stdout = child.stdout.take().expect("上面设置了管道");
         let stderr = child.stderr.take().expect("上面设置了管道");
         let output = async {
@@ -114,6 +116,8 @@ impl Tool for ShellTool {
         if streams.is_none() {
             kill_tree(pid).await;
         }
+        // 到这里要么命令自己结束了，要么已经杀过了。
+        tree.0 = None;
         match end {
             End::Stopped => Err(ToolError::new("已停止，命令和它启动的进程都已结束。")),
             End::TimedOut => Err(ToolError(format!(
@@ -176,25 +180,46 @@ async fn read_capped(mut stream: impl AsyncRead + Unpin) -> Vec<u8> {
     head
 }
 
-/// 结束这个进程和它启动的所有进程。
-async fn kill_tree(pid: Option<u32>) {
-    let Some(pid) = pid else { return };
+/// 调用还没收尾就被丢弃时（比如人点了停止，上层不再等这个工具），把进程树杀掉。
+///
+/// `kill_on_drop` 只管直接启动的那个进程，它启动的子进程会留下来。
+struct TreeGuard(Option<u32>);
+
+impl Drop for TreeGuard {
+    fn drop(&mut self) {
+        if let Some(pid) = self.0.take() {
+            // 丢弃发生在异步线程上，不能在这里等；另起一个线程去杀。
+            std::thread::spawn(move || {
+                let _ = kill_command(pid).status();
+            });
+        }
+    }
+}
+
+/// 结束进程 `pid` 和它启动的所有进程的命令。
+fn kill_command(pid: u32) -> std::process::Command {
     let mut killer = if cfg!(windows) {
-        let mut c = Command::new("taskkill");
+        let mut c = std::process::Command::new("taskkill");
         c.args(["/T", "/F", "/PID", &pid.to_string()]);
         c
     } else {
         // 负号表示整个进程组。
-        let mut c = Command::new("kill");
+        let mut c = std::process::Command::new("kill");
         c.args(["-KILL", "--", &format!("-{pid}")]);
         c
     };
-    let _ = killer
+    killer
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .await;
+        .stderr(Stdio::null());
+    killer
+}
+
+/// 结束这个进程和它启动的所有进程。
+async fn kill_tree(pid: Option<u32>) {
+    if let Some(pid) = pid {
+        let _ = Command::from(kill_command(pid)).status().await;
+    }
 }
 
 #[cfg(test)]
@@ -289,5 +314,19 @@ mod tests {
         assert!(error.contains("已停止"), "{error}");
         tokio::time::sleep(Duration::from_millis(200)).await;
         assert!(!alive("b.pid"), "停止后子进程还活着");
+
+        // 上层不等了，直接把这次调用丢掉：也要杀干净。
+        let (_dir, ctx) = rig();
+        let dropped = ShellTool.call(json!({"command": spawn_child("c.pid")}), &ctx);
+        let _ = tokio::time::timeout(Duration::from_millis(300), dropped).await;
+        let pid = std::fs::read_to_string(_dir.path().join("c.pid")).unwrap();
+        let proc = std::path::PathBuf::from(format!("/proc/{}", pid.trim()));
+        for _ in 0..200 {
+            if !proc.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(!proc.exists(), "调用被丢弃后子进程还活着");
     }
 }

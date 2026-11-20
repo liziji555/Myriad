@@ -775,3 +775,39 @@ async fn context_limit_is_reported_on_the_message() {
     assert_eq!(reply.steps[0].state, StepState::Error);
     rig.orchestrator.shutdown().await;
 }
+
+/// 点「停止」时命令正在跑，而且它自己又启动了后台进程：整棵进程树都要结束。
+#[cfg(unix)]
+#[tokio::test]
+async fn stop_kills_the_running_command_and_its_children() {
+    let dir = tempfile::tempdir().unwrap();
+    let replies = vec![shell("c1", "sleep 300 & echo $! > child.pid; wait")];
+    let rig = start(dir.path(), replies, true);
+    rig.say("跑一个很久的命令").await;
+    let approval = rig.waiting_approval().await;
+    assert!(rig.orchestrator.decide(&approval, ApprovalDecision::Once));
+
+    let pid_file = dir.path().join("work/child.pid");
+    let mut pid = String::new();
+    for _ in 0..300 {
+        pid = std::fs::read_to_string(&pid_file).unwrap_or_default();
+        if pid.ends_with('\n') {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let child = std::path::PathBuf::from(format!("/proc/{}", pid.trim()));
+    assert!(child.exists(), "子进程没起来：{pid:?}");
+
+    assert!(rig.orchestrator.stop(&rig.room));
+    let reply = rig.settled(2).await.pop().unwrap();
+    assert_eq!(reply.state, MessageState::Cancelled);
+    for _ in 0..300 {
+        if !child.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(!child.exists(), "停止之后子进程 {pid} 还活着");
+    rig.orchestrator.shutdown().await;
+}
