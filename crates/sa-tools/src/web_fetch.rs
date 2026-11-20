@@ -168,80 +168,40 @@ async fn fetch(mut url: Url, allow_private: bool) -> ToolResult {
 
 /// 网页的 `<title>`，压成一行。没有或者是空的就返回 `None`。
 ///
-/// 用 HTML 分词器取，不自己找字符串：注释里的、脚本里的 `<title>` 不算，
-/// 字符引用（`&amp;`、`&#8217;`）按浏览器的规则解码。
+/// 按浏览器的办法来：把 HTML 解析成树，取树里第一个 HTML 命名空间的 `<title>` 元素的文字。
+/// 注释、脚本、`<template>`、SVG 里的 `<title>` 都不算，字符引用由解析器解码。
 fn html_title(html: &str) -> Option<String> {
-    use html5ever::tendril::StrTendril;
-    use html5ever::tokenizer::states::RawKind;
-    use html5ever::tokenizer::{
-        BufferQueue, CharacterTokens, EndTag, StartTag, TagToken, Token, TokenSink,
-        TokenSinkResult, Tokenizer,
-    };
-    use std::cell::{Cell, RefCell};
+    use html5ever::tendril::TendrilSink;
+    use html5ever::tree_builder::TreeBuilderOpts;
+    use html5ever::{local_name, ns, parse_document, ParseOpts};
+    use markup5ever_rcdom::{Handle, NodeData, RcDom};
 
-    #[derive(Default)]
-    struct Sink {
-        text: RefCell<String>,
-        inside: Cell<bool>,
-        /// 标题已经取完，或者已经过了能出现标题的地方。
-        done: Cell<bool>,
-        /// 现在在几层 `<svg>` / `<math>` 里面。那里面的 `<title>`、`<style>`、`<script>`
-        /// 是普通元素：不是网页标题，也不会把后面的内容变成原样文本。
-        foreign: Cell<usize>,
+    fn find_title(node: &Handle) -> Option<Handle> {
+        if let NodeData::Element { name, .. } = &node.data {
+            if name.ns == ns!(html) && name.local == local_name!("title") {
+                return Some(node.clone());
+            }
+        }
+        // <template> 的内容不在 children 里，自然不会被找到。
+        node.children.borrow().iter().find_map(find_title)
     }
 
-    impl TokenSink for Sink {
-        type Handle = ();
-
-        fn process_token(&self, token: Token, _line: u64) -> TokenSinkResult<()> {
-            match token {
-                TagToken(tag) if matches!(&*tag.name, "svg" | "math") => {
-                    let depth = self.foreign.get();
-                    if tag.kind == EndTag {
-                        self.foreign.set(depth.saturating_sub(1));
-                    } else if !tag.self_closing {
-                        self.foreign.set(depth + 1);
-                    }
-                }
-                TagToken(_) if self.foreign.get() > 0 => {}
-                TagToken(tag) if tag.kind == StartTag => match &*tag.name {
-                    "title" if !self.done.get() => {
-                        self.inside.set(true);
-                        return TokenSinkResult::RawData(RawKind::Rcdata);
-                    }
-                    // 这些元素的内容是原样文本，里面像标签的东西不是标签。
-                    "script" => return TokenSinkResult::RawData(RawKind::ScriptData),
-                    "style" | "xmp" | "iframe" | "noembed" | "noframes" => {
-                        return TokenSinkResult::RawData(RawKind::Rawtext)
-                    }
-                    "textarea" => return TokenSinkResult::RawData(RawKind::Rcdata),
-                    // 正文里的 <title>（比如 SVG 图标的）不是网页标题。
-                    "body" => self.done.set(true),
-                    _ => {}
-                },
-                TagToken(tag) if tag.kind == EndTag => {
-                    if &*tag.name == "title" && self.inside.get() {
-                        self.inside.set(false);
-                        self.done.set(true);
-                    } else if &*tag.name == "head" {
-                        self.done.set(true);
-                    }
-                }
-                CharacterTokens(text) if self.inside.get() => {
-                    self.text.borrow_mut().push_str(&text);
-                }
-                _ => {}
-            }
-            TokenSinkResult::Continue
+    let options = ParseOpts {
+        tree_builder: TreeBuilderOpts {
+            // 和转纯文本时一致：按不执行脚本的浏览器来解析。
+            scripting_enabled: false,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let dom = parse_document(RcDom::default(), options).one(html);
+    let title = find_title(&dom.document)?;
+    let mut text = String::new();
+    for child in title.children.borrow().iter() {
+        if let NodeData::Text { contents } = &child.data {
+            text.push_str(&contents.borrow());
         }
     }
-
-    let input = BufferQueue::default();
-    input.push_back(StrTendril::from(html));
-    let tokenizer = Tokenizer::new(Sink::default(), Default::default());
-    let _ = tokenizer.feed(&input);
-    tokenizer.end();
-    let text = tokenizer.sink.text.borrow();
     let title = text.split_whitespace().collect::<Vec<_>>().join(" ");
     let title: String = title.chars().take(200).collect();
     (!title.is_empty()).then_some(title)
@@ -514,6 +474,15 @@ mod tests {
         assert_eq!(
             html_title("<head></head><body><svg><title>图标</title></svg></body>"),
             None
+        );
+        // foreignObject 里的脚本字符串带着 <svg>，也不影响后面的标题。
+        assert_eq!(
+            html_title(
+                "<head><template><svg><foreignObject><script>var s = '<svg>';</script>\
+                 </foreignObject></svg></template><title>网页标题</title></head>"
+            )
+            .as_deref(),
+            Some("网页标题")
         );
         // SVG 里自闭合的 <style/>、<script/> 不会把后面的标题吞掉，SVG 自己的 <title> 也不算。
         assert_eq!(
