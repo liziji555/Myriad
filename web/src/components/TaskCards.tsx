@@ -126,7 +126,15 @@ export function TaskActionBar({ task, actions, members }: ActionProps) {
         </p>
       )}
       <div className="sa-form-actions">
-        {state === "review" && button("accept", "验收通过", () => actions.accept(task.id), true, false)}
+        {state === "review" &&
+          button(
+            "accept",
+            // 开了 PR 的任务，验收不往本地合：改动由人在 GitHub 上合并。
+            task.artifacts.some((artifact) => artifact.kind === "pr") ? "验收通过（改动留在 PR 里）" : "验收通过",
+            () => actions.accept(task.id),
+            true,
+            false,
+          )}
         {state === "review" && button("reject", "打回重做", () => actions.reject(task.id, note), written)}
         {state === "waiting" &&
           button("resume", "回答并继续", () => actions.resume(task.id, note), written, false)}
