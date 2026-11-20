@@ -373,6 +373,12 @@ impl Engine {
         })??;
         self.drafts().insert(message.id.clone(), message.clone());
         self.publish(seq);
+        let name = self.get_bot(bot_id).map(|bot| bot.name).unwrap_or_default();
+        self.audit(
+            crate::Audit::bot(&name, "task.run_started", "开始做任务（新的一次运行）")
+                .room(&run.room_id)
+                .task(Some(id)),
+        );
         Ok((run, message, session_id))
     }
 
@@ -440,6 +446,23 @@ impl Engine {
             Ok(Ok((task, seq)))
         })??;
         self.publish(seq);
+        // 一次运行怎么收的场、任务落到了哪个状态、为什么：任务没做成时先看这一条。
+        let summary = format!(
+            "任务「{}」的一次运行结束了（{}），任务现在是「{}」",
+            task.title,
+            outcome.state.as_str(),
+            state_label(task.state)
+        );
+        let why = match &outcome.error {
+            Some(error) if !error.trim().is_empty() => error.as_str(),
+            _ => outcome.note.as_str(),
+        };
+        self.audit(
+            crate::Audit::system("task.run_finished", summary)
+                .room(&task.room_id)
+                .task(Some(&task.id))
+                .detail(why),
+        );
         Ok(task)
     }
 
