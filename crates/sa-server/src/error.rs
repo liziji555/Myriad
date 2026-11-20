@@ -2,6 +2,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use sa_engine::EngineError;
+use sa_orchestrator::OrchestratorError;
 use sa_protocol::ApiError;
 
 #[derive(Debug)]
@@ -55,6 +56,22 @@ impl From<EngineError> for AppError {
                 Self::new(StatusCode::NOT_FOUND, "not_found", message)
             }
             EngineError::Store(e) => Self::internal(e),
+        }
+    }
+}
+
+impl From<OrchestratorError> for AppError {
+    fn from(err: OrchestratorError) -> Self {
+        match err {
+            OrchestratorError::Engine(e) => Self::from(e),
+            OrchestratorError::ShuttingDown => Self::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "shutting_down",
+                "服务正在关闭，这个操作没有执行",
+            ),
+            OrchestratorError::Conflict(message) => {
+                Self::new(StatusCode::CONFLICT, "conflict", message)
+            }
         }
     }
 }

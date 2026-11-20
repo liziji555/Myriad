@@ -64,6 +64,16 @@ pub fn router(state: AppState) -> Router {
             "/rooms/{room_id}/members/{bot_id}",
             put(routes::add_member).delete(routes::remove_member),
         )
+        .route(
+            "/rooms/{room_id}/tasks",
+            get(routes::list_tasks).post(routes::create_task),
+        )
+        .route("/tasks/{task_id}", get(routes::get_task))
+        .route("/tasks/{task_id}/resume", post(routes::resume_task))
+        .route("/tasks/{task_id}/accept", post(routes::accept_task))
+        .route("/tasks/{task_id}/reject", post(routes::reject_task))
+        .route("/tasks/{task_id}/stop", post(routes::stop_task))
+        .route("/tasks/{task_id}/cancel", post(routes::cancel_task))
         .route("/bots", get(routes::list_bots).post(routes::create_bot))
         .route(
             "/bots/{bot_id}",
