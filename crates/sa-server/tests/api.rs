@@ -37,6 +37,7 @@ fn app() -> (Router, Arc<Engine>) {
         prompt: None,
         max_steps: 6,
         allow_private_network: false,
+        approval_timeout: std::time::Duration::from_secs(600),
     };
     let orchestrator = Arc::new(Orchestrator::new(
         engine.clone(),

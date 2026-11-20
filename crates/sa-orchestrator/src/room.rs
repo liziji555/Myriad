@@ -3,10 +3,16 @@
 use crate::{render_prompt, Shared};
 use async_trait::async_trait;
 use sa_engine::{EngineError, UsageRecord};
-use sa_kernel::{run_turn, Inbox, Observer, Transcript, TurnConfig, TurnEnd, UserInput};
+use sa_kernel::{
+    run_turn, ApprovalRequest, Inbox, Observer, Transcript, TurnConfig, TurnEnd, UserInput,
+};
 use sa_llm::{RetryPolicy, Usage};
-use sa_protocol::{Bot, MessageId, MessageState, RoomId, SessionId, StepState, ToolStep};
-use sa_tools::ToolCtx;
+use sa_protocol::{
+    ApprovalDecision, ApprovalId, Bot, MessageId, MessageState, RoomId, SessionId, StepApproval,
+    StepState, ToolStep,
+};
+use sa_tools::{Fence, ToolCtx};
+use serde_json::Value;
 use std::sync::{Arc, Mutex};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
@@ -276,12 +282,23 @@ impl RoomObserver {
         }
     }
 
-    /// 一轮结束时还显示「进行中」的步骤（被取消的）改成「已取消」。
+    /// 改最近的那个 id 是 `call_id` 的步骤（同一个 id 出现两次时，模型偶尔会这样，改后面那个）。
+    fn update_step(&self, call_id: &str, change: impl FnOnce(&mut ToolStep)) {
+        let mut steps = self.steps.lock().unwrap();
+        if let Some(step) = steps.iter_mut().rev().find(|s| s.id == call_id) {
+            change(step);
+        }
+    }
+
+    /// 一轮结束时还显示「进行中」或「等批准」的步骤（被取消的）改成「已取消」。
     async fn settle_steps(&self) {
         let changed = {
             let mut steps = self.steps.lock().unwrap();
             let mut changed = false;
-            for step in steps.iter_mut().filter(|s| s.state == StepState::Running) {
+            for step in steps
+                .iter_mut()
+                .filter(|s| matches!(s.state, StepState::Running | StepState::Waiting))
+            {
                 step.state = StepState::Cancelled;
                 changed = true;
             }
@@ -325,6 +342,73 @@ impl Observer for RoomObserver {
         self.save_steps().await;
     }
 
+    async fn request_approval(&self, request: ApprovalRequest<'_>) -> bool {
+        let engine = &self.shared.engine;
+        let key = rule_key(request.tool, request.input, &self.shared.settings.fence);
+        if let Some(key) = key.clone() {
+            let (engine, room, tool) = (
+                engine.clone(),
+                self.room_id.clone(),
+                request.tool.to_string(),
+            );
+            match db(move || engine.is_always_allowed(&room, &tool, &key)).await {
+                Ok(true) => return true,
+                Ok(false) => {}
+                Err(error) => tracing::error!(room = %self.room_id, "查不了已保存的许可：{error}"),
+            }
+        }
+
+        let id = ApprovalId::new();
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        self.shared
+            .approvals
+            .lock()
+            .unwrap()
+            .insert(id.clone(), reply);
+        // 不管怎么离开（答复、超时、这一轮被停下），这张卡都不再接受答复。
+        let _pending = Pending {
+            shared: &self.shared,
+            id: id.clone(),
+        };
+        let timeout = self.shared.settings.approval_timeout;
+        let approval = StepApproval {
+            id,
+            reason: request.reason.to_string(),
+            expires_at: sa_engine::now_ms() + timeout.as_millis() as i64,
+        };
+        self.update_step(request.call_id, |step| {
+            step.state = StepState::Waiting;
+            step.approval = Some(approval);
+        });
+        self.save_steps().await;
+
+        let decision = tokio::select! {
+            answer = answer => answer.unwrap_or(ApprovalDecision::Deny),
+            _ = tokio::time::sleep(timeout) => ApprovalDecision::Deny,
+        };
+        let allowed = decision != ApprovalDecision::Deny;
+        if let (ApprovalDecision::Always, Some(key)) = (decision, key) {
+            let (engine, room, tool) = (
+                engine.clone(),
+                self.room_id.clone(),
+                request.tool.to_string(),
+            );
+            if let Err(error) = db(move || engine.allow_always(&room, &tool, &key).map(drop)).await
+            {
+                tracing::error!(room = %self.room_id, "「总是允许」没记上：{error}");
+            }
+        }
+        self.update_step(request.call_id, |step| {
+            step.state = if allowed {
+                StepState::Running
+            } else {
+                StepState::Denied
+            };
+        });
+        self.save_steps().await;
+        allowed
+    }
+
     async fn usage(&self, model: &str, usage: Usage) {
         let record = UsageRecord {
             room_id: self.room_id.clone(),
@@ -339,5 +423,32 @@ impl Observer for RoomObserver {
         if let Err(error) = db(move || engine.record_usage(record)).await {
             tracing::error!(room = %self.room_id, "用量没记上：{error}");
         }
+    }
+}
+
+/// 等待中的审批；离开作用域时从登记表里去掉。
+struct Pending<'a> {
+    shared: &'a Shared,
+    id: ApprovalId,
+}
+
+impl Drop for Pending<'_> {
+    fn drop(&mut self) {
+        self.shared.approvals.lock().unwrap().remove(&self.id);
+    }
+}
+
+/// 「总是允许」记的是什么：命令记原文，写文件记文件的完整路径。其他工具不能记。
+fn rule_key(tool: &str, input: &Value, fence: &Fence) -> Option<String> {
+    match tool {
+        "shell" => {
+            let command = input["command"].as_str()?.trim();
+            (!command.is_empty()).then(|| command.to_string())
+        }
+        "write" | "edit" => {
+            let (real, _) = fence.resolve_for_write(input["path"].as_str()?).ok()?;
+            Some(real.display().to_string())
+        }
+        _ => None,
     }
 }

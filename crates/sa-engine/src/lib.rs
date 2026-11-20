@@ -184,7 +184,7 @@ fn to_json<T: serde::Serialize>(value: &T) -> serde_json::Value {
     serde_json::to_value(value).expect("协议类型总能序列化成 JSON")
 }
 
-fn now_ms() -> Millis {
+pub fn now_ms() -> Millis {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as Millis)

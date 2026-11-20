@@ -95,6 +95,7 @@ impl App {
             prompt,
             max_steps: MAX_STEPS,
             allow_private_network: false,
+            approval_timeout: sa_orchestrator::DEFAULT_APPROVAL_TIMEOUT,
         };
         let orchestrator = Arc::new(Orchestrator::new(engine.clone(), models, settings));
         Ok(Self {
