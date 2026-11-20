@@ -297,22 +297,19 @@ fn demo_work(request: &ChatRequest, last: &crate::ChatMessage) -> MockReply {
         let arguments = serde_json::json!({ "status": status, "summary": summary });
         MockReply::tool_calls("", &[("mock_report", "report", &arguments.to_string())])
     };
-    if last.role == Role::Tool {
-        if last.content.starts_with("结果已经记下") {
-            return MockReply::text("（Mock 模型）结果交了。");
-        }
-        return report(
-            "done",
-            "（Mock 模型）按任务说明动了一次手，改动在任务目录里，请验收。这是固定规则生成的结果，不是真的做完了。",
-        );
-    }
+    let has = |name: &str| request.tools.iter().any(|t| t.name == name);
     // 人后来补的话优先；否则看任务说明里「要做什么」那一段。
-    let text = match last.content.split_once("【用户的新指示】") {
+    let brief = request
+        .messages
+        .iter()
+        .rev()
+        .find(|m| m.role == Role::User)
+        .map_or("", |m| m.content.as_str());
+    let text = match brief.split_once("【用户的新指示】") {
         Some((_, extra)) => extra,
-        None => last
-            .content
+        None => brief
             .split_once("要做什么：")
-            .map_or(last.content.as_str(), |(_, rest)| rest)
+            .map_or(brief, |(_, rest)| rest)
             .split("\n\n验收标准")
             .next()
             .unwrap_or("")
@@ -320,6 +317,72 @@ fn demo_work(request: &ChatRequest, last: &crate::ChatMessage) -> MockReply {
             .next()
             .unwrap_or(""),
     };
+    let wants_pr = text.contains("开 PR") || text.contains("开PR");
+    let push = || {
+        MockReply::tool_calls(
+            "（Mock 模型）把任务分支推上去。",
+            &[("mock_push", "git_push", "{}")],
+        )
+    };
+
+    if last.role == Role::Tool {
+        if last.content.starts_with("结果已经记下") {
+            return MockReply::text("（Mock 模型）结果交了。");
+        }
+        // 上一步调的是哪个工具。
+        let called = request
+            .messages
+            .iter()
+            .rev()
+            .find(|m| m.role == Role::Assistant)
+            .and_then(|m| m.tool_calls.first())
+            .map_or("", |call| call.name.as_str());
+        let said: String = last.content.chars().take(300).collect();
+        match called {
+            "agent" => {
+                return report("done", &format!("（Mock 模型）子代理查回来的：{said}"));
+            }
+            "git_push" if !last.content.contains("已经推送") => {
+                return report("blocked", &format!("（Mock 模型）分支没有推上去：{said}"));
+            }
+            "git_push" if has("open_pr") => {
+                let title: String = text.replace('`', "").chars().take(40).collect();
+                let arguments = serde_json::json!({
+                    "title": title.trim(),
+                    "body": "（Mock 模型）按任务说明动了一次手。这是固定规则生成的 PR，不是真的做完了。",
+                });
+                return MockReply::tool_calls(
+                    "（Mock 模型）开一个 PR。",
+                    &[("mock_pr", "open_pr", &arguments.to_string())],
+                );
+            }
+            "git_push" => {
+                return report(
+                    "done",
+                    "（Mock 模型）分支推上去了。这里没有配置 GitHub，PR 没有开。",
+                );
+            }
+            "open_pr" => {
+                let url = last
+                    .content
+                    .split_whitespace()
+                    .find_map(|word| word.find("http").map(|at| &word[at..]));
+                return match url {
+                    Some(url) => report(
+                        "done",
+                        &format!("（Mock 模型）改动推上去了，PR 在这里：{url}"),
+                    ),
+                    None => report("blocked", &format!("（Mock 模型）PR 没有开成：{said}")),
+                };
+            }
+            _ if wants_pr && has("git_push") => return push(),
+            _ => {}
+        }
+        return report(
+            "done",
+            "（Mock 模型）按任务说明动了一次手，改动在任务目录里，请验收。这是固定规则生成的结果，不是真的做完了。",
+        );
+    }
     if text.contains("卡住") {
         return report(
             "blocked",
@@ -332,13 +395,23 @@ fn demo_work(request: &ChatRequest, last: &crate::ChatMessage) -> MockReply {
             "（Mock 模型）任务说明里写了「要问」，所以问一句：具体想怎么做？",
         );
     }
+    if text.contains("子代理") && has("agent") {
+        let arguments = serde_json::json!({ "prompt": text.trim() });
+        return MockReply::tool_calls(
+            "（Mock 模型）这件事派一个子代理去查。",
+            &[("mock_agent", "agent", &arguments.to_string())],
+        );
+    }
     if let Some((tool, arguments, saying)) = demo_tool_call(text) {
-        if tool != "ask_bot" && request.tools.iter().any(|t| t.name == tool) {
+        if tool != "ask_bot" && has(tool) {
             return MockReply::tool_calls(
                 &format!("（Mock 模型）{saying}"),
                 &[("mock_call_1", tool, &arguments.to_string())],
             );
         }
+    }
+    if wants_pr && has("git_push") {
+        return push();
     }
     report(
         "done",

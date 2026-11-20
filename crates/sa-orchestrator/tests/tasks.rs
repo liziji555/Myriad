@@ -5,7 +5,8 @@
 use sa_engine::Engine;
 use sa_llm::{MockProvider, MockReply, Role, StreamEvent};
 use sa_orchestrator::{
-    ModelRouter, Orchestrator, OrchestratorError, ResolvedModel, Settings, MAX_PARALLEL_RUNS,
+    GitHub, ModelRouter, Orchestrator, OrchestratorError, ResolvedModel, Settings,
+    MAX_PARALLEL_RUNS,
 };
 use sa_protocol::{
     ApprovalDecision, ArtifactKind, BotId, CreateTaskRequest, Message, MessageKind, MessageState,
@@ -67,6 +68,17 @@ fn start_in(
     work: Vec<MockReply>,
     strong: bool,
 ) -> Rig {
+    start_full(dir, workspace, front, work, strong, None)
+}
+
+fn start_full(
+    dir: &Path,
+    workspace: &str,
+    front: Vec<MockReply>,
+    work: Vec<MockReply>,
+    strong: bool,
+    github: Option<GitHub>,
+) -> Rig {
     let data = dir.join("data");
     let workspace = dir.join(workspace);
     std::fs::create_dir_all(&data).unwrap();
@@ -86,6 +98,7 @@ fn start_in(
         allow_private_network: false,
         approval_timeout: Duration::from_secs(600),
         work_dir: data.join("work"),
+        github,
     };
     let models = Arc::new(Models {
         front: front.clone(),
@@ -199,6 +212,27 @@ impl Rig {
             .filter(|m| m.role == Role::User)
             .map(|m| m.content.clone())
             .collect()
+    }
+
+    /// 等下一张审批卡（不是 `seen` 里的），返回它的 id 和上面写的原因。
+    async fn next_approval(
+        &self,
+        seen: &[sa_protocol::ApprovalId],
+    ) -> (sa_protocol::ApprovalId, String) {
+        for _ in 0..1000 {
+            let waiting = self.messages().into_iter().find_map(|m| {
+                (m.kind == MessageKind::Run)
+                    .then(|| m.steps.into_iter().find(|s| s.state == StepState::Waiting))
+                    .flatten()
+            });
+            if let Some(approval) = waiting.and_then(|step| step.approval) {
+                if !seen.contains(&approval.id) {
+                    return (approval.id, approval.reason);
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("没有等到审批卡：{:#?}", self.messages());
     }
 
     fn task_dir(&self, id: &TaskId) -> PathBuf {
@@ -762,4 +796,275 @@ async fn a_task_never_lands_in_a_workspace_it_was_not_opened_in() {
     assert!(blocked.note.contains("现在的工作目录"), "{blocked:#?}");
     assert!(rig.task_dir(&task.id).join("a.txt").exists());
     rig.orchestrator.shutdown().await;
+}
+
+/// 假的 GitHub：记下收到的开 PR 请求，回一个固定的 PR。
+#[derive(Clone, Default)]
+struct FakeGitHub {
+    /// 每次开 PR 请求带的令牌和内容。
+    posts: Arc<std::sync::Mutex<Vec<(String, serde_json::Value)>>>,
+}
+
+impl FakeGitHub {
+    async fn serve(&self) -> String {
+        use axum::extract::State;
+        use axum::http::{HeaderMap, StatusCode};
+        use axum::routing::post;
+        async fn create(
+            State(fake): State<FakeGitHub>,
+            headers: HeaderMap,
+            axum::Json(body): axum::Json<serde_json::Value>,
+        ) -> (StatusCode, axum::Json<serde_json::Value>) {
+            let token = headers["authorization"].to_str().unwrap().to_string();
+            fake.posts.lock().unwrap().push((token, body));
+            let pr = serde_json::json!({ "html_url": "https://github.test/me/proj/pull/7", "number": 7 });
+            (StatusCode::CREATED, axum::Json(pr))
+        }
+        let app = axum::Router::new()
+            .route("/repos/me/proj/pulls", post(create))
+            .with_state(self.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        format!("http://{address}")
+    }
+}
+
+/// 人的工作目录是一个 git 仓库，`origin` 是旁边的一个空仓库，`main` 已经推上去。
+fn repo_with_origin(rig: &Rig, dir: &Path) -> PathBuf {
+    let origin = dir.join("origin.git");
+    std::fs::create_dir_all(&origin).unwrap();
+    git(&origin, &["init", "-q", "--bare", "-b", "main"]);
+    std::fs::write(rig.workspace.join("a.txt"), "一\n").unwrap();
+    git(&rig.workspace, &["init", "-q", "-b", "main"]);
+    git(&rig.workspace, &["add", "-A"]);
+    git(&rig.workspace, &["commit", "-q", "-m", "init"]);
+    git(
+        &rig.workspace,
+        &["remote", "add", "origin", origin.to_str().unwrap()],
+    );
+    git(&rig.workspace, &["push", "-q", "-u", "origin", "main"]);
+    origin
+}
+
+fn has_ref(repo: &Path, name: &str) -> bool {
+    Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["rev-parse", "-q", "--verify", name])
+        .output()
+        .unwrap()
+        .status
+        .success()
+}
+
+fn open_pr(id: &str, title: &str) -> MockReply {
+    let input = serde_json::json!({ "title": title, "body": "加了 b.txt。" }).to_string();
+    MockReply::tool_calls("开 PR。", &[(id, "open_pr", &input)])
+}
+
+/// 工作会话第 `index` 次请求里，最后一条工具结果。
+fn last_result(rig: &Rig, index: usize) -> String {
+    let request = &rig.work.requests()[index];
+    let last = request.messages.last().unwrap();
+    assert_eq!(last.role, Role::Tool, "{last:?}");
+    last.content.clone()
+}
+
+#[tokio::test]
+async fn a_task_pushes_its_branch_and_opens_one_pr_each_with_a_yes_from_the_person() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fake = FakeGitHub::default();
+    let github = GitHub {
+        api_base: fake.serve().await,
+        token: Some("t0ken".into()),
+        repo: Some("me/proj".into()),
+    };
+    let rig = start_full(
+        tmp.path(),
+        "ws",
+        vec![],
+        vec![
+            write("b.txt", "新文件\n"),
+            MockReply::tool_calls("推上去。", &[("p1", "git_push", "{}")]),
+            open_pr("o1", "加 b.txt"),
+            open_pr("o2", "加 b.txt（再来一次）"),
+            report("done", "PR 开好了"),
+            MockReply::text("交完了。"),
+            // 被打回之后的第二次运行。
+            MockReply::tool_calls("再推一次。", &[("p2", "git_push", "{}")]),
+            report("done", "补推了"),
+            MockReply::text("交完了。"),
+        ],
+        true,
+        Some(github),
+    );
+    let origin = repo_with_origin(&rig, tmp.path());
+    let task = rig.open_task("加 b.txt").await;
+    let branch = format!("sa/{}", task.id.as_str().replace('_', "-"));
+    let on_origin = format!("refs/heads/{branch}");
+
+    // 推送要问，问的时候说清楚推什么、推到哪；点头之前什么都没推。
+    let (push, reason) = rig.next_approval(&[]).await;
+    assert!(
+        reason.contains(&branch) && reason.contains("origin.git"),
+        "{reason}"
+    );
+    assert!(!has_ref(&origin, &on_origin));
+    assert!(rig.orchestrator.decide(&push, ApprovalDecision::Always));
+
+    // 开 PR 也要问，哪怕上一张卡点的是「总是允许」。
+    let (pr, reason) = rig.next_approval(std::slice::from_ref(&push)).await;
+    assert!(
+        reason.contains("me/proj") && reason.contains("加 b.txt"),
+        "{reason}"
+    );
+    assert!(
+        reason.contains(&branch) && reason.contains("main"),
+        "{reason}"
+    );
+    assert!(has_ref(&origin, &on_origin));
+    assert!(fake.posts.lock().unwrap().is_empty());
+    assert!(rig.orchestrator.decide(&pr, ApprovalDecision::Once));
+
+    // 第二次 open_pr 不再问，也不再去 GitHub：直接把原来的地址报回去。
+    let task = rig.task_in(&task.id, TaskState::Review).await;
+    assert!(last_result(&rig, 2).contains("已经推送到 origin"));
+    assert!(last_result(&rig, 3).contains("PR 开好了：https://github.test/me/proj/pull/7"));
+    assert!(last_result(&rig, 4).contains("已经开过 PR：https://github.test/me/proj/pull/7"));
+    let posts = fake.posts.lock().unwrap().clone();
+    assert_eq!(posts.len(), 1, "{posts:?}");
+    assert_eq!(posts[0].0, "Bearer t0ken");
+    assert_eq!(
+        posts[0].1,
+        serde_json::json!({ "title": "加 b.txt", "body": "加了 b.txt。", "head": branch, "base": "main" })
+    );
+    let prs: Vec<_> = task
+        .artifacts
+        .iter()
+        .filter(|a| a.kind == ArtifactKind::Pr)
+        .map(|a| (a.reference.as_str(), a.summary.as_str()))
+        .collect();
+    assert_eq!(prs, [("https://github.test/me/proj/pull/7", "#7 加 b.txt")]);
+
+    // PR 开出来之后任务目录里又多了没推的改动：不能验收，否则这些改动哪儿都到不了。
+    let late = rig.task_dir(&task.id).join("late.txt");
+    std::fs::write(&late, "后来加的\n").unwrap();
+    let refused = rig.orchestrator.accept_task(&task.id).await.unwrap_err();
+    assert!(
+        matches!(&refused, OrchestratorError::Conflict(why) if why.contains("还没推送")),
+        "{refused:?}"
+    );
+    assert_eq!(
+        rig.engine.get_task(&task.id).unwrap().state,
+        TaskState::Review
+    );
+    assert!(late.exists());
+
+    // 打回让它推：推上去之后就能验收了。
+    rig.orchestrator
+        .reject_task(&task.id, "把后来的改动也推上去".into())
+        .await
+        .unwrap();
+    let (again, _) = rig.next_approval(&[push, pr]).await;
+    assert!(rig.orchestrator.decide(&again, ApprovalDecision::Once));
+    let task = rig.task_in(&task.id, TaskState::Review).await;
+    assert_eq!(
+        task.artifacts
+            .iter()
+            .filter(|a| a.kind == ArtifactKind::Pr)
+            .count(),
+        1
+    );
+
+    // 验收：改动在 PR 里，不往本地合；任务目录收走，分支留着。
+    let task = rig.orchestrator.accept_task(&task.id).await.unwrap();
+    assert_eq!(task.state, TaskState::Done);
+    assert!(task.note.contains("PR"), "{}", task.note);
+    assert!(!rig.workspace.join("b.txt").exists());
+    assert!(!rig.task_dir(&task.id).exists());
+    assert!(has_ref(&rig.workspace, &on_origin));
+}
+
+#[tokio::test]
+async fn nothing_leaves_the_machine_without_a_yes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fake = FakeGitHub::default();
+    let github = GitHub {
+        api_base: fake.serve().await,
+        token: Some("t0ken".into()),
+        repo: Some("me/proj".into()),
+    };
+    let rig = start_full(
+        tmp.path(),
+        "ws",
+        vec![],
+        vec![
+            write("b.txt", "新文件\n"),
+            open_pr("o1", "加 b.txt"),
+            MockReply::tool_calls("推上去。", &[("p1", "git_push", "{}")]),
+            report("blocked", "没让推"),
+            MockReply::text("交完了。"),
+        ],
+        true,
+        Some(github),
+    );
+    let origin = repo_with_origin(&rig, tmp.path());
+    let task = rig.open_task("加 b.txt").await;
+    let branch = format!("refs/heads/sa/{}", task.id.as_str().replace('_', "-"));
+
+    // 还没推就开 PR：直接告诉它先推，不拿这件做不成的事去问人。
+    let (push, reason) = rig.next_approval(&[]).await;
+    assert!(reason.contains("推送"), "{reason}");
+    assert!(last_result(&rig, 2).contains("先调用 git_push"));
+    assert!(rig.orchestrator.decide(&push, ApprovalDecision::Deny));
+
+    let task = rig.task_in(&task.id, TaskState::Blocked).await;
+    assert!(!has_ref(&origin, &branch));
+    assert!(fake.posts.lock().unwrap().is_empty());
+    assert!(task.artifacts.iter().all(|a| a.kind != ArtifactKind::Pr));
+}
+
+#[tokio::test]
+async fn a_sub_agent_reads_for_the_work_session_and_only_its_answer_comes_back() {
+    let tmp = tempfile::tempdir().unwrap();
+    let read = serde_json::json!({ "path": "b.txt" }).to_string();
+    let ask = serde_json::json!({ "prompt": "b.txt 里写了什么？" }).to_string();
+    // 子代理用的是中档模型，在这里就是对话那一侧的假模型。
+    let rig = start(
+        tmp.path(),
+        vec![
+            MockReply::tool_calls("我看看。", &[("r1", "read", &read)]),
+            MockReply::text("b.txt 里只有两个字：秘密。"),
+        ],
+        vec![
+            MockReply::tool_calls("派人去查。", &[("a1", "agent", &ask)]),
+            report("done", "查到了"),
+            MockReply::text("交完了。"),
+        ],
+    );
+    std::fs::write(rig.workspace.join("b.txt"), "秘密\n").unwrap();
+    let task = rig.open_task("查 b.txt").await;
+    rig.task_in(&task.id, TaskState::Review).await;
+
+    // 工作会话只拿到结论；子代理读文件的过程不在它的上下文里。
+    assert_eq!(last_result(&rig, 1), "b.txt 里只有两个字：秘密。");
+    let sub = rig.front.requests();
+    assert_eq!(sub.len(), 2);
+    assert!(sub[0].messages[0].content.contains("子代理"));
+    assert_eq!(sub[0].messages[1].content, "b.txt 里写了什么？");
+    let tools: Vec<&str> = sub[0].tools.iter().map(|t| t.name.as_str()).collect();
+    assert_eq!(tools, ["read", "list_dir", "glob", "grep", "web_fetch"]);
+    assert!(sub[1].messages.last().unwrap().content.contains("秘密"));
+
+    // 房间里只看到「派了子代理」这一步；子代理的临时记录用完就删。
+    let run = rig
+        .messages()
+        .into_iter()
+        .find(|m| m.kind == MessageKind::Run)
+        .unwrap();
+    let titles: Vec<&str> = run.steps.iter().map(|s| s.title.as_str()).collect();
+    assert_eq!(titles, ["子代理：b.txt 里写了什么？", "交结果：做完了"]);
+    let left = std::fs::read_dir(tmp.path().join("data/sessions/sub")).unwrap();
+    assert_eq!(left.count(), 0);
 }

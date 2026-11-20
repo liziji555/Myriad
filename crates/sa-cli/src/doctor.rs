@@ -71,6 +71,20 @@ pub fn collect(data_dir: &DataDir, env: &dyn Fn(&str) -> Option<String>) -> Vec<
     if let Some(config) = &config {
         checks.extend(check_api_keys(config, env));
     }
+    checks.push(check_git());
+    if let Some(config) = &config {
+        let var = &config.github.token_env;
+        checks.push(match env(var) {
+            Some(value) if !value.trim().is_empty() => {
+                Check::new("GitHub 令牌", Status::Ok, format!("环境变量 {var} 已设置"))
+            }
+            _ => Check::new(
+                "GitHub 令牌",
+                Status::Warn,
+                format!("环境变量 {var} 未设置，Bot 开不了 PR（别的不受影响）"),
+            ),
+        });
+    }
     checks.push(check_database(data_dir));
     if let Some(config) = &config {
         checks.push(check_port(SocketAddr::new(
@@ -113,6 +127,23 @@ fn check_data_dir(data_dir: &DataDir) -> Check {
             "数据目录",
             Status::Fail,
             format!("{} 不可写：{err}", root.display()),
+        ),
+    }
+}
+
+/// 任务要用 git：给每个任务开独立目录、算改了什么、把改动带回来。
+fn check_git() -> Check {
+    let found = std::process::Command::new("git").arg("--version").output();
+    match found {
+        Ok(output) if output.status.success() => Check::new(
+            "git",
+            Status::Ok,
+            String::from_utf8_lossy(&output.stdout).trim().to_string(),
+        ),
+        _ => Check::new(
+            "git",
+            Status::Warn,
+            "没有找到 git，任务（独立目录、验收、推送）用不了；对话不受影响",
         ),
     }
 }

@@ -5,8 +5,11 @@
 
 use sa_engine::Workdir;
 use sa_protocol::TaskId;
+use sa_tools::process::{kill_tree, own_group, TreeGuard};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use tokio::process::Command;
+use tokio_util::sync::CancellationToken;
 
 pub const KIND_WORKTREE: &str = "worktree";
 pub const KIND_COPY: &str = "copy";
@@ -49,10 +52,18 @@ fn command() -> Command {
 
 /// 跑完一条 git 命令，返回标准输出。失败时返回 git 自己说的原因。
 async fn finish(mut command: Command, what: &str) -> Result<String, String> {
-    let output = command.output().await.map_err(|e| match e.kind() {
+    let output = command.output().await.map_err(launch_error)?;
+    outcome(output, what)
+}
+
+fn launch_error(error: std::io::Error) -> String {
+    match error.kind() {
         std::io::ErrorKind::NotFound => "这台电脑上没有装 git，任务需要它".to_string(),
-        _ => format!("git 跑不起来：{e}"),
-    })?;
+        _ => format!("git 跑不起来：{error}"),
+    }
+}
+
+fn outcome(output: std::process::Output, what: &str) -> Result<String, String> {
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     } else {
@@ -337,6 +348,93 @@ pub async fn apply_to_workspace(workdir: &Workdir) -> Result<(), String> {
         .await
         .map(drop)
         .map_err(|reason| format!("改动打不回工作目录（开工之后那里的文件也变了）：{reason}"))
+}
+
+/// 任务分支现在指向哪个提交。
+pub async fn head(workdir: &Workdir) -> Result<String, String> {
+    Ok(task_git(workdir, &["rev-parse", "HEAD"])
+        .await?
+        .trim()
+        .to_string())
+}
+
+/// 往 `origin` 推送时东西会去的所有地址（一个远端可以配好几个推送地址，`git push` 每个都推）。
+/// 没有这个远端时返回给人看的原因。
+pub async fn origin_urls(workdir: &Workdir) -> Result<Vec<String>, String> {
+    let listed = git(
+        Path::new(&workdir.source),
+        &["remote", "get-url", "--push", "--all", "origin"],
+    )
+    .await;
+    let urls: Vec<String> = listed
+        .unwrap_or_default()
+        .lines()
+        .map(|url| url.trim().to_string())
+        .filter(|url| !url.is_empty())
+        .collect();
+    if urls.is_empty() {
+        return Err("这个仓库没有叫 origin 的远端，没有地方可以推送".into());
+    }
+    Ok(urls)
+}
+
+/// 开 PR 时默认合到哪个分支：人所在分支跟踪的远端分支；没有就用远端的默认分支；再没有就用人所在的分支名。
+pub async fn default_base(workdir: &Workdir) -> Option<String> {
+    let source = Path::new(&workdir.source);
+    let short = |name: String| name.trim().strip_prefix("origin/").map(str::to_string);
+    let upstream = &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"];
+    if let Some(base) = git(source, upstream).await.ok().and_then(short) {
+        return Some(base);
+    }
+    let remote_head = &["symbolic-ref", "--short", "-q", "refs/remotes/origin/HEAD"];
+    if let Some(base) = git(source, remote_head).await.ok().and_then(short) {
+        return Some(base);
+    }
+    let current = git(source, &["symbolic-ref", "--short", "-q", "HEAD"]).await;
+    current
+        .ok()
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+}
+
+/// 推送最多等这么久。
+const PUSH_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// 把任务分支推到 `origin`。在人的仓库里跑，用的是那个仓库自己的远端和凭据；
+/// 要输密码时不等（没有终端可以输），直接算失败。
+pub async fn push(workdir: &Workdir, cancel: &CancellationToken) -> Result<(), String> {
+    let Some(branch) = &workdir.branch else {
+        return Err("这个任务没有分支（工作目录不是 git 仓库），没有东西可以推送".into());
+    };
+    let refspec = format!("refs/heads/{branch}:refs/heads/{branch}");
+    let mut command = command();
+    command
+        .arg("-C")
+        .arg(plain(Path::new(&workdir.source)))
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .args(["push", "origin", &refspec])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    // 推送会跑人仓库里的钩子（比如 pre-push 里跑测试）：提前结束时要连它们一起结束。
+    own_group(&mut command);
+    let child = command.spawn().map_err(launch_error)?;
+    let pid = child.id();
+    let mut tree = TreeGuard(pid);
+    let run = child.wait_with_output();
+    tokio::pin!(run);
+    let gave_up = tokio::select! {
+        output = &mut run => {
+            tree.0 = None;
+            return outcome(output.map_err(launch_error)?, "push").map(drop);
+        }
+        _ = tokio::time::sleep(PUSH_TIMEOUT) => {
+            format!("推送等了 {} 秒还没完成，先放弃了", PUSH_TIMEOUT.as_secs())
+        }
+        _ = cancel.cancelled() => "推送被停下了，不确定有没有推上去".to_string(),
+    };
+    kill_tree(pid).await;
+    tree.0 = None;
+    Err(gave_up)
 }
 
 /// 任务结束后删掉它的独立目录。分支留着。删不掉只记日志，不影响任务状态。
@@ -669,5 +767,116 @@ mod tests {
             std::fs::read_to_string(workspace.join("b.txt")).unwrap(),
             "二\n"
         );
+    }
+
+    /// 一个有 `origin` 的仓库和它的任务目录，任务分支上有一个提交。`origin` 另有第二个推送地址。
+    async fn pushable(tmp: &Path) -> (PathBuf, Workdir, [PathBuf; 2]) {
+        let (workspace, work_root) = (tmp.join("ws"), tmp.join("work"));
+        let origins = [tmp.join("one.git"), tmp.join("two.git")];
+        std::fs::create_dir_all(&workspace).unwrap();
+        repo(&workspace).await;
+        for origin in &origins {
+            std::fs::create_dir_all(origin).unwrap();
+            git(origin, &["init", "-q", "--bare", "-b", "main"])
+                .await
+                .unwrap();
+        }
+        let [one, two] = origins.each_ref().map(|path| path.to_str().unwrap());
+        git(&workspace, &["remote", "add", "origin", one])
+            .await
+            .unwrap();
+        for url in [one, two] {
+            git(
+                &workspace,
+                &["remote", "set-url", "--add", "--push", "origin", url],
+            )
+            .await
+            .unwrap();
+        }
+        let workdir = provision(&workspace, &work_root, &TaskId::new())
+            .await
+            .unwrap();
+        std::fs::write(Path::new(&workdir.path).join("b.txt"), "新的\n").unwrap();
+        commit_and_diff(&workdir, "加 b.txt").await.unwrap();
+        (workspace, workdir, origins)
+    }
+
+    /// `git push origin` 会推到 origin 的每一个推送地址：问人的时候要全部列出来。
+    #[tokio::test]
+    async fn every_address_a_push_goes_to_is_listed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_, workdir, origins) = pushable(tmp.path()).await;
+        let listed = origin_urls(&workdir).await.unwrap();
+        let expected = origins.each_ref().map(|path| path.to_str().unwrap());
+        assert_eq!(listed, expected);
+
+        push(&workdir, &CancellationToken::new()).await.unwrap();
+        let branch = format!("refs/heads/{}", workdir.branch.as_deref().unwrap());
+        for origin in &origins {
+            let pushed = git(origin, &["rev-parse", "--verify", &branch]).await;
+            assert_eq!(pushed.unwrap().trim(), head(&workdir).await.unwrap());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_repo_without_origin_has_nowhere_to_push() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (workspace, workdir, _) = pushable(tmp.path()).await;
+        git(&workspace, &["remote", "remove", "origin"])
+            .await
+            .unwrap();
+        assert!(origin_urls(&workdir).await.unwrap_err().contains("origin"));
+        assert!(push(&workdir, &CancellationToken::new()).await.is_err());
+    }
+
+    /// 推送会跑人仓库里的钩子。停下推送时，钩子启动的进程不能留在后台。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stopping_a_push_also_stops_what_its_hooks_started() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let (workspace, workdir, origins) = pushable(tmp.path()).await;
+        let started = tmp.path().join("started");
+        let hook = workspace.join(".git/hooks/pre-push");
+        let script = format!(
+            "#!/bin/sh\nsleep 300 &\necho $! > '{}'\nwait\n",
+            started.display()
+        );
+        std::fs::write(&hook, script).unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let cancel = CancellationToken::new();
+        let stop = cancel.clone();
+        let (seen, pushing) = (started.clone(), workdir.clone());
+        let pushed = tokio::spawn(async move { push(&pushing, &cancel).await });
+        let child = loop {
+            let pid = std::fs::read_to_string(&seen).unwrap_or_default();
+            if pid.ends_with('\n') {
+                break pid.trim().to_string();
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        stop.cancel();
+        assert!(pushed.await.unwrap().unwrap_err().contains("停下"));
+
+        let alive = || {
+            std::process::Command::new("kill")
+                .args(["-0", &child])
+                .stderr(std::process::Stdio::null())
+                .status()
+                .unwrap()
+                .success()
+        };
+        for _ in 0..200 {
+            if !alive() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(!alive(), "钩子启动的进程 {child} 还在跑");
+        let branch = format!("refs/heads/{}", workdir.branch.as_deref().unwrap());
+        assert!(git(&origins[0], &["rev-parse", "--verify", &branch])
+            .await
+            .is_err());
     }
 }

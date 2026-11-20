@@ -8,6 +8,7 @@ mod fence;
 mod glob;
 mod grep;
 mod list_dir;
+pub mod process;
 mod read;
 mod shell;
 mod todo;

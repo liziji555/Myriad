@@ -8,6 +8,8 @@ license.workspace = true
 [dependencies]
 async-trait.workspace = true
 futures-util.workspace = true
+reqwest.workspace = true
+rustls.workspace = true
 sa-engine.workspace = true
 sa-kernel.workspace = true
 sa-llm.workspace = true
@@ -21,6 +23,7 @@ tokio-util.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+axum.workspace = true
 sa-store.workspace = true
 tempfile.workspace = true
 

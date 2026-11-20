@@ -97,6 +97,13 @@ impl App {
             allow_private_network: false,
             approval_timeout: sa_orchestrator::DEFAULT_APPROVAL_TIMEOUT,
             work_dir: data_dir.work(),
+            github: Some(sa_orchestrator::GitHub {
+                api_base: config.github.api_base.clone(),
+                token: std::env::var(&config.github.token_env)
+                    .ok()
+                    .filter(|token| !token.trim().is_empty()),
+                repo: config.github.repo.clone(),
+            }),
         };
         tune(&mut settings);
         let orchestrator = Arc::new(Orchestrator::new(engine.clone(), models, settings));
