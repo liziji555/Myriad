@@ -436,6 +436,9 @@ fn is_task_of(task: &Task, repo: &str, pr: Option<u64>, branch: Option<&str>) ->
 ///
 /// 送不送看它在回谁：回 Telegram 里说的话，送回那个聊天；定时任务和外面来的事引出的话没有人在界面前等着，
 /// 送到房间连着的每个 Telegram 聊天；回界面里说的话，不送。
+///
+/// 「在回谁」取它前面最近的一条人话、或者指定交给这个 Bot 的定时任务和事件。拿不准的时候宁可不送：
+/// 只摆在时间线上的事、交给别的 Bot 的事不算数，否则回界面里的话会被当成它们引出来的，送到所有聊天里去。
 pub(crate) fn relay(tx: &Transaction<'_>, message: &Message) -> sa_store::Result<()> {
     let Sender::Bot { bot_id } = &message.sender else {
         return Ok(());
@@ -453,7 +456,8 @@ pub(crate) fn relay(tx: &Transaction<'_>, message: &Message) -> sa_store::Result
         }
         _ => return Ok(()),
     };
-    let Some(trigger) = messages::last_trigger_before(tx, &message.room_id, message.seq)? else {
+    let Some(trigger) = messages::last_trigger_before(tx, &message.room_id, message.seq, bot_id)?
+    else {
         return Ok(());
     };
     let linked = external::room_links(tx, &message.room_id, Source::Telegram)?;
@@ -724,6 +728,51 @@ mod tests {
         let out = engine.pending_outbound(Source::Telegram, 10).unwrap();
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].target, "99");
+    }
+
+    #[test]
+    fn events_meant_for_nobody_or_another_bot_do_not_broadcast_a_reply() {
+        let (engine, room, bot) = engine();
+        let other = engine
+            .create_bot("Coder", sa_protocol::ModelTier::Mid, "")
+            .unwrap();
+        engine.add_room_member(&room, &other.id).unwrap();
+        let pairing = engine.create_pairing(&room).unwrap();
+        engine.redeem_pairing(&pairing.code, "42", "张三").unwrap();
+        engine.link_repo(&room, "me/app").unwrap();
+
+        // 人在界面里问了一句；回复之前来了一件只摆出来的事（CI 通过了）。
+        engine
+            .post_user_message(&room, "账单里那笔钱是怎么回事")
+            .unwrap();
+        let mut silent = issue("d-1", "me/app");
+        if let IncomingKind::Event { notify, .. } = &mut silent.kind {
+            *notify = false;
+        }
+        assert!(matches!(
+            engine.receive(silent).unwrap(),
+            Receipt::Stored(_)
+        ));
+        reply(&engine, &room, &bot, "那笔是退款。");
+        assert!(engine
+            .pending_outbound(Source::Telegram, 10)
+            .unwrap()
+            .is_empty());
+
+        // 又来了一件交给入口 Bot 的事；另一个 Bot 这时候回界面里的话，不算是这件事引出来的。
+        engine.receive(issue("d-2", "me/app")).unwrap();
+        reply(&engine, &room, &other.id, "我补充一句：下个月还有一笔。");
+        assert!(engine
+            .pending_outbound(Source::Telegram, 10)
+            .unwrap()
+            .is_empty());
+
+        // 入口 Bot 自己说这件事：照常送出去。
+        reply(&engine, &room, &bot, "有个新 issue。");
+        assert_eq!(
+            engine.pending_outbound(Source::Telegram, 10).unwrap().len(),
+            1
+        );
     }
 
     #[test]
