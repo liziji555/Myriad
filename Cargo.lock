@@ -1597,7 +1597,10 @@ name = "sa-orchestrator"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "axum",
  "futures-util",
+ "reqwest",
+ "rustls",
  "sa-engine",
  "sa-kernel",
  "sa-llm",

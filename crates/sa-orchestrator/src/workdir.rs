@@ -6,7 +6,9 @@
 use sa_engine::Workdir;
 use sa_protocol::TaskId;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use tokio::process::Command;
+use tokio_util::sync::CancellationToken;
 
 pub const KIND_WORKTREE: &str = "worktree";
 pub const KIND_COPY: &str = "copy";
@@ -337,6 +339,69 @@ pub async fn apply_to_workspace(workdir: &Workdir) -> Result<(), String> {
         .await
         .map(drop)
         .map_err(|reason| format!("改动打不回工作目录（开工之后那里的文件也变了）：{reason}"))
+}
+
+/// 任务分支现在指向哪个提交。
+pub async fn head(workdir: &Workdir) -> Result<String, String> {
+    Ok(task_git(workdir, &["rev-parse", "HEAD"])
+        .await?
+        .trim()
+        .to_string())
+}
+
+/// 人的仓库里 `origin` 的地址。没有这个远端时返回给人看的原因。
+pub async fn origin_url(workdir: &Workdir) -> Result<String, String> {
+    git(
+        Path::new(&workdir.source),
+        &["remote", "get-url", "--push", "origin"],
+    )
+    .await
+    .map(|url| url.trim().to_string())
+    .map_err(|_| "这个仓库没有叫 origin 的远端，没有地方可以推送".to_string())
+}
+
+/// 开 PR 时默认合到哪个分支：人所在分支跟踪的远端分支；没有就用远端的默认分支；再没有就用人所在的分支名。
+pub async fn default_base(workdir: &Workdir) -> Option<String> {
+    let source = Path::new(&workdir.source);
+    let short = |name: String| name.trim().strip_prefix("origin/").map(str::to_string);
+    let upstream = &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"];
+    if let Some(base) = git(source, upstream).await.ok().and_then(short) {
+        return Some(base);
+    }
+    let remote_head = &["symbolic-ref", "--short", "-q", "refs/remotes/origin/HEAD"];
+    if let Some(base) = git(source, remote_head).await.ok().and_then(short) {
+        return Some(base);
+    }
+    let current = git(source, &["symbolic-ref", "--short", "-q", "HEAD"]).await;
+    current
+        .ok()
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+}
+
+/// 推送最多等这么久。
+const PUSH_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// 把任务分支推到 `origin`。在人的仓库里跑，用的是那个仓库自己的远端和凭据；
+/// 要输密码时不等（没有终端可以输），直接算失败。
+pub async fn push(workdir: &Workdir, cancel: &CancellationToken) -> Result<(), String> {
+    let Some(branch) = &workdir.branch else {
+        return Err("这个任务没有分支（工作目录不是 git 仓库），没有东西可以推送".into());
+    };
+    let refspec = format!("refs/heads/{branch}:refs/heads/{branch}");
+    let mut command = command();
+    command
+        .arg("-C")
+        .arg(plain(Path::new(&workdir.source)))
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .args(["push", "origin", &refspec]);
+    tokio::select! {
+        done = tokio::time::timeout(PUSH_TIMEOUT, finish(command, "push")) => match done {
+            Ok(result) => result.map(drop),
+            Err(_) => Err(format!("推送等了 {} 秒还没完成，先放弃了", PUSH_TIMEOUT.as_secs())),
+        },
+        _ = cancel.cancelled() => Err("推送被停下了，不确定有没有推上去".into()),
+    }
 }
 
 /// 任务结束后删掉它的独立目录。分支留着。删不掉只记日志，不影响任务状态。

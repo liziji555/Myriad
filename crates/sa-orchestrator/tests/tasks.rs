@@ -86,6 +86,7 @@ fn start_in(
         allow_private_network: false,
         approval_timeout: Duration::from_secs(600),
         work_dir: data.join("work"),
+        github: None,
     };
     let models = Arc::new(Models {
         front: front.clone(),

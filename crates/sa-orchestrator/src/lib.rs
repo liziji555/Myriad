@@ -6,14 +6,18 @@
 //! 有几个就让便宜的模型按分工挑一个（见 [`router`]）。Bot 之间用 `ask_bot` 互相点名，
 //! 次数和转手的上限见 [`episode`]。
 
+mod agent;
 mod ask;
+mod deliver;
 mod episode;
+mod github;
 mod room;
 mod router;
 mod work;
 mod workdir;
 
 pub use episode::{MAX_BOT_TURNS, MAX_HOP, MAX_PAIR_ASKS};
+pub use github::{GitHub, DEFAULT_API_BASE};
 pub use work::MAX_PARALLEL_RUNS;
 
 use episode::Episode;
@@ -65,6 +69,8 @@ pub struct Settings {
     pub approval_timeout: Duration,
     /// 任务的独立工作目录放在哪。
     pub work_dir: PathBuf,
+    /// 怎么连 GitHub（开 PR 用）。`None` 表示不提供开 PR 的工具。
+    pub github: Option<GitHub>,
 }
 
 /// 审批卡默认等 10 分钟。

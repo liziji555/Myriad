@@ -97,6 +97,7 @@ impl App {
             allow_private_network: false,
             approval_timeout: sa_orchestrator::DEFAULT_APPROVAL_TIMEOUT,
             work_dir: data_dir.work(),
+            github: None,
         };
         tune(&mut settings);
         let orchestrator = Arc::new(Orchestrator::new(engine.clone(), models, settings));

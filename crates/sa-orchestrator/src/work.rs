@@ -4,6 +4,8 @@
 //! 结束时用 `report` 交结果：做完了等人验收、缺一个回答、卡住了，或者这件事不用做。
 //! 同时最多跑 [`MAX_PARALLEL_RUNS`] 个任务，多的排队。
 
+use crate::agent::AgentTool;
+use crate::deliver::{Delivery, GitPushTool, OpenPrTool};
 use crate::room::{db, RoomObserver};
 use crate::{render_work_prompt, workdir, Orchestrator, OrchestratorError, Shared};
 use async_trait::async_trait;
@@ -31,6 +33,7 @@ const BRIEF_MESSAGES: u32 = 10;
 /// 交付物里最多列这么多个文件。
 const MAX_FILE_ARTIFACTS: usize = 30;
 const STOPPED_NOTE: &str = "被停下了。补充说明后可以让它继续。";
+const PR_NOTE: &str = "改动在 PR 里，没有合进本地的工作目录。";
 
 #[derive(Default)]
 pub(crate) struct Works {
@@ -267,6 +270,25 @@ async fn run_task(shared: &Arc<Shared>, task: Task, cancel: &CancellationToken) 
             tools.register(ReportTool {
                 reported: reported.clone(),
             });
+            tools.register(AgentTool {
+                shared: shared.clone(),
+                room_id: task.room_id.clone(),
+                bot_id: bot.id.clone(),
+                session_id: session_id.clone(),
+            });
+            // 推送和开 PR 只对有分支的任务（工作目录是 git 仓库）有意义。
+            if workdir.branch.is_some() {
+                let delivery = Delivery {
+                    shared: shared.clone(),
+                    task: task.clone(),
+                    run_id: run.id.clone(),
+                    workdir: workdir.clone(),
+                };
+                tools.register(GitPushTool(delivery.clone()));
+                if shared.settings.github.is_some() {
+                    tools.register(OpenPrTool(delivery));
+                }
+            }
             let mut inbox = WorkInbox {
                 shared: shared.clone(),
                 task: task.clone(),
@@ -739,6 +761,7 @@ impl Orchestrator {
     }
 
     /// 验收通过：把任务的改动带回工作目录，任务完成。带不回去时任务留在「等验收」。
+    /// 任务开了 PR 的话不往本地带：改动由人在 GitHub 上合并。
     pub async fn accept_task(&self, id: &TaskId) -> Result<Task, OrchestratorError> {
         self.check_running()?;
         let shared = &self.shared;
@@ -753,6 +776,10 @@ impl Orchestrator {
         if task.state != TaskState::Review {
             return Err(EngineError::Invalid("只有等验收的任务才能验收".into()).into());
         }
+        let in_pr = task
+            .artifacts
+            .iter()
+            .any(|artifact| artifact.kind == ArtifactKind::Pr);
         if let Some(dir) = &dir {
             check_source(shared, dir).map_err(OrchestratorError::Conflict)?;
             // 先把任务目录里现在的样子记下来：上一次运行收尾时没记成的改动，不能在验收时悄悄丢掉。
@@ -761,12 +788,16 @@ impl Orchestrator {
                 .map_err(|reason| {
                     OrchestratorError::Conflict(format!("任务目录里的改动没能记下来：{reason}"))
                 })?;
-            workdir::apply_to_workspace(dir)
-                .await
-                .map_err(OrchestratorError::Conflict)?;
+            // 开了 PR 的任务，改动走 PR 合进去，不再往本地合一遍（否则 PR 合并时会和本地撞上）。
+            if !in_pr {
+                workdir::apply_to_workspace(dir)
+                    .await
+                    .map_err(OrchestratorError::Conflict)?;
+            }
         }
+        let note = if in_pr { PR_NOTE } else { "" };
         let (engine, task_id) = (shared.engine.clone(), id.clone());
-        let task = db(move || engine.move_task(&task_id, TaskState::Done, "")).await?;
+        let task = db(move || engine.move_task(&task_id, TaskState::Done, note)).await?;
         cleanup(shared, id).await;
         Ok(task)
     }
