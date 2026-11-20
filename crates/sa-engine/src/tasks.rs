@@ -172,12 +172,21 @@ impl Engine {
 
     /// 把任务挪到另一个状态。`note` 是对新状态的一句说明。不允许的走法会被拒绝。
     pub fn move_task(&self, id: &TaskId, to: TaskState, note: &str) -> Result<Task> {
-        self.change_task(id, |_, task| {
+        let task = self.change_task(id, |_, task| {
             check_move(task, to)?;
             task.state = to;
             task.note = note.trim().to_string();
             Ok(())
-        })
+        })?;
+        // 任务每一次换状态都留底：验收、打回、取消、停下、卡住，事后查得到是哪一步、为什么。
+        let summary = format!("任务「{}」变成了「{}」", task.title, state_label(to));
+        self.audit(
+            crate::Audit::system(&format!("task.{}", to.as_str()), summary)
+                .room(&task.room_id)
+                .task(Some(&task.id))
+                .detail(note),
+        );
+        Ok(task)
     }
 
     /// 人让任务继续：草稿、等回答、卡住、等验收（打回）的任务回到「等着开工」。
