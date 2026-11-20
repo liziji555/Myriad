@@ -27,9 +27,11 @@ pub use watchdog::Watchdog;
 pub use work::MAX_PARALLEL_RUNS;
 
 use episode::Episode;
-use sa_engine::{Engine, EngineError};
+use sa_engine::{Engine, EngineError, Incoming, Receipt};
 use sa_llm::Provider;
-use sa_protocol::{ApprovalDecision, ApprovalId, Bot, BotId, Message, ModelTier, RoomId};
+use sa_protocol::{
+    ApprovalDecision, ApprovalId, Bot, BotId, Message, MessageKind, ModelTier, RoomId,
+};
 use sa_tools::{Fence, ToolRegistry};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -192,11 +194,31 @@ impl Orchestrator {
             engine.post_user_message(&room.id, &content)
         })
         .await?;
-        // 点名找的不是正在说话的那个 Bot：打断它，让被点到的来接。
+        self.arrived(&message);
+        Ok(message)
+    }
+
+    /// 外面送来一件事（GitHub 事件、Telegram 里的一句话）。收下的成了房间里的消息，回应在后台进行。
+    pub async fn receive(&self, incoming: Incoming) -> Result<Receipt, OrchestratorError> {
+        if self.shared.shutdown.is_cancelled() {
+            return Err(OrchestratorError::ShuttingDown);
+        }
+        let engine = self.shared.engine.clone();
+        let receipt = room::db(move || engine.receive(incoming)).await?;
+        if let Receipt::Stored(message) = &receipt {
+            self.arrived(message);
+        }
+        Ok(receipt)
+    }
+
+    /// 房间里来了一条要有人回应的消息：叫醒房间。
+    fn arrived(&self, message: &Message) {
+        // 人点名找的不是正在说话的那个 Bot：打断它，让被点到的来接。
         // 没有点名、或者点的就是它：不打断，它在下一步会看到这条新消息。
-        if let Some(target) = message.mentions.first() {
+        // 外面来的事不是人在叫：不打断，等正在说话的说完。
+        if let (MessageKind::Chat, Some(target)) = (message.kind, message.mentions.first()) {
             let rooms = self.rooms.lock().unwrap();
-            if let Some(handle) = rooms.get(room_id) {
+            if let Some(handle) = rooms.get(&message.room_id) {
                 let current = handle.link.current.lock().unwrap();
                 if let Some((speaking, cancel)) = current.as_ref() {
                     if speaking.as_ref() != Some(target) {
@@ -205,8 +227,7 @@ impl Orchestrator {
                 }
             }
         }
-        self.wake(room_id);
-        Ok(message)
+        self.wake(&message.room_id);
     }
 
     /// 停下房间里正在进行的回复，排着队的 Bot 也不再说话。返回是否真的有东西被停下。
