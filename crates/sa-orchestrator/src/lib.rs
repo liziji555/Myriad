@@ -232,6 +232,11 @@ impl Orchestrator {
         Ok(budget::summary(&self.shared).await?)
     }
 
+    /// 今天的花费是不是到了每日上限：到了的话排队的任务不会开工。
+    pub async fn daily_limit_reached(&self) -> bool {
+        budget::daily_exhausted(&self.shared).await
+    }
+
     /// 停下所有房间并等它们收尾。正在写的回复会标成「中断」。
     pub async fn shutdown(&self) {
         self.shared.shutdown.cancel();

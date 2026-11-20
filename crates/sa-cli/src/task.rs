@@ -221,6 +221,14 @@ pub(crate) async fn wait<F: Future<Output = ()>>(
         if !running && (interrupted || !matches!(now.state, TaskState::Open | TaskState::Working)) {
             return Ok(now);
         }
+        if !running && now.state == TaskState::Open && app.orchestrator.daily_limit_reached().await
+        {
+            writeln!(
+                out,
+                "今天的花费到上限了，任务先排着队。明天运行 sa serve 时它会自动开工；也可以调高 config.toml 里 [budget] 的 daily_limit。"
+            )?;
+            return Ok(now);
+        }
         let page = app.engine.list_messages(&now.room_id, None, 50)?;
         let runs = page
             .messages

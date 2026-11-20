@@ -81,11 +81,11 @@ async fn schedule(shared: Arc<Shared>) {
                 continue;
             }
         };
-        // 在同一把锁里「看有没有空位」和「占位」：任务结束时也要拿这把锁才能把自己去掉。
         // 今天的额度用完了：排着队的先不开工（开了也是立刻卡住）。看门狗每隔一阵会再叫醒这里。
         if !open.is_empty() && crate::budget::daily_exhausted(&shared).await {
             continue;
         }
+        // 在同一把锁里「看有没有空位」和「占位」：任务结束时也要拿这把锁才能把自己去掉。
         let mut running = shared.works.running.lock().unwrap();
         for task in open {
             if running.len() >= MAX_PARALLEL_RUNS || shared.shutdown.is_cancelled() {
