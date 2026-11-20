@@ -215,7 +215,7 @@ async fn run_task(shared: &Arc<Shared>, task: Task, cancel: &CancellationToken) 
         session_id: session_id.clone(),
         message_id: draft.id.clone(),
         fence: fence.clone(),
-        rule_scope: Some(format!("[任务 {}] ", task.id)),
+        rule_scope: Some(task.id.to_string()),
         steps: Mutex::new(vec![]),
         // 工作会话里没有「不说话」这回事，字直接显示。
         held: Mutex::new(None),

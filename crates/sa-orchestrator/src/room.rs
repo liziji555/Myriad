@@ -580,7 +580,7 @@ pub(crate) struct RoomObserver {
     pub message_id: MessageId,
     /// 这一轮的文件类工具在哪个目录里干活。「总是允许」记的路径按它来算。
     pub fence: Fence,
-    /// 「总是允许」的命令记在哪个范围里。任务里批准的命令是在任务目录里跑的，
+    /// 「总是允许」的命令记在谁的名下（任务的 id）。任务里批准的命令是在任务目录里跑的，
     /// 不能让同一条命令在对话里（在人的工作目录里跑）也跟着免问，反过来也一样。
     pub rule_scope: Option<String>,
     pub steps: Mutex<Vec<ToolStep>>,
@@ -689,17 +689,14 @@ impl Observer for RoomObserver {
 
     async fn request_approval(&self, request: ApprovalRequest<'_>) -> bool {
         let engine = &self.shared.engine;
-        let key =
-            rule_key(request.tool, request.input, &self.fence).map(|key| match &self.rule_scope {
-                Some(scope) if request.tool == "shell" => format!("{scope}{key}"),
-                _ => key,
-            });
+        let key = rule_key(request.tool, request.input, &self.fence);
+        // 任务里的命令记在任务自己的名下，和对话里的命令是两本账，互相碰不到。
+        let rule_tool = match &self.rule_scope {
+            Some(scope) if request.tool == "shell" => format!("shell@{scope}"),
+            _ => request.tool.to_string(),
+        };
         if let Some(key) = key.clone() {
-            let (engine, room, tool) = (
-                engine.clone(),
-                self.room_id.clone(),
-                request.tool.to_string(),
-            );
+            let (engine, room, tool) = (engine.clone(), self.room_id.clone(), rule_tool.clone());
             match db(move || engine.is_always_allowed(&room, &tool, &key)).await {
                 Ok(true) => return true,
                 Ok(false) => {}
@@ -737,11 +734,7 @@ impl Observer for RoomObserver {
         };
         let allowed = decision != ApprovalDecision::Deny;
         if let (ApprovalDecision::Always, Some(key)) = (decision, key) {
-            let (engine, room, tool) = (
-                engine.clone(),
-                self.room_id.clone(),
-                request.tool.to_string(),
-            );
+            let (engine, room, tool) = (engine.clone(), self.room_id.clone(), rule_tool.clone());
             if let Err(error) = db(move || engine.allow_always(&room, &tool, &key).map(drop)).await
             {
                 tracing::error!(room = %self.room_id, "「总是允许」没记上：{error}");
