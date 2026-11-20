@@ -110,10 +110,11 @@ impl Config {
                 bail!("[providers.{name}] 没有填 api_key_env");
             }
             if let Some(header) = &provider.session_header {
+                // HTTP 请求头名字允许的字符（RFC 9110 的 token）。
                 let valid = !header.is_empty()
                     && header
                         .chars()
-                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+                        .all(|c| c.is_ascii_alphanumeric() || "!#$%&'*+-.^_`|~".contains(c));
                 if !valid {
                     bail!("[providers.{name}] 的 session_header「{header}」不是合法的请求头名字");
                 }
@@ -175,11 +176,19 @@ mod tests {
             config.providers["deepseek"].session_header.as_deref(),
             Some("x-opencode-session")
         );
-        let bad = with_header.replace("x-opencode-session", "x session");
-        assert!(Config::parse(&bad)
-            .unwrap_err()
-            .to_string()
-            .contains("session_header"));
+        for valid in ["x.session-id", "X_Session~1"] {
+            let text = with_header.replace("x-opencode-session", valid);
+            let config = Config::parse(&text).unwrap();
+            assert_eq!(
+                config.providers["deepseek"].session_header.as_deref(),
+                Some(valid)
+            );
+        }
+        for invalid in ["x session", "x:session", "会话", ""] {
+            let text = with_header.replace("x-opencode-session", invalid);
+            let error = Config::parse(&text).unwrap_err().to_string();
+            assert!(error.contains("session_header"), "{invalid}: {error}");
+        }
     }
 
     #[test]
