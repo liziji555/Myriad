@@ -221,10 +221,22 @@ pub fn cancel_pending(conn: &Connection, source: Source, target: &str, why: &str
     )?)
 }
 
+/// 这一条是不是还等着送。送之前再看一眼：取出来之后它可能已经作废了（连接断开了）。
+pub fn is_pending(conn: &Connection, id: i64) -> Result<bool> {
+    Ok(conn
+        .query_row(
+            "SELECT 1 FROM outbound WHERE id = ?1 AND state = 'pending'",
+            [id],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some())
+}
+
 pub fn mark_sent(conn: &Connection, id: i64, now: i64) -> Result<()> {
     conn.execute(
         "UPDATE outbound SET state = 'sent', sent_at = ?2, error = NULL, attempts = attempts + 1
-         WHERE id = ?1",
+         WHERE id = ?1 AND state = 'pending'",
         params![id, now],
     )?;
     conn.execute(
@@ -240,7 +252,7 @@ pub fn mark_failed(conn: &Connection, id: i64, error: &str, retry_at: Option<i64
         "UPDATE outbound SET attempts = attempts + 1, error = ?2,
                 state = CASE WHEN ?3 IS NULL THEN 'failed' ELSE 'pending' END,
                 retry_at = COALESCE(?3, retry_at)
-         WHERE id = ?1",
+         WHERE id = ?1 AND state = 'pending'",
         params![id, error, retry_at],
     )?;
     Ok(())

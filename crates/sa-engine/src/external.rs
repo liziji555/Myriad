@@ -286,6 +286,11 @@ impl Engine {
             .read(|c| external::pending(c, source, now, limit))?)
     }
 
+    /// 这一条是不是还等着送（没有因为断开连接作废）。
+    pub fn outbound_pending(&self, id: i64) -> Result<bool> {
+        Ok(self.store.read(|c| external::is_pending(c, id))?)
+    }
+
     pub fn outbound_sent(&self, id: i64) -> Result<()> {
         Ok(self
             .store
@@ -721,12 +726,20 @@ mod tests {
         engine
             .send_out(Source::Telegram, "99", "提示", "hint")
             .unwrap();
-        assert_eq!(
-            engine.pending_outbound(Source::Telegram, 10).unwrap().len(),
-            2
-        );
+        let before = engine.pending_outbound(Source::Telegram, 10).unwrap();
+        assert_eq!(before.len(), 2);
+        let queued = before.iter().find(|out| out.target == "42").unwrap().id;
         let link = engine.find_link(Source::Telegram, "42").unwrap().unwrap();
         engine.delete_link(&link.id).unwrap();
+        let out = engine.pending_outbound(Source::Telegram, 10).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].target, "99");
+        // 发送的那一头在断开之前已经把它取走了：送之前再看一眼会发现它作废了；
+        // 这时候报「没送成、过会儿再试」也不会让它重新排上队。
+        assert!(!engine.outbound_pending(queued).unwrap());
+        assert!(engine.outbound_pending(out[0].id).unwrap());
+        engine.outbound_failed(queued, "网络不通", Some(0)).unwrap();
+        engine.outbound_sent(queued).unwrap();
         let out = engine.pending_outbound(Source::Telegram, 10).unwrap();
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].target, "99");

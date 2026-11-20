@@ -301,6 +301,19 @@ impl Orchestrator {
                 let mut sent = progress.get(&out.id).copied().unwrap_or(0);
                 let mut failure = stale.then(|| (None, "放得太久，不送了".to_string()));
                 while failure.is_none() && sent < parts.len() {
+                    // 取出来之后连接可能已经断开了：每送一段之前再看一眼，作废了的不送。
+                    let (engine, id) = (engine.clone(), out.id);
+                    match db(move || engine.outbound_pending(id)).await {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            failure = Some((None, "连接断开了".to_string()));
+                            break;
+                        }
+                        Err(error) => {
+                            failure = Some((Some(options.backoff), error.to_string()));
+                            break;
+                        }
+                    }
                     match client.send(&out.target, &parts[sent]).await {
                         Ok(()) => sent += 1,
                         Err(error) => {
