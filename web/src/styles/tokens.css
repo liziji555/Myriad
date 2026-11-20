@@ -1,0 +1,56 @@
+/* 设计变量。间距 4px 基准、紧凑字号、细边框，思路参考 Lancer（MIT）的 tokens.css。 */
+:root {
+  color-scheme: light dark;
+
+  --sa-space-1: 4px;
+  --sa-space-2: 8px;
+  --sa-space-3: 12px;
+  --sa-space-4: 16px;
+  --sa-space-6: 24px;
+  --sa-space-8: 32px;
+
+  --sa-radius-sm: 6px;
+  --sa-radius-md: 8px;
+  --sa-radius-lg: 12px;
+  --sa-radius-pill: 999px;
+
+  --sa-text-xs: 11px;
+  --sa-text-sm: 12px;
+  --sa-text-base: 14px;
+  --sa-text-lg: 16px;
+  --sa-text-xl: 20px;
+  --sa-font: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --sa-font-mono: ui-monospace, "Cascadia Code", Consolas, monospace;
+
+  --sa-bg: #ffffff;
+  --sa-bg-side: #f6f6f4;
+  --sa-fg: #1c1c1a;
+  --sa-accent: #2b6fd6;
+  --sa-ok: #2e9d5b;
+  --sa-warn: #c98a12;
+  --sa-danger: #cf4436;
+
+  --sa-fg-muted: color-mix(in srgb, var(--sa-fg) 62%, transparent);
+  --sa-fg-faint: color-mix(in srgb, var(--sa-fg) 40%, transparent);
+  --sa-border: color-mix(in srgb, var(--sa-fg) 12%, transparent);
+  --sa-hover: color-mix(in srgb, var(--sa-fg) 6%, transparent);
+  --sa-active: color-mix(in srgb, var(--sa-fg) 10%, transparent);
+
+  --sa-sidebar-width: 248px;
+  --sa-panel-width: 340px;
+  --sa-motion: 0.15s ease-out;
+
+  --light-color: var(--sa-accent);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --sa-bg: #1b1b1a;
+    --sa-bg-side: #151514;
+    --sa-fg: #ececea;
+    --sa-accent: #70a7f7;
+    --sa-ok: #57c785;
+    --sa-warn: #e0ad45;
+    --sa-danger: #ef7566;
+  }
+}
