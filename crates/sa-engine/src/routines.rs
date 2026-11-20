@@ -185,6 +185,26 @@ impl Engine {
         Ok(self.store.read(|c| routines::due(c, now))?)
     }
 
+    /// 把下一次到点的时间改成 `next_at`（之后仍然按原来的时间表走）。
+    pub fn reschedule_routine(&self, id: &RoutineId, next_at: Millis) -> Result<Routine> {
+        let now = now_ms();
+        let (routine, seq) = self.store.write(|tx| {
+            let Some(mut routine) = routines::get(tx, id)? else {
+                return Ok(Err(EngineError::NotFound("没有这个定时任务".into())));
+            };
+            if !routine.enabled {
+                return Ok(Err(EngineError::Invalid("这个定时任务停用着".into())));
+            }
+            routine.next_at = Some(next_at);
+            routine.updated_at = now;
+            routines::update(tx, &routine)?;
+            let seq = updated(tx, &routine, now)?;
+            Ok(Ok((routine, seq)))
+        })??;
+        self.publish(seq);
+        Ok(routine)
+    }
+
     /// 抢这个定时任务的租约，抢到了才能去做。租约到 `until` 过期。
     pub fn claim_routine(&self, id: &RoutineId, owner: &str, until: Millis) -> Result<bool> {
         let now = now_ms();
