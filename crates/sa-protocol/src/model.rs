@@ -1,6 +1,4 @@
-use crate::{
-    ApprovalId, ArtifactId, BotId, MessageId, Millis, RoomId, RuleId, RunId, TaskId,
-};
+use crate::{ApprovalId, ArtifactId, BotId, MessageId, Millis, RoomId, RuleId, RunId, TaskId};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
@@ -517,7 +515,9 @@ mod tests {
         // 结束了的不再动，也不能再取消。
         for end in [Done, Dropped, Cancelled] {
             assert!(end.is_terminal());
-            for to in [Draft, Open, Working, Waiting, Review, Blocked, Done, Dropped, Cancelled] {
+            for to in [
+                Draft, Open, Working, Waiting, Review, Blocked, Done, Dropped, Cancelled,
+            ] {
                 assert!(!end.can_become(to), "{end:?} -> {to:?}");
             }
         }
