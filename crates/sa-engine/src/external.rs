@@ -65,7 +65,7 @@ pub enum IncomingKind {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Receipt {
     /// 收下了，成了房间里的一条消息。
-    Stored(Message),
+    Stored(Box<Message>),
     /// 这件事之前送来过。
     Duplicate,
     /// 没收，以及原因。
@@ -106,7 +106,7 @@ impl Engine {
                     trigger.stored = true;
                     trigger.message_id = Some(&message.id);
                     external::record_trigger(tx, &trigger, now)?;
-                    Ok((Receipt::Stored(message), Some(seq)))
+                    Ok((Receipt::Stored(Box::new(message)), Some(seq)))
                 }
                 Err(note) => {
                     trigger.note = &note;
@@ -599,7 +599,7 @@ mod tests {
             Receipt::Duplicate
         );
         let page = engine.list_messages(&room, None, 50).unwrap();
-        assert_eq!(page.messages, vec![message]);
+        assert_eq!(page.messages, vec![*message]);
     }
 
     #[test]
