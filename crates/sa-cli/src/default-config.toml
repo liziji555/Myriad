@@ -33,3 +33,11 @@ strong = { provider = "deepseek", model = "deepseek-v4-pro" }
 # 预算守卫做好之后，到了上限会停止调用模型。
 daily_limit = 50.0
 currency = "CNY"
+
+[github]
+# 任务里的 Bot 开 PR 用（每次都要你批准）。令牌放在环境变量里，不写进这个文件；
+# 需要对仓库有 Pull requests 的写权限。不设令牌时别的功能不受影响，只是开不了 PR。
+api_base = "https://api.github.com"
+token_env = "GITHUB_TOKEN"
+# 仓库不写就从工作目录的 origin 地址里认；认不出来时写在这里：
+# repo = "owner/name"

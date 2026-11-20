@@ -5,6 +5,7 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 pub const DEFAULT_API_BASE: &str = "https://api.github.com";
+pub const NO_TOKEN: &str = "没有 GitHub 令牌，开不了 PR。请用户设置环境变量 GITHUB_TOKEN（或者 config.toml 里 [github] token_env 指的那个）后重启。分支已经推送的话，用户也可以自己在 GitHub 上开。";
 const TIMEOUT: Duration = Duration::from_secs(30);
 const USER_AGENT: &str = concat!("superagent/", env!("CARGO_PKG_VERSION"));
 
@@ -80,7 +81,7 @@ pub async fn open_pr(
     cancel: &CancellationToken,
 ) -> Result<PullRequest, String> {
     let Some(token) = github.token.as_deref().filter(|token| !token.is_empty()) else {
-        return Err("没有 GitHub 令牌，开不了 PR。请用户设置环境变量 GITHUB_TOKEN（或者 config.toml 里 [github] token_env 指的那个）后重启。".into());
+        return Err(NO_TOKEN.into());
     };
     let base = match github.api_base.trim_end_matches('/') {
         "" => DEFAULT_API_BASE,

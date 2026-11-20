@@ -14,6 +14,30 @@ pub struct Config {
     pub providers: BTreeMap<String, Provider>,
     pub tiers: Tiers,
     pub budget: Budget,
+    /// 开 PR 用。老的配置文件里没有这一节，用默认值。
+    #[serde(default)]
+    pub github: GitHub,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct GitHub {
+    /// 接口地址。GitHub Enterprise 是 `https://主机/api/v3`。
+    pub api_base: String,
+    /// 访问令牌放在哪个环境变量里。
+    pub token_env: String,
+    /// `owner/name`。不写就从工作目录的 origin 地址里认。
+    pub repo: Option<String>,
+}
+
+impl Default for GitHub {
+    fn default() -> Self {
+        Self {
+            api_base: sa_orchestrator::DEFAULT_API_BASE.to_string(),
+            token_env: "GITHUB_TOKEN".to_string(),
+            repo: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -95,6 +119,18 @@ impl Config {
     }
 
     fn validate(&self) -> Result<()> {
+        if let Some(repo) = &self.github.repo {
+            let parts: Vec<&str> = repo.split('/').collect();
+            if parts.len() != 2 || parts.iter().any(|part| part.trim().is_empty()) {
+                bail!("[github] 的 repo 要写成 \"owner/name\"，现在是「{repo}」");
+            }
+        }
+        if !self.github.api_base.starts_with("http") {
+            bail!(
+                "[github] 的 api_base 要是一个 http(s) 地址，现在是「{}」",
+                self.github.api_base
+            );
+        }
         for (tier, model) in self.tiers.iter() {
             if !self.providers.contains_key(&model.provider) {
                 bail!(

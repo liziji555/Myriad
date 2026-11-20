@@ -153,6 +153,9 @@ impl OpenPrTool {
         let Some(github) = &delivery.shared.settings.github else {
             return Err("这里没有配置 GitHub，开不了 PR。".into());
         };
+        if github.token.as_deref().is_none_or(str::is_empty) {
+            return Err(github::NO_TOKEN.into());
+        }
         let repo = match &github.repo {
             Some(repo) => repo.clone(),
             None => {
