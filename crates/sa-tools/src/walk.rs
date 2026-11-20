@@ -1,4 +1,4 @@
-//! 遍历工作目录：遵守 .gitignore，跳过隐藏文件、符号链接和围栏不允许的目录。
+//! 遍历工作目录：遵守 .gitignore，跳过隐藏文件、符号链接、非普通文件和围栏不允许的目录。
 
 use crate::Fence;
 use ignore::WalkBuilder;
@@ -24,6 +24,10 @@ pub(crate) fn walk(fence: &Fence, start: &Path) -> impl Iterator<Item = Found> {
             let kind = entry.file_type()?;
             // 不跟符号链接：它可能指到工作目录外面。
             if kind.is_symlink() || entry.depth() == 0 {
+                return None;
+            }
+            // 只要目录和普通文件。管道、设备、套接字一打开就可能卡住。
+            if !kind.is_dir() && !kind.is_file() {
                 return None;
             }
             Some(Found {

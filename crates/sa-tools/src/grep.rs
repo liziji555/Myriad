@@ -140,8 +140,12 @@ impl Tool for GrepTool {
     }
 }
 
-/// 文件里匹配的行。打不开、太大或是二进制的文件当作没有匹配。
+/// 文件里匹配的行。打不开、太大、是二进制或不是普通文件的，当作没有匹配。
 fn matching_lines(path: &Path, regex: &regex::Regex) -> Vec<(usize, String)> {
+    // 先看类型再打开：打开没有写入方的管道会一直卡住。
+    if !std::fs::metadata(path).is_ok_and(|m| m.is_file()) {
+        return vec![];
+    }
     let Ok(file) = std::fs::File::open(path) else {
         return vec![];
     };
@@ -256,5 +260,37 @@ mod tests {
             .await
             .unwrap();
         assert!(out.contains("没有找到"), "{out}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn skips_named_pipes_without_blocking() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a.txt"), "needle\n").unwrap();
+        let made = std::process::Command::new("mkfifo")
+            .arg(dir.path().join("pipe"))
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let ctx = ToolCtx::new(Fence::new(dir.path(), &[]).unwrap());
+        let search = |input| {
+            let ctx = ctx.clone();
+            async move {
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    GrepTool.call(input, &ctx),
+                )
+                .await
+                .expect("搜索卡在管道上了")
+                .unwrap()
+            }
+        };
+        assert_eq!(
+            search(json!({"pattern": "needle"})).await,
+            "a.txt:1: needle"
+        );
+        // 直接点名管道也不会去打开它。
+        let direct = search(json!({"pattern": "needle", "path": "pipe"})).await;
+        assert!(direct.contains("没有找到"), "{direct}");
     }
 }

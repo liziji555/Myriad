@@ -68,10 +68,17 @@ impl Tool for ReadTool {
         blocking(move || {
             let path = fence.resolve(&input.path)?;
             let shown = fence.display(&path);
-            if path.is_dir() {
+            let io_error = |e: std::io::Error| ToolError(format!("读不了 {shown}：{e}"));
+            let kind = std::fs::metadata(&path).map_err(io_error)?;
+            if kind.is_dir() {
                 return Err(ToolError(format!("{shown} 是目录，请用 list_dir。")));
             }
-            let io_error = |e: std::io::Error| ToolError(format!("读不了 {shown}：{e}"));
+            // 管道、设备、套接字不能当文件读：打开没有写入方的管道会一直卡住，停止也叫不回来。
+            if !kind.is_file() {
+                return Err(ToolError(format!(
+                    "{shown} 不是普通文件（是管道、设备之类），读不了。"
+                )));
+            }
             let file = File::open(&path).map_err(io_error)?;
             if file.metadata().map_err(io_error)?.len() > MAX_FILE_BYTES {
                 return Err(ToolError(format!(
@@ -242,5 +249,24 @@ mod tests {
             .await
             .unwrap()
             .contains("a\u{FFFD}"));
+    }
+
+    /// 没有写入方的命名管道：打开它会一直卡住，所以必须在打开之前就拒绝。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn refuses_named_pipes_without_blocking() {
+        let dir = tempfile::tempdir().unwrap();
+        let made = std::process::Command::new("mkfifo")
+            .arg(dir.path().join("pipe"))
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            read(dir.path(), json!({"path": "pipe"})),
+        )
+        .await
+        .expect("读管道卡住了");
+        assert!(result.unwrap_err().0.contains("不是普通文件"));
     }
 }
