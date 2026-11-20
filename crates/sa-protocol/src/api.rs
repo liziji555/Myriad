@@ -221,3 +221,54 @@ pub struct Extensions {
     pub skill_problems: Vec<String>,
     pub mcp: Vec<McpServerInfo>,
 }
+
+/// 模板里的一个 Bot：只有名字、档位、分工、是否启用。没有 ID、时间和任何密钥，换一台机器也能用。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct BotTemplate {
+    pub name: String,
+    pub tier: ModelTier,
+    #[serde(default)]
+    pub persona: String,
+    #[serde(default = "enabled_by_default")]
+    pub enabled: bool,
+}
+
+fn enabled_by_default() -> bool {
+    true
+}
+
+/// 模板里的房间：叫什么、谁是入口、有哪些成员（都写 Bot 的名字）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct RoomTemplate {
+    pub name: String,
+    #[serde(default)]
+    pub host: Option<String>,
+    #[serde(default)]
+    pub members: Vec<String>,
+}
+
+/// 一份团队模板：几个 Bot，可以带上它们所在的房间。导出成文件，在别处导入。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TeamTemplate {
+    /// 模板格式的版本，现在是 1。
+    pub version: u32,
+    #[serde(default)]
+    pub bots: Vec<BotTemplate>,
+    #[serde(default)]
+    pub room: Option<RoomTemplate>,
+}
+
+/// 导入的结果。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ImportReport {
+    /// 新建的 Bot。
+    pub created: Vec<crate::Bot>,
+    /// 已经有同名的 Bot，没有动它们。
+    pub skipped: Vec<String>,
+    /// 模板里带了房间时新建的房间。
+    pub room: Option<crate::Room>,
+}
