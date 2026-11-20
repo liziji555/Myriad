@@ -512,3 +512,49 @@ async fn the_watchdog_stops_a_task_that_spends_far_more_than_the_others() {
     );
     rig.orchestrator.shutdown().await;
 }
+
+#[tokio::test]
+async fn a_reply_stopped_halfway_is_still_charged() {
+    let dir = tempfile::tempdir().unwrap();
+    // 模型说了几个字就挂住，一直没报用量；人点了停止。
+    let rig = start(
+        dir.path(),
+        vec![MockReply::Hang(vec![sa_llm::StreamEvent::TextDelta(
+            "说到一半".into(),
+        )])],
+        vec![],
+        pricey(0.0, 0.0),
+        Watchdog::default(),
+    );
+    rig.orchestrator
+        .post_message(&rig.room, "在吗".into())
+        .await
+        .unwrap();
+    for _ in 0..500 {
+        let said = rig
+            .engine
+            .list_messages(&rig.room, None, 100)
+            .unwrap()
+            .messages
+            .iter()
+            .any(|m| m.content == "说到一半");
+        if said {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    rig.orchestrator.stop(&rig.room);
+    for _ in 0..500 {
+        if rig.orchestrator.usage_summary().await.unwrap().today.calls == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    // 没有模型报的数，按字数估：输出是「说到一半」四个字，输入是发出去的整个请求。
+    let today = rig.orchestrator.usage_summary().await.unwrap().today;
+    assert_eq!(today.calls, 1);
+    assert_eq!(today.output_tokens, 4);
+    assert!(today.input_tokens > 0);
+    assert!(today.cost > 4.0, "{today:?}");
+    rig.orchestrator.shutdown().await;
+}
