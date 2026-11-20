@@ -24,6 +24,7 @@ pub fn run(data_dir: &DataDir, args: ServeArgs) -> Result<()> {
     init_logging();
     std::fs::create_dir_all(data_dir.root())
         .with_context(|| format!("无法创建数据目录 {}", data_dir.root().display()))?;
+    let _lock = lock_data_dir(&data_dir.lock())?;
     if write_if_missing(&data_dir.config(), DEFAULT_CONFIG_TOML)? {
         tracing::info!("已生成默认配置 {}", data_dir.config().display());
     }
@@ -72,6 +73,26 @@ fn init_logging() {
         .with_max_level(level)
         .with_writer(std::io::stderr)
         .init();
+}
+
+/// 独占数据目录，直到返回的文件被关闭（进程退出时系统会自动释放）。
+/// 引擎假定自己是唯一的写入者，两个服务共用一个目录会互相看不到对方的事件。
+fn lock_data_dir(path: &Path) -> Result<std::fs::File> {
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path)
+        .with_context(|| format!("无法创建 {}", path.display()))?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(std::fs::TryLockError::WouldBlock) => anyhow::bail!(
+            "这个数据目录正被另一个 sa serve 使用：请先停掉它，或用 --data-dir 换一个目录"
+        ),
+        Err(std::fs::TryLockError::Error(e)) => {
+            Err(e).with_context(|| format!("无法锁定 {}", path.display()))
+        }
+    }
 }
 
 /// 文件不存在时写入 `contents`；返回是否新建了文件。已有的文件不动。
@@ -134,6 +155,16 @@ fn open_browser(url: &str) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn data_dir_lock_is_exclusive_until_released() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("serve.lock");
+        let held = lock_data_dir(&path).unwrap();
+        assert!(lock_data_dir(&path).is_err());
+        drop(held);
+        lock_data_dir(&path).unwrap();
+    }
 
     #[test]
     fn token_is_created_once_and_reused() {

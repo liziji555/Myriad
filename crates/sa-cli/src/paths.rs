@@ -31,6 +31,11 @@ impl DataDir {
         self.root.join("state.db")
     }
 
+    /// `sa serve` 运行期间持有的锁，保证一个数据目录同时只有一个服务在写。
+    pub fn lock(&self) -> PathBuf {
+        self.root.join("serve.lock")
+    }
+
     pub fn token(&self) -> PathBuf {
         self.root.join("token")
     }
