@@ -284,7 +284,13 @@ function MessageItem({
   const waiting = state === "streaming" && message.content === "" && message.steps.length === 0;
   const mentioned = message.mentions.flatMap((id) => bots.find((bot) => bot.id === id)?.name ?? []);
   return (
-    <li className="sa-msg" data-sender={sender.kind} data-state={state} data-kind={message.kind}>
+    <li
+      className="sa-msg"
+      data-message-id={message.id}
+      data-sender={sender.kind}
+      data-state={state}
+      data-kind={message.kind}
+    >
       <div className="sa-msg-head">
         <span className="sa-msg-name">{name}</span>
         <time className="sa-msg-time" dateTime={new Date(message.created_at).toISOString()}>

@@ -69,7 +69,7 @@ export function Sidebar({
       </header>
       <button type="button" className="sa-search" onClick={onOpenPalette}>
         <span>搜索、跳转…</span>
-        <kbd className="sa-kbd">Ctrl K</kbd>
+        <kbd className="sa-kbd">{/Mac|iPhone|iPad/.test(navigator.platform) ? "⌘ K" : "Ctrl K"}</kbd>
       </button>
 
       <section className="sa-section">

@@ -1149,3 +1149,89 @@ button.sa-row:hover {
   font-size: var(--sa-text-xs);
   color: var(--sa-fg-faint);
 }
+
+/* 任务图 */
+.sa-graph {
+  display: grid;
+  gap: var(--sa-space-2);
+  margin-bottom: var(--sa-space-3);
+}
+.sa-graph-controls {
+  display: flex;
+  gap: var(--sa-space-1);
+  padding: 0 var(--sa-space-2);
+}
+.sa-graph-controls .sa-chip[aria-pressed="true"] {
+  border-color: var(--sa-accent);
+  color: var(--sa-accent);
+}
+.sa-graph-controls .sa-chip:disabled {
+  opacity: 0.5;
+}
+.sa-graph-scroll {
+  overflow: auto;
+  padding: 0 var(--sa-space-2) var(--sa-space-2);
+}
+.sa-graph-canvas {
+  position: relative;
+}
+.sa-graph-edges {
+  position: absolute;
+  inset: 0;
+  stroke: var(--sa-border);
+  stroke-width: 1.5px;
+}
+.sa-graph-label,
+.sa-graph-node {
+  position: absolute;
+  padding: 0 var(--sa-space-2);
+  overflow: hidden;
+  border-radius: var(--sa-radius-md);
+  background: none;
+  font-size: var(--sa-text-sm);
+  line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: inherit;
+}
+.sa-graph-label {
+  border: 0;
+  padding-left: 0;
+  text-align: left;
+}
+.sa-graph-label[aria-current="true"] {
+  font-weight: 600;
+}
+.sa-graph-label:hover,
+.sa-graph-node:hover {
+  background: var(--sa-hover);
+}
+.sa-graph-node {
+  overflow: visible;
+  border: 1px solid var(--sa-border);
+  --tone: var(--sa-fg-muted);
+  color: var(--tone);
+  border-color: color-mix(in srgb, var(--tone) 45%, transparent);
+}
+.sa-graph-node[data-tone="ok"] {
+  --tone: var(--sa-ok);
+}
+.sa-graph-node[data-tone="danger"] {
+  --tone: var(--sa-danger);
+}
+.sa-graph-node[data-tone="attention"] {
+  --tone: var(--sa-warn);
+}
+.sa-graph-node[data-tone="live"] {
+  --tone: var(--sa-accent);
+  border-color: transparent;
+}
+.sa-graph-node[data-tone="muted"] {
+  --tone: var(--sa-fg-faint);
+}
+.sa-graph[data-density="overview"] .sa-graph-label,
+.sa-graph[data-density="overview"] .sa-graph-node {
+  padding: 0 var(--sa-space-1);
+  border-radius: var(--sa-radius-sm);
+  font-size: var(--sa-text-xs);
+}
