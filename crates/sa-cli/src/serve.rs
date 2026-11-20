@@ -1,6 +1,7 @@
 use crate::app::{init_logging, write_if_missing, App, RunArgs};
 use crate::paths::DataDir;
 use anyhow::{Context, Result};
+use sa_engine::Audit;
 use sa_server::AppState;
 use std::io::ErrorKind;
 use std::net::SocketAddr;
@@ -46,6 +47,20 @@ pub fn run(data_dir: &DataDir, args: ServeArgs) -> Result<()> {
             }
             println!("在浏览器里打开：{url}");
             println!("按 Ctrl+C 停止。");
+            // 留底：服务是什么时候、在哪个工作目录、用什么模型起来的。地址里的令牌不记。
+            let models = if app.mock {
+                "假模型"
+            } else {
+                "配置里的模型"
+            };
+            let summary = format!(
+                "sa serve {} 启动了，监听 {}，用{models}",
+                env!("CARGO_PKG_VERSION"),
+                listener.local_addr()?
+            );
+            let workdir = format!("工作目录：{}", app.workdir);
+            app.engine
+                .audit(Audit::system("server.started", summary).detail(workdir));
             if args.open {
                 if let Err(e) = open_browser(&url) {
                     tracing::warn!("无法自动打开浏览器：{e}");
@@ -90,6 +105,9 @@ pub fn run(data_dir: &DataDir, args: ServeArgs) -> Result<()> {
                 orchestrator.shutdown().await;
             })
             .await?;
+            // 有「启动了」没有「停下了」，就是那一次没有正常退出。
+            app.engine
+                .audit(Audit::system("server.stopped", "sa serve 正常停下了"));
             Ok(())
         })
 }

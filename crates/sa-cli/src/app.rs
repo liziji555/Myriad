@@ -4,7 +4,7 @@ use crate::config::{Config, DEFAULT_CONFIG_TOML};
 use crate::models::{self, ConfigModels};
 use crate::paths::DataDir;
 use anyhow::{Context, Result};
-use sa_engine::Engine;
+use sa_engine::{Audit, Engine, AUDIT_KEEP_DAYS};
 use sa_orchestrator::{ModelRouter, Orchestrator, Settings};
 use sa_store::Store;
 use sa_tools::Fence;
@@ -161,6 +161,18 @@ pub fn open_state(data_dir: &DataDir) -> Result<(Arc<Engine>, std::fs::File)> {
     let runs = engine.recover_runs()?;
     if runs > 0 {
         tracing::info!("上次退出时有 {runs} 个任务没做完，会接着做");
+    }
+    if interrupted > 0 || runs > 0 {
+        let summary = format!(
+            "上次没有正常退出：{interrupted} 条回复写到一半，标成了中断；{runs} 个任务没做完，会接着做"
+        );
+        engine.audit(Audit::system("recovery.done", summary));
+    }
+    // 审计记录留半年，太旧的在启动时清掉。
+    match engine.prune_audit() {
+        Ok(0) => {}
+        Ok(pruned) => tracing::info!("清掉了 {pruned} 条 {AUDIT_KEEP_DAYS} 天以前的审计记录"),
+        Err(error) => tracing::warn!("清理旧的审计记录时出错：{error}"),
     }
     Ok((engine, lock))
 }
