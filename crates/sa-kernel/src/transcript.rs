@@ -5,7 +5,6 @@
 
 use sa_llm::{ChatMessage, ToolCall};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -71,6 +70,13 @@ pub struct Transcript {
     path: PathBuf,
     file: File,
     entries: Vec<Entry>,
+    /// 文件里完整记录的总长度。写入失败时退回到这里。
+    len: u64,
+    /// 写入失败后又没能退回去：文件末尾可能留着半行，不能再往后写。
+    broken: bool,
+    /// 测试用：下一次写入只写这么多字节就报错。
+    #[cfg(test)]
+    fail_next_write_after: Option<usize>,
 }
 
 impl Transcript {
@@ -139,6 +145,10 @@ impl Transcript {
             path: path.to_path_buf(),
             file,
             entries,
+            len: good_len as u64,
+            broken: false,
+            #[cfg(test)]
+            fail_next_write_after: None,
         };
         transcript.close_open_tool_calls(LOST_RESULT)?;
         Ok(transcript)
@@ -164,41 +174,58 @@ impl Transcript {
         };
         let mut line = serde_json::to_string(&entry).expect("记录总能序列化成 JSON");
         line.push('\n');
-        // 一次 write 写完整行：中途失败留下的半行会在下次打开时被截掉。
-        self.file
-            .write_all(line.as_bytes())
-            .and_then(|()| self.file.sync_data())
-            .map_err(|source| TranscriptError::Io {
-                path: self.path.clone(),
-                source,
-            })?;
+        let path = self.path.clone();
+        let io = move |source| TranscriptError::Io { path, source };
+        if self.broken {
+            return Err(io(std::io::Error::other(
+                "上一次写入失败后文件没能恢复，重新启动后再试",
+            )));
+        }
+        if let Err(error) = self.write_line(line.as_bytes()) {
+            // 可能只写进去半行。不退回去的话，下一条会接在半行后面，拼成一行坏记录，
+            // 以后整个文件都打不开。
+            let restored = self
+                .file
+                .set_len(self.len)
+                .and_then(|()| self.file.seek(SeekFrom::End(0)));
+            self.broken = restored.is_err();
+            return Err(io(error));
+        }
+        self.len += line.len() as u64;
         self.entries.push(entry);
         Ok(self.entries.last().expect("刚刚放进去"))
+    }
+
+    fn write_line(&mut self, line: &[u8]) -> std::io::Result<()> {
+        #[cfg(test)]
+        if let Some(written) = self.fail_next_write_after.take() {
+            self.file.write_all(&line[..written.min(line.len())])?;
+            return Err(std::io::Error::other("磁盘满了"));
+        }
+        self.file.write_all(line)?;
+        self.file.sync_data()
     }
 
     /// 给还没有结果的工具调用补上结果，内容是 `note`。
     ///
     /// 模型接口要求每个工具调用后面都跟着它的结果，缺了整个会话就再也发不出去。
     pub fn close_open_tool_calls(&mut self, note: &str) -> Result<usize, TranscriptError> {
-        let answered: HashSet<&str> = self
-            .entries
-            .iter()
-            .filter_map(|entry| match &entry.body {
-                EntryBody::ToolResult { tool_call_id, .. } => Some(tool_call_id.as_str()),
-                _ => None,
-            })
-            .collect();
-        let open: Vec<String> = self
-            .entries
-            .iter()
-            .filter_map(|entry| match &entry.body {
-                EntryBody::Assistant { tool_calls, .. } => Some(tool_calls),
-                _ => None,
-            })
-            .flatten()
-            .filter(|call| !answered.contains(call.id.as_str()))
-            .map(|call| call.id.clone())
-            .collect();
+        // 按先后顺序配对，不按 id 全局去重：有的模型每一轮都用同样的 id（call_0、call_1…），
+        // 前面某一轮答过的 id 不能算作后面这一次也答过了。
+        let mut open: Vec<String> = vec![];
+        for entry in &self.entries {
+            match &entry.body {
+                EntryBody::Assistant { tool_calls, .. } => {
+                    open.extend(tool_calls.iter().map(|call| call.id.clone()));
+                }
+                EntryBody::ToolResult { tool_call_id, .. } => {
+                    if let Some(index) = open.iter().position(|id| id == tool_call_id) {
+                        open.remove(index);
+                    }
+                }
+                EntryBody::User { .. } => {}
+            }
+        }
         for tool_call_id in &open {
             self.append(EntryBody::ToolResult {
                 tool_call_id: tool_call_id.clone(),
@@ -399,5 +426,58 @@ mod tests {
         // 再开一次不会重复补。
         drop(t);
         assert_eq!(Transcript::open(&path).unwrap().entries().len(), 4);
+    }
+
+    #[test]
+    fn a_reused_call_id_from_an_earlier_turn_does_not_hide_an_open_call() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        {
+            let mut t = Transcript::open(&path).unwrap();
+            t.append(user("第一轮", 1)).unwrap();
+            t.append(assistant("", &["call_0"])).unwrap();
+            t.append(EntryBody::ToolResult {
+                tool_call_id: "call_0".into(),
+                content: "好".into(),
+                is_error: false,
+            })
+            .unwrap();
+            t.append(assistant("读完了", &[])).unwrap();
+            t.append(user("第二轮", 2)).unwrap();
+            // 第二轮又用了 call_0，进程在它返回之前退出。
+            t.append(assistant("", &["call_0"])).unwrap();
+        }
+        let t = Transcript::open(&path).unwrap();
+        assert_eq!(t.entries().len(), 7);
+        assert!(matches!(
+            &t.entries()[6].body,
+            EntryBody::ToolResult { tool_call_id, is_error: true, .. } if tool_call_id == "call_0"
+        ));
+        // 发给模型的列表里，每个工具调用后面都跟着结果。
+        let roles: Vec<_> = t.to_chat_messages().iter().map(|m| m.role).collect();
+        assert_eq!(roles.last(), Some(&Role::Tool));
+    }
+
+    #[test]
+    fn a_failed_append_leaves_no_fragment_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        let mut t = Transcript::open(&path).unwrap();
+        t.append(user("第一条", 1)).unwrap();
+
+        t.fail_next_write_after = Some(20);
+        assert!(t.append(user("写到一半磁盘满了", 2)).is_err());
+        assert_eq!(t.entries().len(), 1, "没写成的不算数");
+
+        // 同一个对象接着写（房间任务会一直复用它），文件必须还是完好的。
+        t.append(user("第三条", 3)).unwrap();
+        drop(t);
+        let t = Transcript::open(&path).unwrap();
+        assert_eq!(t.entries().len(), 2);
+        assert_eq!(t.last_message_seq(), 3);
+        assert_eq!(
+            t.entries()[1].parent_uuid.as_ref(),
+            Some(&t.entries()[0].uuid)
+        );
     }
 }
