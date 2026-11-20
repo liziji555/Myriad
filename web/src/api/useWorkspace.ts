@@ -11,12 +11,23 @@ import {
   type ChatState,
 } from "./chat";
 import { ApiRequestError, api } from "./client";
+import {
+  emptyBoard,
+  mergeTasks,
+  resetBoard,
+  upsertRun,
+  upsertRuns,
+  upsertTask,
+  watchTasks,
+  type TaskBoard,
+} from "./tasks";
 import type {
   ApprovalDecision,
   ApprovalId,
   Bot,
   BotId,
   CreateBotRequest,
+  CreateTaskRequest,
   Event,
   Message,
   MessageDelta,
@@ -24,6 +35,9 @@ import type {
   Room,
   RoomActivity,
   RoomId,
+  Run,
+  Task,
+  TaskId,
   UpdateBotRequest,
   UpdateRoomRequest,
 } from "./types";
@@ -40,11 +54,26 @@ export interface Team {
   removeMember(roomId: RoomId, botId: BotId): Promise<void>;
 }
 
+/** 对任务的操作。结果先放进本地状态，事件流稍后送来同样的内容。失败时抛出。 */
+export interface TaskActions {
+  create(roomId: RoomId, body: CreateTaskRequest): Promise<Task>;
+  /** 让草稿、等回答、卡住的任务继续；任务正在做时只把话带给它。`ownerId` 给了就换负责人。 */
+  resume(taskId: TaskId, note: string, ownerId?: BotId): Promise<void>;
+  accept(taskId: TaskId): Promise<void>;
+  reject(taskId: TaskId, note: string): Promise<void>;
+  stop(taskId: TaskId): Promise<void>;
+  cancel(taskId: TaskId): Promise<void>;
+  /** 拉一个任务的执行历史。 */
+  loadRuns(taskId: TaskId): Promise<void>;
+}
+
 export interface WorkspaceView extends Workspace {
   readonly phase: Phase;
   /** 事件流当前是否连着。断开时浏览器会自动重连。 */
   readonly connected: boolean;
   readonly chat: ChatState;
+  readonly board: TaskBoard;
+  readonly tasks: TaskActions;
   /** 每次需要重新拉消息时加一（重新连上、或者片段丢了）。 */
   readonly epoch: number;
   createRoom(name: string): Promise<Room>;
@@ -75,6 +104,18 @@ function applyChatEvent(chat: ChatState, event: Event): ChatState {
   }
 }
 
+function applyTaskEvent(board: TaskBoard, event: Event): TaskBoard {
+  switch (event.kind) {
+    case "task.created":
+    case "task.updated":
+      return upsertTask(board, event.payload as Task);
+    case "run.updated":
+      return upsertRun(board, event.payload as Run);
+    default:
+      return board;
+  }
+}
+
 /**
  * 工作区状态 = 快照 + 事件流。
  * 每次（重新）连上事件流，服务端先发 `ready`，这时拉一次快照；快照到手之前到达的事件先攒着，
@@ -86,6 +127,7 @@ function applyChatEvent(chat: ChatState, event: Event): ChatState {
 export function useWorkspace(): WorkspaceView {
   const [workspace, setWorkspace] = useState<Workspace>(emptyWorkspace);
   const [chat, setChat] = useState<ChatState>(emptyChat);
+  const [board, setBoard] = useState<TaskBoard>(emptyBoard);
   const [epoch, setEpoch] = useState(0);
   const [phase, setPhase] = useState<Phase>("loading");
   const [connected, setConnected] = useState(false);
@@ -128,6 +170,7 @@ export function useWorkspace(): WorkspaceView {
 
     const reloadMessages = () => {
       setChat(resetChat(activeRoom.current));
+      setBoard(resetBoard(activeRoom.current));
       setEpoch((n) => n + 1);
     };
 
@@ -149,6 +192,7 @@ export function useWorkspace(): WorkspaceView {
     source.onmessage = (message) => {
       const event = JSON.parse(message.data) as Event;
       setChat((current) => applyChatEvent(current, event));
+      setBoard((current) => applyTaskEvent(current, event));
       if (buffered) buffered.push(event);
       else setWorkspace((current) => applyEvent(current, event));
     };
@@ -211,8 +255,34 @@ export function useWorkspace(): WorkspaceView {
     activeRoom.current = roomId;
     // 先关注再拉：拉取期间事件流送来的消息会留下来，和拉到的那一页合并。
     setChat((current) => watchRoom(current, roomId));
-    const page = await api.listMessages(roomId);
+    setBoard((current) => watchTasks(current, roomId));
+    const [page, tasks] = await Promise.all([api.listMessages(roomId), api.listTasks(roomId)]);
     setChat((current) => mergePage(current, roomId, page, false));
+    setBoard((current) => mergeTasks(current, roomId, tasks));
+  }, []);
+
+  const tasks = useMemo<TaskActions>(() => {
+    // 接口返回的就是任务最新的样子，直接放进去，不用等事件流。
+    const put = (task: Task) => setBoard((current) => upsertTask(current, task));
+    return {
+      create: async (roomId, body) => {
+        const task = await api.createTask(roomId, body);
+        put(task);
+        return task;
+      },
+      resume: async (taskId, note, ownerId) =>
+        put(await api.resumeTask(taskId, { note, ...(ownerId ? { owner_bot_id: ownerId } : {}) })),
+      accept: async (taskId) => put(await api.acceptTask(taskId)),
+      reject: async (taskId, note) => put(await api.rejectTask(taskId, note)),
+      stop: async (taskId) => {
+        await api.stopTask(taskId);
+      },
+      cancel: async (taskId) => put(await api.cancelTask(taskId)),
+      loadRuns: async (taskId) => {
+        const detail = await api.getTask(taskId);
+        setBoard((current) => upsertRuns(upsertTask(current, detail.task), detail.runs));
+      },
+    };
   }, []);
 
   const loadOlder = useCallback(async (roomId: RoomId) => {
@@ -242,6 +312,8 @@ export function useWorkspace(): WorkspaceView {
     phase,
     connected,
     chat,
+    board,
+    tasks,
     epoch,
     createRoom,
     team,

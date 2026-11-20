@@ -1,6 +1,8 @@
-import type { Team } from "../api/useWorkspace";
-import type { Bot, Room } from "../api/types";
+import type { TaskBoard } from "../api/tasks";
+import type { TaskActions, Team } from "../api/useWorkspace";
+import type { Bot, Room, TaskId } from "../api/types";
 import { MembersPanel } from "./MembersPanel";
+import { TasksPanel } from "./TasksPanel";
 
 export type PanelTab = "tasks" | "members" | "files" | "activity";
 
@@ -25,10 +27,28 @@ interface Props {
   members: readonly Bot[];
   bots: readonly Bot[];
   team: Team;
+  board: TaskBoard;
+  taskActions: TaskActions;
+  /** 任务页里展开的是哪个任务。 */
+  focusTask: TaskId | null;
+  onFocusTask(taskId: TaskId | null): void;
   activity: readonly ActivityNode[];
 }
 
-export function ContextPanel({ tab, onTab, onClose, room, members, bots, team, activity }: Props) {
+export function ContextPanel({
+  tab,
+  onTab,
+  onClose,
+  room,
+  members,
+  bots,
+  team,
+  board,
+  taskActions,
+  focusTask,
+  onFocusTask,
+  activity,
+}: Props) {
   return (
     <aside className="sa-panel" aria-label="上下文面板">
       <div className="sa-tabs" role="tablist">
@@ -51,7 +71,17 @@ export function ContextPanel({ tab, onTab, onClose, room, members, bots, team, a
         </button>
       </div>
       <div className="sa-panel-body" role="tabpanel" id="sa-tabpanel" aria-labelledby={`sa-tab-${tab}`}>
-        {tab === "tasks" && <p className="sa-panel-empty">还没有任务。</p>}
+        {tab === "tasks" && (
+          <TasksPanel
+            room={room}
+            board={board}
+            members={members.filter((bot) => bot.enabled)}
+            bots={bots}
+            actions={taskActions}
+            focus={focusTask}
+            onFocus={onFocusTask}
+          />
+        )}
         {tab === "files" && <p className="sa-panel-empty">还没有文件。</p>}
         {tab === "members" && <MembersPanel room={room} members={members} bots={bots} team={team} />}
         {tab === "activity" &&

@@ -713,3 +713,194 @@ button.sa-row:hover {
   color: var(--sa-fg-muted);
   font-size: var(--sa-text-sm);
 }
+
+/* 任务：时间线上的任务卡和交付卡、运行过程的抬头、右栏的任务页。 */
+.sa-badge {
+  flex: none;
+  padding: 1px var(--sa-space-2);
+  border-radius: var(--sa-radius-pill);
+  background: var(--sa-hover);
+  font-size: var(--sa-text-xs);
+  color: var(--sa-fg-muted);
+  white-space: nowrap;
+}
+.sa-badge[data-state="review"],
+.sa-badge[data-state="waiting"] {
+  background: color-mix(in srgb, var(--sa-warn) 18%, transparent);
+  color: var(--sa-fg);
+}
+.sa-badge[data-state="working"],
+.sa-badge[data-state="open"] {
+  background: color-mix(in srgb, var(--sa-accent) 16%, transparent);
+  color: var(--sa-fg);
+}
+.sa-badge[data-state="blocked"] {
+  background: color-mix(in srgb, var(--sa-danger) 16%, transparent);
+  color: var(--sa-fg);
+}
+.sa-badge[data-state="done"] {
+  background: color-mix(in srgb, var(--sa-ok) 18%, transparent);
+  color: var(--sa-fg);
+}
+.sa-card {
+  display: grid;
+  gap: var(--sa-space-2);
+  max-width: 640px;
+  padding: var(--sa-space-3);
+  border: 1px solid var(--sa-border);
+  border-left: 3px solid var(--sa-accent);
+  border-radius: var(--sa-radius-md);
+  background: var(--sa-bg-side);
+}
+.sa-card[data-kind="delivery"] {
+  border-left-color: var(--sa-ok);
+}
+.sa-card[data-kind="delivery"][data-latest="false"] {
+  border-left-color: var(--sa-border);
+}
+.sa-card-head,
+.sa-card-foot,
+.sa-work-head {
+  display: flex;
+  gap: var(--sa-space-2);
+  align-items: center;
+}
+.sa-card-foot {
+  justify-content: space-between;
+}
+.sa-card-kicker {
+  font-size: var(--sa-text-sm);
+  color: var(--sa-fg-muted);
+}
+.sa-card-title {
+  margin: 0;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.sa-card-scope {
+  margin: 0;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
+  font-size: var(--sa-text-sm);
+  color: var(--sa-fg-muted);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.sa-work-head {
+  padding-bottom: var(--sa-space-1);
+  font-size: var(--sa-text-sm);
+}
+.sa-work-head .sa-chip {
+  height: 24px;
+  margin-left: auto;
+}
+.sa-artifacts,
+.sa-task-list,
+.sa-runs {
+  display: grid;
+  gap: var(--sa-space-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.sa-artifacts li {
+  display: flex;
+  gap: var(--sa-space-2);
+  align-items: baseline;
+  font-size: var(--sa-text-sm);
+}
+.sa-artifact-ref {
+  min-width: 0;
+  overflow: hidden;
+  font-family: var(--sa-font-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sa-task-actions {
+  display: grid;
+  gap: var(--sa-space-2);
+}
+.sa-task-actions textarea {
+  width: 100%;
+  padding: var(--sa-space-2);
+  border: 1px solid var(--sa-border);
+  border-radius: var(--sa-radius-sm);
+  background: var(--sa-bg);
+  color: var(--sa-fg);
+  font: inherit;
+  resize: vertical;
+}
+.sa-task-actions .sa-form-actions {
+  flex-wrap: wrap;
+}
+.sa-tasks {
+  display: grid;
+  gap: var(--sa-space-4);
+  align-content: start;
+}
+.sa-tasks section,
+.sa-task-finished {
+  display: grid;
+  gap: var(--sa-space-1);
+}
+.sa-task-finished summary {
+  cursor: pointer;
+}
+.sa-task[data-open="true"] {
+  border: 1px solid var(--sa-border);
+  border-radius: var(--sa-radius-md);
+}
+.sa-task-detail {
+  display: grid;
+  gap: var(--sa-space-3);
+  justify-items: start;
+  padding: var(--sa-space-2) var(--sa-space-3) var(--sa-space-3);
+}
+.sa-task-detail > * {
+  max-width: 100%;
+}
+.sa-task-detail .sa-task-actions,
+.sa-task-detail .sa-artifacts,
+.sa-task-detail .sa-runs {
+  width: 100%;
+}
+.sa-task-note {
+  margin: 0;
+  padding: var(--sa-space-2);
+  border-left: 3px solid var(--sa-warn);
+  background: var(--sa-bg-side);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.sa-task-fields {
+  display: grid;
+  gap: var(--sa-space-1);
+  margin: 0;
+}
+.sa-task-fields dt {
+  font-size: var(--sa-text-sm);
+  color: var(--sa-fg-muted);
+}
+.sa-task-fields dd {
+  margin: 0 0 var(--sa-space-1);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.sa-runs li {
+  padding-left: var(--sa-space-2);
+  border-left: 2px solid var(--sa-border);
+}
+.sa-runs li[data-state="failed"] {
+  border-left-color: var(--sa-danger);
+}
+.sa-runs li[data-state="running"] {
+  border-left-color: var(--sa-accent);
+}
+.sa-runs p {
+  margin: 0;
+  font-size: var(--sa-text-sm);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

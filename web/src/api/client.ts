@@ -6,12 +6,17 @@ import type {
   BotId,
   CreateBotRequest,
   CreateRoomRequest,
+  CreateTaskRequest,
   Health,
   Message,
   MessagePage,
   Room,
   RoomId,
   StopResponse,
+  Task,
+  TaskActionRequest,
+  TaskDetail,
+  TaskId,
   UpdateBotRequest,
   UpdateRoomRequest,
 } from "./types";
@@ -54,6 +59,9 @@ function postJson<T>(path: string, body: unknown, method = "POST"): Promise<T> {
   });
 }
 
+const taskPath = (taskId: TaskId, action?: string) =>
+  `/api/tasks/${encodeURIComponent(taskId)}${action ? `/${action}` : ""}`;
+
 const memberPath = (roomId: RoomId, botId: BotId) =>
   `/api/rooms/${encodeURIComponent(roomId)}/members/${encodeURIComponent(botId)}`;
 
@@ -85,4 +93,18 @@ export const api = {
   /** 答复一张审批卡。卡片已经处理过或过期时抛出 `approval_closed`。 */
   decideApproval: (id: ApprovalId, decision: ApprovalDecision) =>
     postJson<void>(`/api/approvals/${encodeURIComponent(id)}/decide`, { decision }),
+  listTasks: (roomId: RoomId) => request<Task[]>(`/api/rooms/${encodeURIComponent(roomId)}/tasks`),
+  createTask: (roomId: RoomId, body: CreateTaskRequest) =>
+    postJson<Task>(`/api/rooms/${encodeURIComponent(roomId)}/tasks`, body),
+  /** 一个任务和它的执行历史。 */
+  getTask: (taskId: TaskId) => request<TaskDetail>(taskPath(taskId)),
+  /** 让草稿、等回答、卡住的任务继续；任务正在做时只把 `note` 带给它。 */
+  resumeTask: (taskId: TaskId, body: TaskActionRequest) =>
+    postJson<Task>(taskPath(taskId, "resume"), body),
+  /** 验收通过。改动带不回工作目录时抛出 `conflict`，任务留在等验收。 */
+  acceptTask: (taskId: TaskId) => postJson<Task>(taskPath(taskId, "accept"), {}),
+  rejectTask: (taskId: TaskId, note: string) =>
+    postJson<Task>(taskPath(taskId, "reject"), { note }),
+  stopTask: (taskId: TaskId) => postJson<StopResponse>(taskPath(taskId, "stop"), {}),
+  cancelTask: (taskId: TaskId) => postJson<Task>(taskPath(taskId, "cancel"), {}),
 };
