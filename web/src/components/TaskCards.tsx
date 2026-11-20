@@ -25,9 +25,21 @@ export function Artifacts({ artifacts }: { artifacts: readonly Artifact[] }) {
       {artifacts.map((artifact) => (
         <li key={artifact.id}>
           <span className="sa-tag">{ARTIFACT_LABEL[artifact.kind]}</span>
-          <span className="sa-artifact-ref" title={artifact.reference}>
-            {artifact.reference}
-          </span>
+          {artifact.kind === "pr" && /^https?:\/\//.test(artifact.reference) ? (
+            <a
+              className="sa-artifact-ref"
+              href={artifact.reference}
+              target="_blank"
+              rel="noreferrer noopener"
+              title={artifact.reference}
+            >
+              {artifact.reference}
+            </a>
+          ) : (
+            <span className="sa-artifact-ref" title={artifact.reference}>
+              {artifact.reference}
+            </span>
+          )}
           <span className="sa-row-meta">{artifact.summary}</span>
         </li>
       ))}
