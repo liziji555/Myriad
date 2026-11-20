@@ -550,3 +550,36 @@ button.sa-row:hover {
     --sa-sidebar-width: 180px;
   }
 }
+.sa-mention-menu {
+  display: grid;
+  margin: 0 0 var(--sa-space-2);
+  padding: var(--sa-space-1);
+  list-style: none;
+  border: 1px solid var(--sa-border);
+  border-radius: var(--sa-radius-md);
+  background: var(--sa-bg);
+  max-height: 12em;
+  overflow-y: auto;
+}
+.sa-mention-menu li {
+  display: flex;
+  gap: var(--sa-space-2);
+  align-items: baseline;
+  padding: var(--sa-space-1) var(--sa-space-2);
+  border-radius: var(--sa-radius-sm);
+  cursor: pointer;
+}
+.sa-mention-menu li[aria-selected="true"] {
+  background: var(--sa-active);
+}
+.sa-mention-name {
+  font-weight: 600;
+}
+.sa-mention-role {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--sa-fg-muted);
+  font-size: var(--sa-text-sm);
+}

@@ -129,6 +129,7 @@ function Shell() {
               key={`composer-${room.id}`}
               disabledReason={room.host_bot_id ? null : "这个房间里还没有 Bot，发了也没人回应"}
               replying={replying}
+              members={members.filter((bot) => bot.enabled)}
               onSend={(content) => workspace.sendMessage(room.id, content)}
               onStop={() => workspace.stopReply(room.id)}
             />
