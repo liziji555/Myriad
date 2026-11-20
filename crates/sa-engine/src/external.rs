@@ -317,6 +317,8 @@ fn normalize(source: Source, external: &str) -> String {
 
 fn remove_link(tx: &Transaction<'_>, link: &Link) -> sa_store::Result<i64> {
     external::delete_link(tx, &link.id)?;
+    // 断开就是不让那一头再看到房间里的话：已经排着队要送过去的也不送了。
+    external::cancel_pending(tx, link.source, &link.external, "连接断开了")?;
     let gone = LinkRef {
         id: link.id.clone(),
         room_id: link.room_id.clone(),
@@ -708,6 +710,20 @@ mod tests {
             engine.receive(said("u-3", "99", "喂")).unwrap(),
             Receipt::Filtered("没有连到房间".into())
         );
+
+        // 断开之后，排着队还没送过去的话也不送了；给别的聊天的不受影响。
+        engine
+            .send_out(Source::Telegram, "99", "提示", "hint")
+            .unwrap();
+        assert_eq!(
+            engine.pending_outbound(Source::Telegram, 10).unwrap().len(),
+            2
+        );
+        let link = engine.find_link(Source::Telegram, "42").unwrap().unwrap();
+        engine.delete_link(&link.id).unwrap();
+        let out = engine.pending_outbound(Source::Telegram, 10).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].target, "99");
     }
 
     #[test]

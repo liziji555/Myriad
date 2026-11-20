@@ -212,6 +212,15 @@ pub fn pending(conn: &Connection, source: Source, now: i64, limit: u32) -> Resul
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
+/// 这个去处不再送了（连接断开了）：还没送出去的都作废。返回作废了几条。
+pub fn cancel_pending(conn: &Connection, source: Source, target: &str, why: &str) -> Result<usize> {
+    Ok(conn.execute(
+        "UPDATE outbound SET state = 'failed', error = ?3
+         WHERE state = 'pending' AND source = ?1 AND target = ?2",
+        params![source.as_str(), target, why],
+    )?)
+}
+
 pub fn mark_sent(conn: &Connection, id: i64, now: i64) -> Result<()> {
     conn.execute(
         "UPDATE outbound SET state = 'sent', sent_at = ?2, error = NULL, attempts = attempts + 1
