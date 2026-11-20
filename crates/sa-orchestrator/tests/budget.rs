@@ -527,9 +527,18 @@ async fn a_reply_stopped_halfway_is_still_charged() {
     // 模型说了几个字就挂住，一直没报用量；人点了停止。
     let rig = start(
         dir.path(),
-        vec![MockReply::Hang(vec![sa_llm::StreamEvent::TextDelta(
-            "说到一半".into(),
-        )])],
+        // 文字放在最后：看到它的时候前面的工具调用肯定已经收到了。
+        vec![MockReply::Hang(vec![
+            sa_llm::StreamEvent::ToolCallStart {
+                id: "c1".into(),
+                name: "写".into(),
+            },
+            sa_llm::StreamEvent::ToolCallArgsDelta {
+                id: "c1".into(),
+                json_fragment: "{\"内容".into(),
+            },
+            sa_llm::StreamEvent::TextDelta("说到一半".into()),
+        ])],
         vec![],
         pricey(0.0, 0.0),
         Watchdog::default(),
@@ -558,10 +567,11 @@ async fn a_reply_stopped_halfway_is_still_charged() {
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    // 没有模型报的数，按字数估：输出是「说到一半」四个字，输入是发出去的整个请求。
+    // 没有模型报的数，按字数估：输出是「说到一半」四个字，加上写了一半的工具调用
+    //（名字 1 + 参数 3）；输入是发出去的整个请求。
     let today = rig.orchestrator.usage_summary().await.unwrap().today;
     assert_eq!(today.calls, 1);
-    assert_eq!(today.output_tokens, 4);
+    assert_eq!(today.output_tokens, 8);
     assert!(today.input_tokens > 0);
     assert!(today.cost > 4.0, "{today:?}");
     rig.orchestrator.shutdown().await;

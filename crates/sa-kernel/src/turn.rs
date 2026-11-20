@@ -455,7 +455,13 @@ fn charge_unreported(request: &ChatRequest, reply: &mut Accumulator) {
     }
     let input =
         compact::estimate_messages(&request.messages) + compact::estimate_tools(&request.tools);
-    let output = compact::estimate(&reply.text) + compact::estimate(&reply.reasoning);
+    let output = compact::estimate(&reply.text)
+        + compact::estimate(&reply.reasoning)
+        + reply
+            .tool_calls
+            .iter()
+            .map(|call| compact::estimate(&call.name) + compact::estimate(&call.arguments))
+            .sum::<usize>();
     reply.usage = Some(Usage {
         input_tokens: input as u64,
         output_tokens: output as u64,
