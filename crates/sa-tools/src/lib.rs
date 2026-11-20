@@ -3,6 +3,7 @@
 //! 这一版只有只读工具（读文件、列目录、按名字找、按内容搜、抓网页）。
 //! 文件类工具只能看工作目录里面的东西，见 [`fence`]。
 
+mod edit;
 mod fence;
 mod glob;
 mod grep;
@@ -12,6 +13,7 @@ mod walk;
 mod web_fetch;
 mod write;
 
+pub use edit::EditTool;
 pub use fence::Fence;
 pub use glob::GlobTool;
 pub use grep::GrepTool;
