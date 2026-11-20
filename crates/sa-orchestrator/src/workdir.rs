@@ -387,6 +387,8 @@ mod tests {
     async fn repo(dir: &Path) {
         git(dir, &["init", "-q", "-b", "main"]).await.unwrap();
         std::fs::write(dir.join("a.txt"), "一\n").unwrap();
+        // 测试里逐字节比较文件内容：不让 git 转换换行符（Windows 上默认会把 LF 签出成 CRLF）。
+        std::fs::write(dir.join(".gitattributes"), "* -text\n").unwrap();
         git(dir, &["add", "-A"]).await.unwrap();
         git(dir, &["commit", "-q", "-m", "init"]).await.unwrap();
     }
