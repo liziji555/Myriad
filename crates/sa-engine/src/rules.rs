@@ -1,6 +1,6 @@
 //! 「总是允许」：人批准时选了以后不再问，就记在这里。
 
-use crate::{now_ms, Engine, EngineError, Result};
+use crate::{now_ms, Audit, Engine, EngineError, Result};
 use sa_protocol::{PermissionRule, RoomId, RuleId};
 use sa_store::{rooms, rules};
 
@@ -49,7 +49,21 @@ impl Engine {
 
     /// 撤销一条。返回是否真的有这条。
     pub fn delete_rule(&self, id: &RuleId) -> Result<bool> {
-        Ok(self.store.write(|tx| rules::delete(tx, id))?)
+        let gone = self.store.write(|tx| {
+            let rule = rules::get(tx, id)?;
+            let deleted = rules::delete(tx, id)?;
+            Ok(rule.filter(|_| deleted))
+        })?;
+        let Some(rule) = gone else {
+            return Ok(false);
+        };
+        let summary = format!("撤销了「总是允许」：{}", rule.tool);
+        self.audit(
+            Audit::user("rule.removed", summary)
+                .room(&rule.room_id)
+                .detail(&rule.pattern),
+        );
+        Ok(true)
     }
 }
 

@@ -819,3 +819,54 @@ pub struct RoutineRef {
     pub id: RoutineId,
     pub room_id: RoomId,
 }
+
+/// 审计记录里，这件事是谁做的。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum AuditActor {
+    /// 人：在界面、命令行里做的。
+    User,
+    Bot,
+    /// 程序自己：看门狗、预算守卫、定时器、启动时的恢复。
+    System,
+    /// 外面来的：GitHub、Telegram。
+    Outside,
+}
+
+str_enum!(AuditActor {
+    User => "user",
+    Bot => "bot",
+    System => "system",
+    Outside => "outside",
+});
+
+/// 审计日志里的一条：谁在什么时候做了一件要留底的事。只追加，不改不删（太旧的整批清掉）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct AuditEntry {
+    /// 先后顺序，也是翻页游标。
+    #[ts(type = "number")]
+    pub id: i64,
+    #[ts(type = "number")]
+    pub at: Millis,
+    pub actor: AuditActor,
+    /// 给人看的名字：Bot 的名字、「GitHub」；人和程序自己是空的。
+    pub actor_name: String,
+    /// 做了什么，点分的名字，例如 `approval.decided`、`tool.shell`、`task.accepted`。
+    pub action: String,
+    pub room_id: Option<RoomId>,
+    pub task_id: Option<TaskId>,
+    /// 一句话说清楚这件事。
+    pub summary: String,
+    /// 细节：命令原文、参数、原因。没有就是空的。
+    pub detail: Option<String>,
+}
+
+/// 一页审计记录，新的在前。`has_more` 表示更早的还有。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct AuditPage {
+    pub entries: Vec<AuditEntry>,
+    pub has_more: bool,
+}

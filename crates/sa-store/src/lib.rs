@@ -6,6 +6,7 @@
 mod error;
 mod migrate;
 
+pub mod audit;
 pub mod bots;
 pub mod effects;
 pub mod events;

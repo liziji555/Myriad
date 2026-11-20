@@ -1,6 +1,6 @@
 //! Bot 的增删改，房间的成员和入口 Bot。
 
-use crate::{now_ms, to_json, Engine, EngineError, Result, MAX_ROOM_NAME_CHARS};
+use crate::{now_ms, to_json, Audit, Engine, EngineError, Result, MAX_ROOM_NAME_CHARS};
 use sa_protocol::{Bot, BotId, BotKind, BotRef, EventKind, ModelTier, Room, RoomId};
 use sa_store::{bots, events, rooms};
 
@@ -42,6 +42,9 @@ impl Engine {
             Ok(Ok((bot, seq)))
         })??;
         self.publish(seq);
+        self.audit(
+            Audit::user("bot.created", format!("新建了 Bot「{}」", bot.name)).detail(&bot.persona),
+        );
         Ok(bot)
     }
 
@@ -71,6 +74,14 @@ impl Engine {
             Ok(Ok((bot, seq)))
         })??;
         self.publish(seq);
+        let state = if bot.enabled { "启用" } else { "停用" };
+        self.audit(
+            Audit::user(
+                "bot.updated",
+                format!("改了 Bot「{}」（{state}）", bot.name),
+            )
+            .detail(&bot.persona),
+        );
         Ok(bot)
     }
 
@@ -82,6 +93,7 @@ impl Engine {
                 .into_iter()
                 .filter(|room| room.member_bot_ids.contains(id))
                 .collect();
+            let name = bots::get(tx, id)?.map(|bot| bot.name);
             if !bots::delete(tx, id)? {
                 return Ok(Err(EngineError::NotFound("没有这个 Bot".into())));
             }
@@ -102,9 +114,11 @@ impl Engine {
                     now,
                 )?;
             }
-            Ok(Ok(seq))
+            Ok(Ok((seq, name.unwrap_or_default())))
         })??;
+        let (seq, name) = seq;
         self.publish(seq);
+        self.audit(Audit::user("bot.deleted", format!("删掉了 Bot「{name}」")));
         Ok(())
     }
 
@@ -202,6 +216,12 @@ impl Engine {
             Ok(Ok((room, seq)))
         })??;
         self.publish(seq);
+        let members = room.member_bot_ids.len();
+        let summary = format!(
+            "改了房间「{}」的设置或成员（现在 {members} 个 Bot）",
+            room.name
+        );
+        self.audit(Audit::user("room.updated", summary).room(&room.id));
         Ok(room)
     }
 }

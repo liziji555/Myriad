@@ -5,9 +5,9 @@ use axum::extract::rejection::{JsonRejection, QueryRejection};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
-use sa_engine::{BotPatch, Engine, EngineError, RoutinePatch};
+use sa_engine::{AuditFilter, BotPatch, Engine, EngineError, RoutinePatch};
 use sa_protocol::{
-    ApprovalId, Bot, BotId, CreateBotRequest, CreateLinkRequest, CreateRoomRequest,
+    ApprovalId, AuditPage, Bot, BotId, CreateBotRequest, CreateLinkRequest, CreateRoomRequest,
     CreateRoutineRequest, CreateTaskRequest, DecideApprovalRequest, Extensions, Health, Link,
     LinkId, Message, MessagePage, ModelTier, Notice, NoticeId, Pairing, PermissionRule,
     PostMessageRequest, Room, RoomId, Routine, RoutineId, RuleId, StopResponse, Task,
@@ -332,6 +332,35 @@ pub async fn cancel_task(
 /// 「用量」面板：今天和最近几天花了多少，按模型、Bot、任务分。
 pub async fn usage(State(state): State<AppState>) -> Result<Json<UsageSummary>, AppError> {
     Ok(Json(state.orchestrator.usage_summary().await?))
+}
+
+#[derive(Deserialize)]
+pub struct AuditQuery {
+    room: Option<RoomId>,
+    task: Option<TaskId>,
+    /// 动作名的开头，例如 `approval.`。
+    action: Option<String>,
+    /// 只要 `id` 比它小的；不给就从最新的开始。
+    before: Option<i64>,
+    limit: Option<u32>,
+}
+
+/// 审计日志，新的在前。可以按房间、任务、动作找。
+pub async fn audit(
+    State(state): State<AppState>,
+    query: Result<Query<AuditQuery>, QueryRejection>,
+) -> Result<Json<AuditPage>, AppError> {
+    let Query(query) = query.map_err(|e| AppError::bad_request(e.body_text()))?;
+    let filter = AuditFilter {
+        room_id: query.room,
+        task_id: query.task,
+        action: query.action.filter(|action| !action.trim().is_empty()),
+        before: query.before,
+    };
+    let limit = query.limit.unwrap_or(DEFAULT_PAGE);
+    Ok(Json(
+        blocking(&state, move |engine| engine.list_audit(&filter, limit)).await?,
+    ))
 }
 
 /// 还没收起来的提醒，新的在前。

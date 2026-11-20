@@ -2,6 +2,7 @@ import type {
   ApiError,
   ApprovalDecision,
   ApprovalId,
+  AuditPage,
   Bot,
   BotId,
   CreateBotRequest,
@@ -32,6 +33,7 @@ import type {
   UpdateRoutineRequest,
   UsageSummary,
 } from "./types";
+import { auditSearch, type AuditQuery } from "./audit";
 
 export class ApiRequestError extends Error {
   constructor(
@@ -135,6 +137,8 @@ export const api = {
   deleteRoutine: (id: RoutineId) => request<void>(routinePath(id), { method: "DELETE" }),
   /** 现在就做一次。马上返回；做完之后结果由事件流送来。房间里正在对话时抛出 `conflict`。 */
   runRoutine: (id: RoutineId) => postJson<Routine>(routinePath(id, "run"), {}),
+  /** 审计日志的一页，新的在前。 */
+  audit: (query: AuditQuery) => request<AuditPage>(`/api/audit${auditSearch(query)}`),
   /** 现在有哪些技能、哪些外部 MCP 服务。 */
   extensions: () => request<Extensions>("/api/extensions"),
   listLinks: () => request<Link[]>("/api/links"),

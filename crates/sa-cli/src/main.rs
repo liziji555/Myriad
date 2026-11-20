@@ -1,4 +1,5 @@
 mod app;
+mod audit;
 mod chat;
 mod config;
 mod doctor;
@@ -67,6 +68,8 @@ enum Command {
     Task(task::TaskArgs),
     /// 看今天和最近几天花了多少（不能和 sa serve 同时运行）
     Usage,
+    /// 审计日志：谁在什么时候批准了什么、执行了什么、改了什么（不能和 sa serve 同时运行）
+    Audit(audit::AuditArgs),
     /// 检查配置、密钥、数据库、端口是否正常
     Doctor,
 }
@@ -84,6 +87,7 @@ fn main() -> ExitCode {
         Command::Mcp { command } => extensions::mcp(&data_dir, command),
         Command::Task(args) => task::run(&data_dir, args),
         Command::Usage => usage::run(&data_dir),
+        Command::Audit(args) => audit::run(&data_dir, args),
         Command::Doctor => Ok(doctor::run(&data_dir)),
     });
     match result {

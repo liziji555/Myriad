@@ -2,7 +2,7 @@
 
 use crate::cron::Schedule;
 use crate::messages::add_message;
-use crate::{now_ms, to_json, Engine, EngineError, Result, MAX_MESSAGE_CHARS};
+use crate::{now_ms, to_json, Audit, Engine, EngineError, Result, MAX_MESSAGE_CHARS};
 use sa_protocol::{
     BotId, EventKind, Message, MessageId, MessageKind, MessageState, Millis, RoomId, Routine,
     RoutineId, RoutineRef, RoutineResult, Sender,
@@ -90,6 +90,15 @@ impl Engine {
             Ok(Ok((routine, seq)))
         })??;
         self.publish(seq);
+        let summary = format!(
+            "新建了定时任务「{}」（{}）",
+            routine.title, routine.schedule
+        );
+        self.audit(
+            Audit::user("routine.created", summary)
+                .room(&routine.room_id)
+                .detail(&routine.prompt),
+        );
         Ok(routine)
     }
 
@@ -144,6 +153,16 @@ impl Engine {
             Ok(Ok((routine, seq)))
         })??;
         self.publish(seq);
+        let state = if routine.enabled { "启用" } else { "停用" };
+        let summary = format!(
+            "改了定时任务「{}」（{}，{state}）",
+            routine.title, routine.schedule
+        );
+        self.audit(
+            Audit::user("routine.updated", summary)
+                .room(&routine.room_id)
+                .detail(&routine.prompt),
+        );
         Ok(routine)
     }
 
@@ -158,15 +177,19 @@ impl Engine {
                 id: id.clone(),
                 room_id: routine.room_id.clone(),
             };
-            Ok(Ok(events::append(
+            let seq = events::append(
                 tx,
                 Some(&routine.room_id),
                 EventKind::RoutineDeleted,
                 &to_json(&gone),
                 now,
-            )?))
+            )?;
+            Ok(Ok((seq, routine)))
         })??;
+        let (seq, routine) = seq;
         self.publish(seq);
+        let summary = format!("删掉了定时任务「{}」", routine.title);
+        self.audit(Audit::user("routine.deleted", summary).room(&routine.room_id));
         Ok(())
     }
 
@@ -276,9 +299,11 @@ impl Engine {
                 RoutineResult::Failed => routine.failures + 1,
                 RoutineResult::Skipped => routine.failures,
             };
+            let was_enabled = routine.enabled;
             if routine.failures >= MAX_ROUTINE_FAILURES {
                 routine.enabled = false;
             }
+            let gave_up = was_enabled && !routine.enabled;
             // 人在这期间停用了它：不再排下一次。
             routine.next_at = routine
                 .enabled
@@ -287,10 +312,21 @@ impl Engine {
             routine.updated_at = now;
             routines::update(tx, &routine)?;
             let seq = updated(tx, &routine, now)?;
-            Ok(Some((routine, seq)))
+            Ok(Some((routine, seq, gave_up)))
         })?;
-        Ok(done.map(|(routine, seq)| {
+        Ok(done.map(|(routine, seq, gave_up)| {
             self.publish(seq);
+            if gave_up {
+                let summary = format!(
+                    "定时任务「{}」连续 {MAX_ROUTINE_FAILURES} 次没做成，自动停用了",
+                    routine.title
+                );
+                self.audit(
+                    Audit::system("routine.disabled", summary)
+                        .room(&routine.room_id)
+                        .detail(&routine.last_note),
+                );
+            }
             routine
         }))
     }

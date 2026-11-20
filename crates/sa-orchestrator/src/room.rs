@@ -5,7 +5,7 @@ use crate::episode::Job;
 use crate::work::CreateTaskTool;
 use crate::{render_prompt, router, RoomLink, Shared};
 use async_trait::async_trait;
-use sa_engine::EngineError;
+use sa_engine::{Audit, EngineError};
 use sa_kernel::{
     run_turn, ApprovalRequest, Inbox, Observer, Transcript, TurnConfig, TurnEnd, UserInput,
 };
@@ -139,6 +139,34 @@ async fn work(
         turn(shared, room_id, &bot, job.hop, &others, link, sessions).await?;
     }
     Ok(())
+}
+
+/// 这个工具会不会在外面留下痕迹（改文件、执行命令、推送、叫外部服务、派活）。会的要记进审计日志；
+/// 只是读和查的不记。
+fn leaves_a_mark(tool: &str) -> bool {
+    const READ_ONLY: [&str; 9] = [
+        "compact",
+        "read",
+        "list_dir",
+        "glob",
+        "grep",
+        "web_fetch",
+        "todo",
+        "skill",
+        "agent",
+    ];
+    !READ_ONLY.contains(&tool)
+}
+
+/// 留底时记工具的哪些参数。写文件、改文件只记是哪个文件：内容在文件里，不往审计里抄一份。
+fn audit_arguments(tool: &str, arguments: &str) -> String {
+    if !matches!(tool, "write" | "edit") {
+        return arguments.to_string();
+    }
+    let path = serde_json::from_str::<Value>(arguments)
+        .ok()
+        .and_then(|input| input["path"].as_str().map(str::to_string));
+    path.unwrap_or_default()
 }
 
 /// 新来的人类消息由谁接。点了名的听点名的，没点名的由路由挑。
@@ -681,6 +709,18 @@ pub(crate) struct RoomObserver {
 }
 
 impl RoomObserver {
+    /// 记一条审计，带上是哪个房间、哪个任务。
+    async fn audit(&self, entry: Audit) {
+        let task = self.rule_scope.clone().map(sa_protocol::TaskId::from);
+        let entry = entry.room(&self.room_id).task(task.as_ref());
+        let engine = self.shared.engine.clone();
+        let _ = db(move || {
+            engine.audit(entry);
+            Ok(())
+        })
+        .await;
+    }
+
     fn beat(&self) {
         if let Some(pulse) = &self.pulse {
             pulse.store(sa_engine::now_ms(), Ordering::Relaxed);
@@ -759,8 +799,14 @@ impl Observer for RoomObserver {
         self.shared.engine.append_delta(&self.message_id, &all);
     }
 
-    async fn tool_started(&self, call_id: &str, tool: &str, title: &str) {
+    async fn tool_started(&self, call_id: &str, tool: &str, title: &str, arguments: &str) {
         self.beat();
+        if leaves_a_mark(tool) {
+            // 标题是给人扫一眼的，会截短；留底要留完整的参数——不用批准就做了的那些，只有这里有记录。
+            let entry = Audit::bot(&self.bot.name, &format!("tool.{tool}"), title)
+                .detail(audit_arguments(tool, arguments));
+            self.audit(entry).await;
+        }
         self.steps.lock().unwrap().push(ToolStep {
             id: call_id.to_string(),
             tool: tool.to_string(),
@@ -828,11 +874,46 @@ impl Observer for RoomObserver {
         });
         self.save_steps().await;
 
-        let decision = tokio::select! {
-            answer = answer => answer.unwrap_or(ApprovalDecision::Deny),
-            _ = tokio::time::sleep(timeout) => ApprovalDecision::Deny,
+        // 这一轮被停下时，等答复的这段代码是被直接丢掉的，走不到下面记审计的地方：
+        // 所以先备好「没等到答复就停下了」这一条，被丢掉时由它记上；等到了结果再把它撤掉。
+        let task = self.rule_scope.clone().map(sa_protocol::TaskId::from);
+        let dropped = format!(
+            "{} 要「{}」：没等到答复就停下了，按拒绝算",
+            self.bot.name, request.title
+        );
+        let mut unanswered = Unanswered {
+            engine: self.shared.engine.clone(),
+            entry: Some(
+                Audit::system("approval.dropped", dropped)
+                    .room(&self.room_id)
+                    .task(task.as_ref())
+                    .detail(request.reason),
+            ),
         };
+        // 没人答复的几种情况都按拒绝算，审计里分开记：到时间了、这一轮被停下了。
+        let (decision, verdict) = tokio::select! {
+            answer = answer => match answer {
+                Ok(ApprovalDecision::Once) => (ApprovalDecision::Once, ("approval.allowed", "允许一次")),
+                Ok(ApprovalDecision::Always) => (ApprovalDecision::Always, ("approval.allowed_always", "总是允许")),
+                Ok(ApprovalDecision::Deny) => (ApprovalDecision::Deny, ("approval.denied", "拒绝")),
+                Err(_) => (ApprovalDecision::Deny, ("approval.dropped", "没等到答复就停下了，按拒绝算")),
+            },
+            _ = tokio::time::sleep(timeout) => (ApprovalDecision::Deny, ("approval.expired", "到时间没人处理，按拒绝算")),
+        };
+        unanswered.entry = None;
         self.beat();
+        let (action, label) = verdict;
+        let summary = format!("{} 要「{}」：{label}", self.bot.name, request.title);
+        let by_person = matches!(
+            action,
+            "approval.allowed" | "approval.allowed_always" | "approval.denied"
+        );
+        let entry = if by_person {
+            Audit::user(action, summary)
+        } else {
+            Audit::system(action, summary)
+        };
+        self.audit(entry.detail(request.reason)).await;
         let allowed = decision != ApprovalDecision::Deny;
         if let (ApprovalDecision::Always, Some(key)) = (decision, key) {
             let (engine, room, tool) = (engine.clone(), self.room_id.clone(), rule_tool.clone());
@@ -875,6 +956,26 @@ struct Pending<'a> {
 impl Drop for Pending<'_> {
     fn drop(&mut self) {
         self.shared.approvals.lock().unwrap().remove(&self.id);
+    }
+}
+
+/// 还没等到结果的审批。就这么被丢掉（这一轮被停下了）时，把「没等到答复」记进审计。
+struct Unanswered {
+    engine: Arc<sa_engine::Engine>,
+    entry: Option<Audit>,
+}
+
+impl Drop for Unanswered {
+    fn drop(&mut self) {
+        let Some(entry) = self.entry.take() else {
+            return;
+        };
+        let engine = self.engine.clone();
+        // 写数据库不占着异步线程；运行时已经在收尾时就地写。
+        match tokio::runtime::Handle::try_current() {
+            Ok(runtime) => drop(runtime.spawn_blocking(move || engine.audit(entry))),
+            Err(_) => engine.audit(entry),
+        }
     }
 }
 

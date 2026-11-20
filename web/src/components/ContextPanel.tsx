@@ -1,6 +1,7 @@
 import type { TaskBoard } from "../api/tasks";
 import type { LinkActions, RoutineActions, TaskActions, Team } from "../api/useWorkspace";
 import type { Bot, Link, Room, Routine, TaskId } from "../api/types";
+import { AuditPanel } from "./AuditPanel";
 import { ExtensionsPanel } from "./ExtensionsPanel";
 import { LinksPanel } from "./LinksPanel";
 import { MembersPanel } from "./MembersPanel";
@@ -9,7 +10,16 @@ import { TaskGraph } from "./TaskGraph";
 import { TasksPanel } from "./TasksPanel";
 import { UsagePanel } from "./UsagePanel";
 
-export type PanelTab = "tasks" | "routines" | "members" | "links" | "extensions" | "usage" | "files" | "activity";
+export type PanelTab =
+  | "tasks"
+  | "routines"
+  | "members"
+  | "links"
+  | "extensions"
+  | "usage"
+  | "audit"
+  | "files"
+  | "activity";
 
 export interface ActivityNode {
   id: string;
@@ -24,6 +34,7 @@ const TABS: readonly { id: PanelTab; label: string }[] = [
   { id: "links", label: "连接" },
   { id: "extensions", label: "扩展" },
   { id: "usage", label: "用量" },
+  { id: "audit", label: "审计" },
   { id: "files", label: "文件" },
   { id: "activity", label: "活动" },
 ];
@@ -116,6 +127,13 @@ export function ContextPanel({
         {tab === "links" && <LinksPanel room={room} links={links} actions={linkActions} />}
         {tab === "extensions" && <ExtensionsPanel />}
         {tab === "usage" && <UsagePanel refreshKey={usageKey} />}
+        {tab === "audit" && (
+          <AuditPanel
+            key={room.id}
+            room={room}
+            task={(board.rooms[room.id] ?? []).find((task) => task.id === focusTask) ?? null}
+          />
+        )}
         {tab === "files" && <p className="sa-panel-empty">还没有文件。</p>}
         {tab === "members" && <MembersPanel room={room} members={members} bots={bots} team={team} />}
         {tab === "activity" && (

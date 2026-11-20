@@ -34,7 +34,7 @@ use episode::Episode;
 use sa_engine::{Engine, EngineError, Incoming, Receipt};
 use sa_llm::Provider;
 use sa_protocol::{
-    ApprovalDecision, ApprovalId, Bot, BotId, Message, MessageKind, ModelTier, RoomId,
+    ApprovalDecision, ApprovalId, Bot, BotId, Message, MessageKind, ModelTier, RoomId, Sender,
 };
 use sa_tools::{Fence, ToolRegistry};
 use std::collections::HashMap;
@@ -228,6 +228,31 @@ impl Orchestrator {
     /// 机器人在 Telegram 上的用户名。还没连上时是 `None`。
     pub fn telegram_username(&self) -> Option<String> {
         self.shared.telegram_username.lock().unwrap().clone()
+    }
+
+    /// 启动时调用：上次退出时还没有 Bot 接的话（人说的、外面来的事），现在接着回应。
+    /// 返回叫醒了几个房间。
+    ///
+    /// 只看每个房间的最后一条消息：它是人说的或者外面来的事，就叫醒房间，由房间自己从会话记录里
+    /// 算出哪些话还没有 Bot 看过。已经有 Bot 看到、回到一半中断的不重来：那一轮可能已经动过手了，
+    /// 重做一遍不安全，中断的回复留在时间线上由人决定。到点没做成的定时任务也不补做。
+    pub fn resume_rooms(&self) -> Result<usize, EngineError> {
+        let mut woken = 0;
+        for room in self.shared.engine.list_rooms()? {
+            if room.host_bot_id.is_none() {
+                continue;
+            }
+            let page = self.shared.engine.list_messages(&room.id, None, 1)?;
+            let waiting = page.messages.last().is_some_and(|last| {
+                last.sender == Sender::User
+                    && matches!(last.kind, MessageKind::Chat | MessageKind::Event)
+            });
+            if waiting {
+                self.wake(&room.id);
+                woken += 1;
+            }
+        }
+        Ok(woken)
     }
 
     /// 房间里来了一条要有人回应的消息：叫醒房间。

@@ -3,7 +3,9 @@
 //! 外面送来的每一件事都走 [`Engine::receive`]：先记下再处理，同一件事只收一次。
 
 use crate::messages::add_message;
-use crate::{find_mentions, now_ms, to_json, Engine, EngineError, Result, MAX_MESSAGE_CHARS};
+use crate::{
+    find_mentions, now_ms, to_json, Audit, Engine, EngineError, Result, MAX_MESSAGE_CHARS,
+};
 use sa_protocol::{
     ArtifactKind, Bot, BotId, EventKind, Link, LinkId, LinkRef, Message, MessageId, MessageKind,
     MessageState, Millis, Origin, Pairing, Room, RoomId, Sender, Source, Task,
@@ -156,13 +158,16 @@ impl Engine {
                 )))
             }
         }
-        self.add_link(
+        let link = self.add_link(
             room_id,
             Source::Github,
             &normalize(Source::Github, repo),
             repo,
             false,
-        )
+        )?;
+        let summary = format!("把 GitHub 仓库 {repo} 连到了房间");
+        self.audit(Audit::user("link.created", summary).room(room_id));
+        Ok(link)
     }
 
     /// 断开一个连接。
@@ -173,10 +178,13 @@ impl Engine {
                 let Some(link) = external::get_link(tx, id)? else {
                     return Ok(None);
                 };
-                Ok(Some(remove_link(tx, &link)?))
+                Ok(Some((remove_link(tx, &link)?, link)))
             })?
             .ok_or_else(|| EngineError::NotFound("没有这个连接".into()))?;
+        let (seq, link) = seq;
         self.publish(seq);
+        let summary = format!("断开了和「{}」的连接", link.title);
+        self.audit(Audit::user("link.removed", summary).room(&link.room_id));
         Ok(())
     }
 
@@ -205,6 +213,8 @@ impl Engine {
                 Ok(Some(()))
             })?
             .ok_or_else(|| EngineError::NotFound("没有这个房间".into()))?;
+        // 码本身不留底：拿到它的人就能把自己的聊天连进来。
+        self.audit(Audit::user("pairing.created", "生成了一个 Telegram 配对码").room(room_id));
         Ok(Pairing {
             code,
             expires_at,
@@ -231,8 +241,13 @@ impl Engine {
         let Some(room) = found else {
             return Ok(None);
         };
-        self.add_link(&room.id, Source::Telegram, chat_id, title, true)
-            .map(Some)
+        let link = self.add_link(&room.id, Source::Telegram, chat_id, title, true)?;
+        let summary = format!(
+            "Telegram 聊天「{}」用配对码连到了房间「{}」",
+            link.title, room.name
+        );
+        self.audit(Audit::outside("Telegram", "link.created", summary).room(&room.id));
+        Ok(Some(link))
     }
 
     fn add_link(

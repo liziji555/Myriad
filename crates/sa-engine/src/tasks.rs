@@ -128,6 +128,20 @@ impl Engine {
             Ok(Ok((task, seq)))
         })??;
         self.publish(seq);
+        let summary = format!("开了任务「{}」", task.title);
+        let entry = match &task.created_by {
+            Sender::User => crate::Audit::user("task.created", summary),
+            Sender::Bot { bot_id } => {
+                let name = self.get_bot(bot_id).map(|bot| bot.name).unwrap_or_default();
+                crate::Audit::bot(&name, "task.created", summary)
+            }
+        };
+        self.audit(
+            entry
+                .room(&task.room_id)
+                .task(Some(&task.id))
+                .detail(&task.scope),
+        );
         Ok(task)
     }
 
@@ -172,12 +186,21 @@ impl Engine {
 
     /// 把任务挪到另一个状态。`note` 是对新状态的一句说明。不允许的走法会被拒绝。
     pub fn move_task(&self, id: &TaskId, to: TaskState, note: &str) -> Result<Task> {
-        self.change_task(id, |_, task| {
+        let task = self.change_task(id, |_, task| {
             check_move(task, to)?;
             task.state = to;
             task.note = note.trim().to_string();
             Ok(())
-        })
+        })?;
+        // 任务每一次换状态都留底：验收、打回、取消、停下、卡住，事后查得到是哪一步、为什么。
+        let summary = format!("任务「{}」变成了「{}」", task.title, state_label(to));
+        self.audit(
+            crate::Audit::system(&format!("task.{}", to.as_str()), summary)
+                .room(&task.room_id)
+                .task(Some(&task.id))
+                .detail(note),
+        );
+        Ok(task)
     }
 
     /// 人让任务继续：草稿、等回答、卡住、等验收（打回）的任务回到「等着开工」。
@@ -190,7 +213,7 @@ impl Engine {
                 "补充的话不能超过 {MAX_TASK_TEXT_CHARS} 个字"
             )));
         }
-        self.change_task(id, |tx, task| {
+        let task = self.change_task(id, |tx, task| {
             if task.state == TaskState::Working {
                 if owner.is_some() {
                     return Err(EngineError::Invalid("任务正在做，先停下再换负责人".into()));
@@ -223,7 +246,15 @@ impl Engine {
                 tasks::push_input(tx, &task.id, note)?;
             }
             Ok(())
-        })
+        })?;
+        let summary = format!("让任务「{}」继续做", task.title);
+        self.audit(
+            crate::Audit::user("task.resumed", summary)
+                .room(&task.room_id)
+                .task(Some(&task.id))
+                .detail(note),
+        );
+        Ok(task)
     }
 
     /// 取走人给这个任务的、工作会话还没读到的话。没有时是空字符串。
@@ -342,6 +373,12 @@ impl Engine {
         })??;
         self.drafts().insert(message.id.clone(), message.clone());
         self.publish(seq);
+        let name = self.get_bot(bot_id).map(|bot| bot.name).unwrap_or_default();
+        self.audit(
+            crate::Audit::bot(&name, "task.run_started", "开始做任务（新的一次运行）")
+                .room(&run.room_id)
+                .task(Some(id)),
+        );
         Ok((run, message, session_id))
     }
 
@@ -409,6 +446,23 @@ impl Engine {
             Ok(Ok((task, seq)))
         })??;
         self.publish(seq);
+        // 一次运行怎么收的场、任务落到了哪个状态、为什么：任务没做成时先看这一条。
+        let summary = format!(
+            "任务「{}」的一次运行结束了（{}），任务现在是「{}」",
+            task.title,
+            outcome.state.as_str(),
+            state_label(task.state)
+        );
+        let why = match &outcome.error {
+            Some(error) if !error.trim().is_empty() => error.as_str(),
+            _ => outcome.note.as_str(),
+        };
+        self.audit(
+            crate::Audit::system("task.run_finished", summary)
+                .room(&task.room_id)
+                .task(Some(&task.id))
+                .detail(why),
+        );
         Ok(task)
     }
 
