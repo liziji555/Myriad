@@ -76,6 +76,9 @@ function Shell() {
   const members = room
     ? room.member_bot_ids.flatMap((id) => workspace.bots.filter((bot) => bot.id === id))
     : [];
+  const queued = (roomChat?.activity?.queued ?? []).flatMap(
+    (id) => workspace.bots.find((bot) => bot.id === id)?.name ?? [],
+  );
   const showPanel = (next: PanelTab) => {
     setTab(next);
     setPanelOpen(true);
@@ -132,6 +135,11 @@ function Shell() {
               onDecide={workspace.decideApproval}
               onLightDemo={runLightDemo}
             />
+            {queued.length > 0 && (
+              <p className="sa-room-status" role="status">
+                接下来：{queued.join("、")}
+              </p>
+            )}
             <Composer
               key={`composer-${room.id}`}
               disabledReason={room.host_bot_id ? null : "这个房间里还没有 Bot，发了也没人回应"}

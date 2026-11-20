@@ -1,5 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { applyDelta, emptyChat, mergePage, resetChat, upsertMessage, watchRoom } from "./chat";
+import {
+  applyDelta,
+  emptyChat,
+  mergePage,
+  removeMessage,
+  resetChat,
+  setActivity,
+  upsertMessage,
+  watchRoom,
+} from "./chat";
 import type { Message, MessageDelta } from "./types";
 
 const ROOM = "room_1";
@@ -120,5 +129,27 @@ describe("resetChat", () => {
     expect(resetChat(null)).toEqual(emptyChat);
     const state = resetChat(ROOM);
     expect(state.rooms[ROOM]).toEqual({ messages: [], hasMore: false, loaded: false });
+  });
+});
+
+describe("removeMessage / setActivity", () => {
+  const watching = watchRoom(emptyChat, ROOM);
+  const activity = { room_id: ROOM, speaking: "bot_1", queued: ["bot_2"], handled_seq: 1 };
+
+  it("drops a withdrawn message and ignores unknown ones", () => {
+    const state = upsertMessage(upsertMessage(watching, message(1)), message(2));
+    const after = removeMessage(state, { id: "msg_2", room_id: ROOM });
+    expect(after.rooms[ROOM].messages.map((m) => m.id)).toEqual(["msg_1"]);
+    expect(removeMessage(after, { id: "msg_2", room_id: ROOM })).toBe(after);
+    expect(removeMessage(after, { id: "msg_1", room_id: "room_other" })).toBe(after);
+  });
+
+  it("remembers who is speaking and keeps it when a page of messages arrives", () => {
+    let state = setActivity(watching, activity);
+    state = mergePage(state, ROOM, { messages: [message(1)], has_more: false }, false);
+    expect(state.rooms[ROOM].activity).toEqual(activity);
+    expect(state.rooms[ROOM].loaded).toBe(true);
+    // 没打开的房间不记。
+    expect(setActivity(watching, { ...activity, room_id: "room_other" })).toBe(watching);
   });
 });
