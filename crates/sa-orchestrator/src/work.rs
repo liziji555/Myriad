@@ -434,20 +434,7 @@ async fn run_task(shared: &Arc<Shared>, task: Task, cancel: &CancellationToken) 
                     said.trim().to_string()
                 },
             });
-            let (task_state, note) = match report.status {
-                ReportStatus::Done => (TaskState::Review, String::new()),
-                ReportStatus::NeedsInput => (TaskState::Waiting, report.summary.clone()),
-                ReportStatus::Blocked => (TaskState::Blocked, report.summary.clone()),
-                ReportStatus::Dropped => (TaskState::Dropped, report.summary.clone()),
-            };
-            RunOutcome {
-                state: RunState::Succeeded,
-                report: Some(report),
-                error: None,
-                task_state: Some(task_state),
-                note,
-                artifacts,
-            }
+            delivered(report, artifacts)
         }
         MessageState::Interrupted => RunOutcome {
             state: RunState::Interrupted,
@@ -468,18 +455,43 @@ async fn run_task(shared: &Arc<Shared>, task: Task, cancel: &CancellationToken) 
                 .unwrap_or_else(|| STOPPED_NOTE.into()),
             artifacts,
         },
-        _ => RunOutcome {
-            state: RunState::Failed,
-            report: None,
-            error: error.clone(),
-            task_state: Some(TaskState::Blocked),
-            note: error.unwrap_or_default(),
-            artifacts,
+        _ => match reported.lock().unwrap().take() {
+            // 结果已经交了，只是收尾那句话没说成（比如正好花到了上限）：按交的结果算。
+            Some(report) => delivered(report, artifacts),
+            None => RunOutcome {
+                state: RunState::Failed,
+                report: None,
+                error: error.clone(),
+                task_state: Some(TaskState::Blocked),
+                note: error.unwrap_or_default(),
+                artifacts,
+            },
         },
     };
     let (engine, run_id) = (shared.engine.clone(), run.id.clone());
     if let Err(error) = db(move || engine.finish_run(&run_id, outcome)).await {
         tracing::error!(task = %task.id, "运行结果没记上：{error}");
+    }
+}
+
+/// 运行交了结果：任务按结果里说的往下走。
+fn delivered(
+    report: Report,
+    artifacts: Option<Vec<(sa_protocol::ArtifactKind, String, String)>>,
+) -> RunOutcome {
+    let (task_state, note) = match report.status {
+        ReportStatus::Done => (TaskState::Review, String::new()),
+        ReportStatus::NeedsInput => (TaskState::Waiting, report.summary.clone()),
+        ReportStatus::Blocked => (TaskState::Blocked, report.summary.clone()),
+        ReportStatus::Dropped => (TaskState::Dropped, report.summary.clone()),
+    };
+    RunOutcome {
+        state: RunState::Succeeded,
+        report: Some(report),
+        error: None,
+        task_state: Some(task_state),
+        note,
+        artifacts,
     }
 }
 
