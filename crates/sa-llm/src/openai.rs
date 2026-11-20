@@ -71,7 +71,14 @@ impl Provider for OpenAiCompat {
         };
         let status = response.status();
         if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
+            // 错误说明在响应体里。响应头到了、响应体迟迟不来的情况也要能停、能超时；
+            // 等不到就只凭状态码报错。
+            let body = tokio::select! {
+                _ = cancel.cancelled() => return Err(LlmError::Cancelled),
+                body = tokio::time::timeout(self.idle_timeout, response.text()) => {
+                    body.ok().and_then(Result::ok).unwrap_or_default()
+                }
+            };
             return Err(status_error(status.as_u16(), &body));
         }
 
@@ -387,6 +394,8 @@ mod tests {
         /// 发完这些数据后连接保持打开、不再发任何东西。
         SseThenStall(Vec<&'static str>),
         Status(u16, &'static str),
+        /// 只发状态码和响应头，响应体一直不来。
+        StatusThenStall(u16),
     }
 
     type Seen = (Option<String>, Value);
@@ -424,6 +433,11 @@ mod tests {
             Canned::Status(code, body) => {
                 (StatusCode::from_u16(code).unwrap(), body).into_response()
             }
+            Canned::StatusThenStall(code) => (
+                StatusCode::from_u16(code).unwrap(),
+                axum::body::Body::from_stream(stream::pending::<Result<String, std::io::Error>>()),
+            )
+                .into_response(),
         }
     }
 
@@ -641,6 +655,32 @@ mod tests {
         assert!(matches!(stream.next().await, Some(Ok(_))));
         cancel.cancel();
         assert_eq!(stream.next().await, Some(Err(LlmError::Cancelled)));
+    }
+
+    #[tokio::test]
+    async fn stalled_error_body_times_out_and_cancel_interrupts() {
+        let (provider, _) = start(vec![
+            Canned::StatusThenStall(502),
+            Canned::StatusThenStall(502),
+        ])
+        .await;
+        // 等不到错误说明：仍然按状态码归类（5xx 可以重试）。
+        let provider = provider.with_idle_timeout(Duration::from_millis(200));
+        let error = collect(&provider, request()).await.unwrap_err();
+        assert!(matches!(error, LlmError::Server(_)), "{error:?}");
+
+        let provider = provider.with_idle_timeout(Duration::from_secs(30));
+        let cancel = CancellationToken::new();
+        let stopper = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            stopper.cancel();
+        });
+        let result =
+            tokio::time::timeout(Duration::from_secs(5), provider.stream(request(), cancel))
+                .await
+                .expect("停止之后还在等响应体");
+        assert_eq!(result.err(), Some(LlmError::Cancelled));
     }
 
     #[tokio::test]
