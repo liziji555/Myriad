@@ -1,13 +1,14 @@
 //! 工具：模型能调用的动作。
 //!
 //! 文件类工具只能看工作目录里面的东西，见 [`fence`]。
-//! 技能（写在文件里的做事套路）见 [`skills`]。
+//! 技能（写在文件里的做事套路）见 [`skills`]，外部 MCP 服务提供的工具见 [`mcp`]。
 
 mod edit;
 mod fence;
 mod glob;
 mod grep;
 mod list_dir;
+pub mod mcp;
 pub mod process;
 mod read;
 mod shell;
