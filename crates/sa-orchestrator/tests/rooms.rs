@@ -46,7 +46,7 @@ fn start(dir: &Path, replies: Vec<MockReply>, working_model: bool) -> Rig {
     };
     let settings = Settings {
         sessions_dir: data.join("sessions"),
-        fence: Fence::new(&work, &[data.clone()]).unwrap(),
+        fence: Fence::new(&work, std::slice::from_ref(&data)).unwrap(),
         prompt: None,
         max_steps: 6,
         allow_private_network: false,
