@@ -143,7 +143,7 @@ impl Tool for GrepTool {
 }
 
 /// 文件里匹配的行。打不开、太大、是二进制或不是普通文件的，当作没有匹配。
-/// 找到 `max` 条就停，不管文件里还有多少。
+/// 最多收集 `max` 条，不管文件里还有多少。
 fn matching_lines(path: &Path, regex: &regex::Regex, max: usize) -> Vec<(usize, String)> {
     // 先看类型再打开：打开没有写入方的管道会一直卡住。
     if !std::fs::metadata(path).is_ok_and(|m| m.is_file()) {
@@ -171,15 +171,13 @@ fn matching_lines(path: &Path, regex: &regex::Regex, max: usize) -> Vec<(usize, 
         number += 1;
         let line = String::from_utf8_lossy(&raw);
         let line = line.trim_end_matches(['\n', '\r']);
-        if regex.is_match(line) {
+        // 够数之后不再收集，但继续把文件读完：后面出现 NUL 的话它是二进制文件，前面收集的也不算。
+        if hits.len() < max && regex.is_match(line) {
             let mut shown: String = line.trim().chars().take(MAX_LINE_CHARS).collect();
             if line.trim().chars().count() > MAX_LINE_CHARS {
                 shown.push('…');
             }
             hits.push((number, shown));
-            if hits.len() >= max {
-                break;
-            }
         }
     }
     hits
@@ -301,13 +299,20 @@ mod tests {
     }
 
     #[test]
-    fn stops_reading_a_file_once_it_has_enough_matches() {
+    fn collects_no_more_matches_than_asked_for() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("dense.log");
         fs::write(&path, "hit\n".repeat(50_000)).unwrap();
         let regex = regex::Regex::new("hit").unwrap();
         let lines = matching_lines(&path, &regex, 3);
         assert_eq!(lines.iter().map(|l| l.0).collect::<Vec<_>>(), [1, 2, 3]);
+
+        // 二进制文件即使在第一个 NUL 之前就凑够了数，也不算匹配。
+        let binary = dir.path().join("dump.bin");
+        let mut bytes = b"hit\n".repeat(10);
+        bytes.extend_from_slice(b"\0\x01\x02\n");
+        fs::write(&binary, bytes).unwrap();
+        assert!(matching_lines(&binary, &regex, 3).is_empty());
     }
 
     #[tokio::test]
