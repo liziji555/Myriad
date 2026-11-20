@@ -76,6 +76,43 @@ impl Fence {
         Ok(real)
     }
 
+    /// 把一个要写入的路径变成真实路径。文件可以还不存在。
+    ///
+    /// 返回真实路径，以及它是否在工作目录里面。SuperAgent 自己的数据目录任何时候都不能写。
+    /// 做法：找到已经存在的最深一层上级目录并解析它（符号链接在这一步被看穿），
+    /// 再把还不存在的那几段接在后面。
+    pub fn resolve_for_write(&self, input: &str) -> Result<(PathBuf, bool), ToolError> {
+        let input = input.trim();
+        if input.is_empty() {
+            return Err(ToolError::new("没有给出要写入的路径。"));
+        }
+        let joined = lexically_normalized(&self.root.join(input));
+        let mut existing = joined.as_path();
+        let mut rest = vec![];
+        let real_base = loop {
+            match existing.canonicalize() {
+                Ok(real) => break real,
+                Err(_) => {
+                    let (Some(parent), Some(name)) = (existing.parent(), existing.file_name())
+                    else {
+                        return Err(ToolError(format!("路径 {input} 没法解析。")));
+                    };
+                    rest.push(name.to_os_string());
+                    existing = parent;
+                }
+            }
+        };
+        let mut real = real_base;
+        real.extend(rest.iter().rev());
+        if self.denied.iter().any(|d| real.starts_with(d)) {
+            return Err(ToolError(format!(
+                "路径 {input} 在 SuperAgent 自己的数据目录里，不能写。"
+            )));
+        }
+        let inside = real.starts_with(&self.root);
+        Ok((real, inside))
+    }
+
     /// 真实路径 `real` 是否在围栏里。
     pub fn allows(&self, real: &Path) -> bool {
         real.starts_with(&self.root) && !self.denied.iter().any(|d| real.starts_with(d))
@@ -140,6 +177,13 @@ mod tests {
         let absolute = outer.path().join("secret.txt");
         assert!(fence.resolve(absolute.to_str().unwrap()).is_err());
         assert!(fence.resolve("nope.txt").unwrap_err().0.contains("不存在"));
+        // 写入目标可以还不存在；在外面的会被标出来，由上层决定要不要问人。
+        let (new_file, inside) = fence.resolve_for_write("新目录/子目录/a.txt").unwrap();
+        assert!(inside && new_file.starts_with(fence.root()), "{new_file:?}");
+        assert!(new_file.ends_with("新目录/子目录/a.txt"));
+        let (escaped, inside) = fence.resolve_for_write("sub/../../外面.txt").unwrap();
+        assert!(!inside && !escaped.starts_with(fence.root()), "{escaped:?}");
+        assert!(fence.resolve_for_write("  ").is_err());
         // 外面的路径不管存不存在，回答都一样。
         let ghost = fence.resolve("../没有这个文件").unwrap_err();
         assert!(ghost.0.contains("工作目录之外"), "{ghost}");

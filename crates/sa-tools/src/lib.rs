@@ -56,6 +56,17 @@ impl ToolError {
 
 pub type ToolResult = Result<String, ToolError>;
 
+/// 一次调用能不能直接执行。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Permission {
+    /// 直接执行。
+    Allow,
+    /// 先问人。文字是给人看的原因，显示在审批卡上。
+    Ask(String),
+    /// 不执行。文字交给模型。
+    Deny(String),
+}
+
 #[async_trait]
 pub trait Tool: Send + Sync {
     fn name(&self) -> &'static str;
@@ -77,6 +88,15 @@ pub trait Tool: Send + Sync {
     /// 能不能和别的调用同时跑。
     fn is_concurrency_safe(&self, _input: &Value) -> bool {
         false
+    }
+
+    /// 这次调用要不要先问人。默认：只读的直接执行，其余的都问。
+    async fn check_permission(&self, input: &Value, _ctx: &ToolCtx) -> Permission {
+        if self.is_read_only(input) {
+            Permission::Allow
+        } else {
+            Permission::Ask("这个操作会改动文件或执行命令".into())
+        }
     }
 
     /// 结果超过这么多字就截断。
