@@ -191,10 +191,31 @@ pub fn workdir(conn: &Connection, id: &TaskId) -> Result<Option<Workdir>> {
     })
 }
 
-/// 记下（或清掉）任务的工作目录。
+/// 记下任务是在哪个工作目录里开出来的。
+pub fn set_source(conn: &Connection, id: &TaskId, source: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE tasks SET source_dir = ?2 WHERE id = ?1",
+        params![id.as_str(), source],
+    )?;
+    Ok(())
+}
+
+/// 任务是在哪个工作目录里开出来的。老数据里没有记的是 `None`。
+pub fn source(conn: &Connection, id: &TaskId) -> Result<Option<String>> {
+    let source: Option<Option<String>> = conn
+        .query_row(
+            "SELECT source_dir FROM tasks WHERE id = ?1",
+            [id.as_str()],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(source.flatten().filter(|source| !source.is_empty()))
+}
+
+/// 记下（或清掉）任务的工作目录。清掉时「在哪个工作目录里开的」留着。
 pub fn set_workdir(conn: &Connection, id: &TaskId, workdir: Option<&Workdir>) -> Result<()> {
     conn.execute(
-        "UPDATE tasks SET workdir = ?2, work_kind = ?3, branch = ?4, base_ref = ?5, work_tree = ?6, git_dir = ?7, source_dir = ?8 WHERE id = ?1",
+        "UPDATE tasks SET workdir = ?2, work_kind = ?3, branch = ?4, base_ref = ?5, work_tree = ?6, git_dir = ?7, source_dir = COALESCE(?8, source_dir) WHERE id = ?1",
         params![
             id.as_str(),
             workdir.map(|w| w.path.as_str()),

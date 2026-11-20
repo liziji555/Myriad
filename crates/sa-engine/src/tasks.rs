@@ -25,6 +25,8 @@ pub struct NewTask {
     /// 派给谁。没有就先放着（草稿）。
     pub owner_bot_id: Option<BotId>,
     pub created_by: Sender,
+    /// 任务是在哪个工作目录里开的。任务只在这个工作目录里做、只往这里验收。空表示不限。
+    pub workspace: String,
 }
 
 /// 一次运行怎么收的场。
@@ -105,6 +107,7 @@ impl Engine {
                 updated_at: now,
             };
             tasks::insert(tx, &task)?;
+            tasks::set_source(tx, &task.id, &new.workspace)?;
             events::append(
                 tx,
                 Some(&task.room_id),
@@ -213,6 +216,11 @@ impl Engine {
     /// 取走人给这个任务的、工作会话还没读到的话。没有时是空字符串。
     pub fn take_task_input(&self, id: &TaskId) -> Result<String> {
         Ok(self.store.write(|tx| tasks::take_input(tx, id))?)
+    }
+
+    /// 任务是在哪个工作目录里开的。没有记就是 `None`。
+    pub fn task_source(&self, id: &TaskId) -> Result<Option<String>> {
+        Ok(self.store.read(|c| tasks::source(c, id))?)
     }
 
     pub fn task_workdir(&self, id: &TaskId) -> Result<Option<Workdir>> {
@@ -554,6 +562,7 @@ mod tests {
             acceptance: "测试通过".into(),
             owner_bot_id: owner.cloned(),
             created_by: Sender::User,
+            workspace: String::new(),
         }
     }
 

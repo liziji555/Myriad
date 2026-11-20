@@ -143,6 +143,14 @@ async fn ensure_workdir(shared: &Arc<Shared>, task_id: &TaskId) -> Result<Workdi
             workdir.path
         ));
     }
+    // 还没开工的任务也一样：它是在哪个工作目录里开的，就只在那里做。
+    let (engine, id) = (shared.engine.clone(), task_id.clone());
+    let source = db(move || engine.task_source(&id))
+        .await
+        .map_err(|e| e.to_string())?;
+    if let Some(source) = source {
+        check_source_dir(shared, &source)?;
+    }
     let settings = &shared.settings;
     let workdir = workdir::provision(settings.fence.root(), &settings.work_dir, task_id).await?;
     let (engine, id, saved) = (shared.engine.clone(), task_id.clone(), workdir.clone());
@@ -154,13 +162,17 @@ async fn ensure_workdir(shared: &Arc<Shared>, task_id: &TaskId) -> Result<Workdi
 
 /// 任务是从别的工作目录开出来的（服务换了 `--workdir` 重新启动）：不在这里接着做，也不往这里验收。
 fn check_source(shared: &Shared, workdir: &Workdir) -> Result<(), String> {
-    let source = Path::new(&workdir.source).canonicalize().ok();
-    if source.as_deref() == Some(shared.settings.fence.root()) {
+    check_source_dir(shared, &workdir.source)
+}
+
+fn check_source_dir(shared: &Shared, source: &str) -> Result<(), String> {
+    let real = Path::new(source).canonicalize().ok();
+    if real.as_deref() == Some(shared.settings.fence.root()) {
         Ok(())
     } else {
         Err(format!(
             "这个任务是在工作目录 {} 里开的，现在的工作目录是 {}。用原来的工作目录启动服务再继续，或者取消这个任务。",
-            workdir.source,
+            source,
             shared.settings.fence.root_display()
         ))
     }
@@ -614,6 +626,7 @@ impl Tool for CreateTaskTool {
             self.room_id.clone(),
             self.from.clone(),
         );
+        let workspace = self.shared.settings.fence.root_display();
         let created = db(move || {
             let owner = match wanted {
                 None => from.clone(),
@@ -641,6 +654,7 @@ impl Tool for CreateTaskTool {
                 acceptance: input.acceptance.unwrap_or_default(),
                 owner_bot_id: Some(owner.id.clone()),
                 created_by: Sender::Bot { bot_id: from.id },
+                workspace,
             })?;
             Ok((task, owner))
         })
@@ -664,6 +678,7 @@ impl Orchestrator {
     ) -> Result<Task, OrchestratorError> {
         self.check_running()?;
         let (engine, room_id) = (self.shared.engine.clone(), room_id.clone());
+        let workspace = self.shared.settings.fence.root_display();
         let task = db(move || {
             engine.create_task(NewTask {
                 room_id,
@@ -672,6 +687,7 @@ impl Orchestrator {
                 acceptance: request.acceptance.unwrap_or_default(),
                 owner_bot_id: request.owner_bot_id,
                 created_by: Sender::User,
+                workspace,
             })
         })
         .await?;
