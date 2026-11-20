@@ -15,7 +15,13 @@ const MAX_COPY_FILES: usize = 50_000;
 const MAX_COPY_BYTES: u64 = 200 * 1024 * 1024;
 
 /// 自动提交用的身份；文件名原样输出，不转义中文。
-const IDENTITY: [&str; 8] = [
+const IDENTITY: [&str; 14] = [
+    "-c",
+    "maintenance.auto=false",
+    "-c",
+    "gc.auto=0",
+    "-c",
+    "core.fsmonitor=false",
     "-c",
     "user.name=SuperAgent",
     "-c",
@@ -117,7 +123,7 @@ pub async fn provision(
         // 这时任务还没开始，目录里的 `.git` 是 git 刚写的，可以信。
         let git_dir = git(&target, &["rev-parse", "--absolute-git-dir"]).await?;
         // 工作目录是仓库里的一个子目录时，任务也只在对应的子目录里干活。
-        let path = target.join(prefix.trim());
+        let path = target.join(prefix.trim().trim_end_matches('/'));
         return Ok(Workdir {
             path: plain(&path).display().to_string(),
             kind: KIND_WORKTREE.into(),
@@ -233,7 +239,8 @@ pub async fn commit_and_diff(
         &["add", "-A", "."]
     };
     task_git(workdir, add).await?;
-    let staged = task_git(workdir, &["status", "--porcelain"]).await?;
+    // 只看暂存区：工作目录是仓库里的一层时，别的层里有没提交的东西不关这次提交的事。
+    let staged = task_git(workdir, &["diff", "--cached", "--name-only"]).await?;
     if !staged.trim().is_empty() {
         task_git(workdir, &["commit", "-q", "--no-verify", "-m", message]).await?;
     }
@@ -591,8 +598,6 @@ mod tests {
     #[tokio::test]
     async fn a_planted_git_dir_is_never_trusted() {
         let tmp = tempfile::tempdir().unwrap();
-        let marker = tmp.path().join("pwned");
-        let hook = format!("touch {}", marker.display());
         for with_repo in [false, true] {
             let name = if with_repo { "git" } else { "plain" };
             let (workspace, work_root) = (tmp.path().join(name), tmp.path().join("work"));
@@ -608,10 +613,13 @@ mod tests {
             let dir = PathBuf::from(&workdir.path);
 
             // 一个真的仓库，配置里让 git 每次看状态都执行一条命令；再让 `.git` 指向它。
+            // 在任务目录外面建好，再整个挪进去：任务目录里不跑任何靠 git 自己找仓库的命令。
+            let outside = tmp.path().join(format!("evil-{name}"));
+            std::fs::create_dir_all(&outside).unwrap();
+            git(&outside, &["init", "-q", "--bare"]).await.unwrap();
             let evil = dir.join("evil");
-            std::fs::create_dir_all(&evil).unwrap();
-            git(&evil, &["init", "-q", "--bare"]).await.unwrap();
-            let config = format!("[core]\n\tbare = false\n\tfsmonitor = {hook}\n");
+            std::fs::rename(&outside, &evil).unwrap();
+            let config = "[core]\n\tbare = false\n\tfsmonitor = touch pwned\n";
             std::fs::write(evil.join("config"), config).unwrap();
             let _ = std::fs::remove_file(dir.join(".git"));
             std::fs::write(dir.join(".git"), "gitdir: evil\n").unwrap();
@@ -622,7 +630,44 @@ mod tests {
                 changed.contains(&("a.txt".to_string(), "修改".to_string())),
                 "{name}: {changed:?}"
             );
-            assert!(!marker.exists(), "{name}: 假 .git 里的命令被执行了");
+            // 用的还是真正的 git 目录，不是假的那个。（不靠「命令有没有被执行」来判断：
+            // 开发机上别的程序看到新的 `.git` 也可能自己去跑 git。）
+            let used = task_git(&workdir, &["rev-parse", "--absolute-git-dir"])
+                .await
+                .unwrap();
+            assert_eq!(
+                Path::new(used.trim()).canonicalize().unwrap(),
+                Path::new(&workdir.git_dir).canonicalize().unwrap(),
+                "{name}"
+            );
         }
+    }
+
+    /// 工作目录是仓库里的一层：别的层里有没提交的文件（比如跑测试留下的），不影响记改动。
+    #[tokio::test]
+    async fn untracked_files_outside_a_subdirectory_workspace_do_not_block_the_snapshot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (outer, work_root) = (tmp.path().join("repo"), tmp.path().join("work"));
+        let workspace = outer.join("sub");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(workspace.join("b.txt"), "一\n").unwrap();
+        repo(&outer).await;
+        let workdir = provision(&workspace, &work_root, &TaskId::new())
+            .await
+            .unwrap();
+        assert!(workdir.path.ends_with("sub"), "{workdir:?}");
+
+        std::fs::write(Path::new(&workdir.path).join("b.txt"), "二\n").unwrap();
+        let changed = commit_and_diff(&workdir, "任务").await.unwrap();
+        assert_eq!(changed, [("sub/b.txt".to_string(), "修改".to_string())]);
+        // 之后在任务目录的上一层冒出一个没提交的文件。
+        std::fs::write(Path::new(&workdir.root).join("leftover.log"), "x\n").unwrap();
+        assert_eq!(commit_and_diff(&workdir, "任务").await.unwrap(), changed);
+
+        apply_to_workspace(&workdir).await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("b.txt")).unwrap(),
+            "二\n"
+        );
     }
 }
