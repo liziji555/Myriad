@@ -382,11 +382,13 @@ fn build(
                 summary.push_str(&format!("（任务「{}」，{}）", task.title, task.id));
             }
             let body: String = body.trim().chars().take(MAX_EVENT_BODY_CHARS).collect();
-            // 任务的事交给任务的负责人，别的交给入口 Bot。它们不在了就只摆在时间线上。
-            let owner = task.and_then(|task| task.owner_bot_id);
-            let target = owner
-                .filter(|id| is_member(id))
-                .or_else(|| room.host_bot_id.clone().filter(|id| is_member(id)));
+            // 任务的事只交给任务的负责人：别的 Bot 不在任务的目录里，照着评审意见动手会改错地方。
+            // 别的事交给入口 Bot。该接的 Bot 不在了（停用、被请出房间），就只摆在时间线上。
+            let target = match task {
+                Some(task) => task.owner_bot_id,
+                None => room.host_bot_id.clone(),
+            }
+            .filter(|id| is_member(id));
             let mentions = target.filter(|_| *notify).into_iter().collect();
             (MessageKind::Event, format!("{summary}\n\n{body}"), mentions)
         }
@@ -728,6 +730,82 @@ mod tests {
         let out = engine.pending_outbound(Source::Telegram, 10).unwrap();
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].target, "99");
+    }
+
+    fn review(key: &str, pr: u64) -> Incoming {
+        Incoming {
+            source: Source::Github,
+            key: key.into(),
+            name: "pull_request_review.submitted".into(),
+            external: "Me/App".into(),
+            label: format!("Me/App#{pr}"),
+            url: None,
+            kind: IncomingKind::Event {
+                summary: format!("bob 要求修改 PR #{pr}"),
+                body: "少了判空".into(),
+                pr: Some(pr),
+                branch: None,
+                task_only: true,
+                notify: true,
+            },
+        }
+    }
+
+    #[test]
+    fn what_happens_on_a_task_pr_goes_to_the_task_owner_and_to_nobody_else() {
+        let (engine, room, host) = engine();
+        let coder = engine
+            .create_bot("Coder", sa_protocol::ModelTier::Mid, "")
+            .unwrap();
+        engine.add_room_member(&room, &coder.id).unwrap();
+        engine.link_repo(&room, "me/app").unwrap();
+        let task = engine
+            .create_task(crate::NewTask {
+                room_id: room.clone(),
+                title: "修登录".into(),
+                scope: "修掉登录的 500".into(),
+                acceptance: String::new(),
+                owner_bot_id: Some(coder.id.clone()),
+                created_by: Sender::User,
+                workspace: String::new(),
+            })
+            .unwrap();
+        let (run, ..) = engine.start_run(&task.id, &coder.id).unwrap();
+        let url = "https://github.com/me/app/pull/7";
+        engine
+            .add_artifact(&task.id, &run.id, ArtifactKind::Pr, url, "PR")
+            .unwrap();
+
+        // 别人的 PR 上的评审不收。
+        assert_eq!(
+            engine.receive(review("d-1", 8)).unwrap(),
+            Receipt::Filtered("不是任务开的 PR 或分支".into())
+        );
+        let Receipt::Stored(message) = engine.receive(review("d-2", 7)).unwrap() else {
+            panic!("任务的 PR 上的评审应该收下");
+        };
+        assert_eq!(message.mentions, vec![coder.id.clone()]);
+        assert!(
+            message.content.contains("（任务「修登录」"),
+            "{}",
+            message.content
+        );
+
+        // 负责人停用了：只摆在时间线上，不改交给入口 Bot（它不在任务的目录里）。
+        let off = crate::BotPatch {
+            enabled: Some(false),
+            ..Default::default()
+        };
+        engine.update_bot(&coder.id, off).unwrap();
+        let Receipt::Stored(message) = engine.receive(review("d-3", 7)).unwrap() else {
+            panic!("应该收下");
+        };
+        assert_eq!(message.mentions, Vec::<BotId>::new());
+        // 不是任务的事照常交给入口 Bot。
+        let Receipt::Stored(message) = engine.receive(issue("d-4", "me/app")).unwrap() else {
+            panic!("应该收下");
+        };
+        assert_eq!(message.mentions, vec![host]);
     }
 
     #[test]
