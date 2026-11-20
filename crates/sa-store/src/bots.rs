@@ -4,12 +4,13 @@ use sa_protocol::{Bot, BotId, BotKind, ModelTier};
 
 pub fn insert(conn: &Connection, bot: &Bot) -> Result<()> {
     conn.execute(
-        "INSERT INTO bots (id, name, kind, tier, enabled, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        "INSERT INTO bots (id, name, kind, tier, persona, enabled, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         params![
             bot.id.as_str(),
             bot.name,
             bot.kind.as_str(),
             bot.tier.as_str(),
+            bot.persona,
             bot.enabled,
             bot.created_at
         ],
@@ -19,7 +20,7 @@ pub fn insert(conn: &Connection, bot: &Bot) -> Result<()> {
 
 pub fn list(conn: &Connection) -> Result<Vec<Bot>> {
     let mut stmt = conn.prepare(
-        "SELECT id, name, kind, tier, enabled, created_at FROM bots ORDER BY created_at, id",
+        "SELECT id, name, kind, tier, enabled, created_at, persona FROM bots ORDER BY created_at, id",
     )?;
     let rows = stmt.query_map([], read_row)?;
     rows.map(|row| row?).collect()
@@ -27,6 +28,29 @@ pub fn list(conn: &Connection) -> Result<Vec<Bot>> {
 
 pub fn get(conn: &Connection, id: &BotId) -> Result<Option<Bot>> {
     Ok(list(conn)?.into_iter().find(|bot| &bot.id == id))
+}
+
+/// 用 `bot` 的可变部分（名字、档位、人设、是否启用）覆盖已有的那一行。
+pub fn update(conn: &Connection, bot: &Bot) -> Result<()> {
+    let changed = conn.execute(
+        "UPDATE bots SET name = ?2, tier = ?3, persona = ?4, enabled = ?5 WHERE id = ?1",
+        params![
+            bot.id.as_str(),
+            bot.name,
+            bot.tier.as_str(),
+            bot.persona,
+            bot.enabled
+        ],
+    )?;
+    if changed == 0 {
+        return Err(StoreError::Corrupt(format!("Bot {} 不存在", bot.id)));
+    }
+    Ok(())
+}
+
+/// 删掉一个 Bot。它的房间成员关系和会话跟着删；它发过的消息留着。返回是否真的删了。
+pub fn delete(conn: &Connection, id: &BotId) -> Result<bool> {
+    Ok(conn.execute("DELETE FROM bots WHERE id = ?1", [id.as_str()])? > 0)
 }
 
 pub fn count(conn: &Connection) -> Result<i64> {
@@ -48,5 +72,6 @@ fn read_row(row: &Row<'_>) -> rusqlite::Result<Result<Bot>> {
         tier,
         enabled: row.get(4)?,
         created_at: row.get(5)?,
+        persona: row.get(6)?,
     }))
 }

@@ -213,7 +213,29 @@ fn demo_reply(request: &ChatRequest) -> MockReply {
             last.content.matches("用户：").count()
         ));
     }
+    // 路由请求：不带工具，系统提示词里说了自己是路由。消息里提到谁的名字就选谁，否则选入口 Bot。
+    let routing = request.tools.is_empty()
+        && request
+            .messages
+            .first()
+            .is_some_and(|m| m.role == Role::System && m.content.contains("路由"));
+    if routing {
+        return MockReply::text(&demo_route(&last.content));
+    }
+    // 多 Bot 房间里，别人的话带着「【名字】」前缀；规则只看后面的正文。
+    let said = last
+        .content
+        .strip_prefix('【')
+        .and_then(|rest| rest.split_once('】'))
+        .map_or(last.content.as_str(), |(_, body)| body);
+    if said.contains("不用回") {
+        return MockReply::text("(pass)");
+    }
     if last.role == Role::Tool {
+        // 找别的 Bot 的回执：话已经带到，这边说一句就结束。
+        if last.content.starts_with("已经把话带给") {
+            return MockReply::text("（Mock 模型）已经转过去了，等它回答。");
+        }
         let lines: Vec<&str> = last.content.lines().take(6).collect();
         return MockReply::text(&format!(
             "（Mock 模型）工具返回了 {} 个字，开头是：\n\n{}\n\n这是固定规则生成的回复，不是真正的总结；配置好模型密钥后会由真实模型来读。",
@@ -221,7 +243,7 @@ fn demo_reply(request: &ChatRequest) -> MockReply {
             lines.join("\n")
         ));
     }
-    if let Some((tool, arguments, saying)) = demo_tool_call(&last.content) {
+    if let Some((tool, arguments, saying)) = demo_tool_call(said) {
         if request.tools.iter().any(|t| t.name == tool) {
             return MockReply::tool_calls(
                 &format!("（Mock 模型）{saying}"),
@@ -229,7 +251,7 @@ fn demo_reply(request: &ChatRequest) -> MockReply {
             );
         }
     }
-    let quoted: String = last.content.chars().take(80).collect();
+    let quoted: String = said.chars().take(80).collect();
     // 报出上下文里有几条用户消息：重启之后数字接着涨，说明历史带上了。
     let turn = request
         .messages
@@ -239,6 +261,34 @@ fn demo_reply(request: &ChatRequest) -> MockReply {
     MockReply::text(&format!(
         "你好！我是 Mock 模型，只会按固定规则回话，用来在没有密钥时把流程跑通。\n\n你刚才说的是：「{quoted}」（这是这个会话里你的第 {turn} 条消息）\n\n想看工具调用的话，发一条带反引号的消息，例如：读一下 `README.md`、写入 `笔记.md`：内容、修改 `笔记.md`：旧 => 新、运行 `git status`。"
     ))
+}
+
+/// 假路由：从材料里的 Bot 列表中，选名字出现在用户消息里的那个；都没出现就选入口 Bot。
+fn demo_route(material: &str) -> String {
+    let message = material
+        .split_once("【用户刚发的消息】")
+        .map_or("", |(_, message)| message)
+        .to_lowercase();
+    let mut host = None;
+    let mut named = None;
+    for line in material.lines().filter(|line| line.starts_with("- id: ")) {
+        let field = |key: &str| {
+            line.split_once(key)
+                .map(|(_, rest)| rest.split('，').next().unwrap_or("").trim().to_string())
+        };
+        let (Some(id), Some(name)) = (field("- id: "), field("名字: ")) else {
+            continue;
+        };
+        if line.contains("入口 Bot") {
+            host = Some(id.clone());
+        }
+        if named.is_none() && !name.is_empty() && message.contains(&name.to_lowercase()) {
+            named = Some(id);
+        }
+    }
+    let bot_id = named.or(host).unwrap_or_default();
+    serde_json::json!({ "bot_id": bot_id, "confidence": 0.9, "reason": "Mock 路由：按名字匹配" })
+        .to_string()
 }
 
 /// 按消息的写法决定调哪个工具：反引号前面的动词决定工具，反引号里面是路径或命令，
@@ -255,7 +305,18 @@ fn demo_tool_call(text: &str) -> Option<(&'static str, serde_json::Value, String
         .trim_start_matches(|c: char| c.is_whitespace() || c == '：' || c == ':')
         .trim_end();
     use serde_json::json;
-    Some(if verb.contains("运行") || verb.contains("执行") {
+    Some(if verb.contains("转给") || verb.contains("问问") {
+        let message = if rest.is_empty() {
+            "请你接着处理。"
+        } else {
+            rest
+        };
+        (
+            "ask_bot",
+            json!({ "bot": inner, "message": message }),
+            format!("我去找 {inner}。"),
+        )
+    } else if verb.contains("运行") || verb.contains("执行") {
         (
             "shell",
             json!({ "command": inner }),
@@ -444,6 +505,47 @@ mod tests {
             "{}",
             summary.text
         );
+
+        // 多 Bot：转给别的 Bot、不说话、路由。
+        let tools = ["read", "ask_bot"];
+        let hand_over = {
+            let mut req = request(vec![ChatMessage::user(
+                "【用户（对你说）】转给 `Reviewer`：帮我看看",
+            )]);
+            req.tools = tools
+                .iter()
+                .map(|name| ToolSpec {
+                    name: name.to_string(),
+                    description: String::new(),
+                    parameters: serde_json::json!({}),
+                })
+                .collect();
+            collect(&provider, req).await
+        };
+        assert_eq!(hand_over.tool_calls[0].name, "ask_bot");
+        assert_eq!(
+            hand_over.tool_calls[0].arguments,
+            r#"{"bot":"Reviewer","message":"帮我看看"}"#
+        );
+        let pass = collect(
+            &provider,
+            request(vec![ChatMessage::user("【Coder】谢谢，不用回了")]),
+        )
+        .await;
+        assert_eq!(pass.text, "(pass)");
+        let route = |text: &str| {
+            let mut req = request(vec![
+                ChatMessage::system("你是房间里的路由。"),
+                ChatMessage::user(format!(
+                    "【房间里的 Bot】\n- id: bot_a，名字: 助手，入口 Bot，分工: （没有写分工）\n- id: bot_b，名字: Coder，分工: 写代码\n\n【最近的对话】\nCoder：在\n\n【用户刚发的消息】\n{text}\n"
+                )),
+            ]);
+            req.tools.clear();
+            let provider = &provider;
+            async move { collect(provider, req).await.text }
+        };
+        assert!(route("让 coder 看看").await.contains(r#""bot_id":"bot_b""#));
+        assert!(route("随便聊聊").await.contains(r#""bot_id":"bot_a""#));
 
         let plain = collect(&provider, request(vec![ChatMessage::user("你好")])).await;
         assert!(plain.text.contains("你好"));

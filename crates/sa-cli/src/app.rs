@@ -64,9 +64,7 @@ impl App {
         models: impl FnOnce(&Config) -> Arc<dyn ModelRouter>,
         tune: impl FnOnce(&mut Settings),
     ) -> Result<Self> {
-        create_private_dir(data_dir.root())
-            .with_context(|| format!("无法创建数据目录 {}", data_dir.root().display()))?;
-        let lock = lock_data_dir(&data_dir.lock())?;
+        let (engine, lock) = open_state(data_dir)?;
         if write_if_missing(&data_dir.config(), DEFAULT_CONFIG_TOML)? {
             tracing::info!("已生成默认配置 {}", data_dir.config().display());
         }
@@ -90,15 +88,6 @@ impl App {
             }
         };
 
-        let store = Store::open(&data_dir.database())
-            .with_context(|| format!("无法打开数据库 {}", data_dir.database().display()))?;
-        let engine = Arc::new(Engine::new(store)?);
-        engine.ensure_defaults()?;
-        let interrupted = engine.recover_interrupted()?;
-        if interrupted > 0 {
-            tracing::info!("上次退出时有 {interrupted} 条回复没写完，已标记为中断");
-        }
-
         let models = models(&config);
         let mut settings = Settings {
             sessions_dir: data_dir.sessions(),
@@ -119,6 +108,22 @@ impl App {
             _lock: lock,
         })
     }
+}
+
+/// 锁住数据目录并打开状态库。返回的文件持有期间，别的 `sa` 进程不能用这个数据目录。
+pub fn open_state(data_dir: &DataDir) -> Result<(Arc<Engine>, std::fs::File)> {
+    create_private_dir(data_dir.root())
+        .with_context(|| format!("无法创建数据目录 {}", data_dir.root().display()))?;
+    let lock = lock_data_dir(&data_dir.lock())?;
+    let store = Store::open(&data_dir.database())
+        .with_context(|| format!("无法打开数据库 {}", data_dir.database().display()))?;
+    let engine = Arc::new(Engine::new(store)?);
+    engine.ensure_defaults()?;
+    let interrupted = engine.recover_interrupted()?;
+    if interrupted > 0 {
+        tracing::info!("上次退出时有 {interrupted} 条回复没写完，已标记为中断");
+    }
+    Ok((engine, lock))
 }
 
 /// 用真实模型时要让人知道的事：配置里的花费上限现在还拦不住调用。
@@ -148,7 +153,7 @@ fn lock_data_dir(path: &Path) -> Result<std::fs::File> {
     match file.try_lock() {
         Ok(()) => Ok(file),
         Err(std::fs::TryLockError::WouldBlock) => anyhow::bail!(
-            "这个数据目录正被另一个 sa serve 或 sa chat 使用：请先停掉它，或用 --data-dir 换一个目录"
+            "这个数据目录正被另一个 sa 进程（sa serve 或 sa chat）使用：请先停掉它，或用 --data-dir 换一个目录。sa serve 运行时，Bot 和房间请在界面的「成员」面板里管理"
         ),
         Err(std::fs::TryLockError::Error(e)) => {
             Err(e).with_context(|| format!("无法锁定 {}", path.display()))

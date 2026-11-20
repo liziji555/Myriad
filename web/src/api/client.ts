@@ -3,6 +3,8 @@ import type {
   ApprovalDecision,
   ApprovalId,
   Bot,
+  BotId,
+  CreateBotRequest,
   CreateRoomRequest,
   Health,
   Message,
@@ -10,6 +12,8 @@ import type {
   Room,
   RoomId,
   StopResponse,
+  UpdateBotRequest,
+  UpdateRoomRequest,
 } from "./types";
 
 export class ApiRequestError extends Error {
@@ -42,19 +46,33 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return response.json() as Promise<T>;
 }
 
-function postJson<T>(path: string, body: unknown): Promise<T> {
+function postJson<T>(path: string, body: unknown, method = "POST"): Promise<T> {
   return request<T>(path, {
-    method: "POST",
+    method,
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
 }
+
+const memberPath = (roomId: RoomId, botId: BotId) =>
+  `/api/rooms/${encodeURIComponent(roomId)}/members/${encodeURIComponent(botId)}`;
 
 export const api = {
   health: () => request<Health>("/api/health"),
   listRooms: () => request<Room[]>("/api/rooms"),
   listBots: () => request<Bot[]>("/api/bots"),
   createRoom: (body: CreateRoomRequest) => postJson<Room>("/api/rooms", body),
+  updateRoom: (roomId: RoomId, body: UpdateRoomRequest) =>
+    postJson<Room>(`/api/rooms/${encodeURIComponent(roomId)}`, body, "PATCH"),
+  addMember: (roomId: RoomId, botId: BotId) =>
+    request<Room>(memberPath(roomId, botId), { method: "PUT" }),
+  removeMember: (roomId: RoomId, botId: BotId) =>
+    request<Room>(memberPath(roomId, botId), { method: "DELETE" }),
+  createBot: (body: CreateBotRequest) => postJson<Bot>("/api/bots", body),
+  updateBot: (botId: BotId, body: UpdateBotRequest) =>
+    postJson<Bot>(`/api/bots/${encodeURIComponent(botId)}`, body, "PATCH"),
+  deleteBot: (botId: BotId) =>
+    request<void>(`/api/bots/${encodeURIComponent(botId)}`, { method: "DELETE" }),
   /** 房间里 `before`（某条消息的 seq）之前的一页消息；不给就是最新的一页。 */
   listMessages: (roomId: RoomId, before?: number) =>
     request<MessagePage>(

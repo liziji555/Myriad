@@ -550,3 +550,166 @@ button.sa-row:hover {
     --sa-sidebar-width: 180px;
   }
 }
+.sa-mention-menu {
+  display: grid;
+  margin: 0 0 var(--sa-space-2);
+  padding: var(--sa-space-1);
+  list-style: none;
+  border: 1px solid var(--sa-border);
+  border-radius: var(--sa-radius-md);
+  background: var(--sa-bg);
+  max-height: 12em;
+  overflow-y: auto;
+}
+.sa-mention-menu li {
+  display: flex;
+  gap: var(--sa-space-2);
+  align-items: baseline;
+  padding: var(--sa-space-1) var(--sa-space-2);
+  border-radius: var(--sa-radius-sm);
+  cursor: pointer;
+}
+.sa-mention-menu li[aria-selected="true"] {
+  background: var(--sa-active);
+}
+.sa-mention-name {
+  font-weight: 600;
+}
+.sa-mention-role {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--sa-fg-muted);
+  font-size: var(--sa-text-sm);
+}
+
+/* ---- 成员管理 ------------------------------------------------------------ */
+.sa-members {
+  display: grid;
+  gap: var(--sa-space-3);
+}
+.sa-member {
+  padding-bottom: var(--sa-space-2);
+}
+.sa-member-role {
+  margin: 0;
+  padding: 0 var(--sa-space-2) 0 calc(var(--sa-space-2) + 16px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--sa-fg-muted);
+  font-size: var(--sa-text-sm);
+}
+.sa-member-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sa-space-3);
+  padding: var(--sa-space-1) var(--sa-space-2) 0 calc(var(--sa-space-2) + 16px);
+}
+.sa-panel-heading {
+  margin: 0;
+  padding: 0 var(--sa-space-2);
+  font-size: var(--sa-text-sm);
+  font-weight: 600;
+  color: var(--sa-fg-muted);
+}
+.sa-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--sa-accent);
+  font-size: var(--sa-text-sm);
+  cursor: pointer;
+}
+.sa-link:hover:not(:disabled) {
+  text-decoration: underline;
+}
+.sa-link:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.sa-link-danger {
+  margin-left: auto;
+  color: var(--sa-danger);
+}
+.sa-form {
+  display: grid;
+  gap: var(--sa-space-3);
+}
+.sa-field {
+  display: grid;
+  gap: var(--sa-space-1);
+  font-size: var(--sa-text-sm);
+  color: var(--sa-fg-muted);
+}
+.sa-field input,
+.sa-field select,
+.sa-field textarea {
+  width: 100%;
+  padding: var(--sa-space-2);
+  border: 1px solid var(--sa-border);
+  border-radius: var(--sa-radius-sm);
+  background: var(--sa-bg);
+  color: var(--sa-fg);
+  font: inherit;
+  font-size: var(--sa-text-base);
+}
+.sa-field textarea {
+  resize: vertical;
+}
+.sa-check {
+  display: flex;
+  gap: var(--sa-space-2);
+  align-items: center;
+  font-size: var(--sa-text-sm);
+}
+.sa-form-error {
+  margin: 0;
+  font-size: var(--sa-text-sm);
+  color: var(--sa-danger);
+}
+.sa-form-actions {
+  display: flex;
+  gap: var(--sa-space-2);
+  align-items: center;
+}
+
+/* ---- 多 Bot：点名、步骤折叠、排队 ---------------------------------------- */
+.sa-mention {
+  padding: 0 2px;
+  border-radius: var(--sa-radius-sm);
+  background: color-mix(in srgb, var(--sa-accent) 14%, transparent);
+  color: var(--sa-accent);
+  font-weight: 600;
+}
+.sa-steps-toggle {
+  display: inline-flex;
+  gap: var(--sa-space-1);
+  align-items: center;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--sa-fg-muted);
+  font-size: var(--sa-text-sm);
+  cursor: pointer;
+}
+.sa-steps-toggle:disabled {
+  cursor: default;
+}
+.sa-steps-arrow {
+  width: 0;
+  height: 0;
+  border: 4px solid transparent;
+  border-left-color: currentColor;
+  transition: transform var(--sa-motion);
+}
+.sa-steps-box[data-open="true"] .sa-steps-arrow {
+  transform: rotate(90deg) translateX(2px);
+}
+.sa-room-status {
+  margin: 0;
+  padding: var(--sa-space-1) var(--sa-space-4);
+  color: var(--sa-fg-muted);
+  font-size: var(--sa-text-sm);
+}

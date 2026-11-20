@@ -10,7 +10,7 @@ mod error;
 mod routes;
 mod sse;
 
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, patch, post, put};
 use axum::{middleware, Router};
 use sa_engine::Engine;
 use sa_orchestrator::Orchestrator;
@@ -59,7 +59,16 @@ pub fn router(state: AppState) -> Router {
             "/approvals/{approval_id}/decide",
             post(routes::decide_approval),
         )
-        .route("/bots", get(routes::list_bots))
+        .route("/rooms/{room_id}", patch(routes::update_room))
+        .route(
+            "/rooms/{room_id}/members/{bot_id}",
+            put(routes::add_member).delete(routes::remove_member),
+        )
+        .route("/bots", get(routes::list_bots).post(routes::create_bot))
+        .route(
+            "/bots/{bot_id}",
+            patch(routes::update_bot).delete(routes::delete_bot),
+        )
         .route("/events", get(sse::events))
         .fallback(routes::api_not_found)
         .layer(middleware::from_fn_with_state(

@@ -61,6 +61,38 @@ pub fn get(conn: &Connection, id: &RoomId) -> Result<Option<Room>> {
     Ok(list(conn)?.into_iter().find(|room| &room.id == id))
 }
 
+/// 改房间的名字和入口 Bot。
+pub fn update(conn: &Connection, room: &Room) -> Result<()> {
+    conn.execute(
+        "UPDATE rooms SET name = ?2, host_bot_id = ?3, updated_at = ?4 WHERE id = ?1",
+        params![
+            room.id.as_str(),
+            room.name,
+            room.host_bot_id.as_ref().map(BotId::as_str),
+            room.updated_at
+        ],
+    )?;
+    Ok(())
+}
+
+/// 把 Bot 拉进房间。已经在里面时什么都不做。
+pub fn add_member(conn: &Connection, room_id: &RoomId, bot_id: &BotId, now: i64) -> Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO room_members (room_id, bot_id, joined_at) VALUES (?1, ?2, ?3)",
+        params![room_id.as_str(), bot_id.as_str(), now],
+    )?;
+    Ok(())
+}
+
+/// 把 Bot 请出房间。返回它之前是不是成员。
+pub fn remove_member(conn: &Connection, room_id: &RoomId, bot_id: &BotId) -> Result<bool> {
+    let changed = conn.execute(
+        "DELETE FROM room_members WHERE room_id = ?1 AND bot_id = ?2",
+        params![room_id.as_str(), bot_id.as_str()],
+    )?;
+    Ok(changed > 0)
+}
+
 pub fn count(conn: &Connection) -> Result<i64> {
     Ok(conn.query_row("SELECT COUNT(*) FROM rooms", [], |row| row.get(0))?)
 }

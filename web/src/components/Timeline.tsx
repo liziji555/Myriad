@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { RoomChat } from "../api/chat";
 import type { ApprovalDecision, ApprovalId, Bot, Message, ToolStep } from "../api/types";
+import { splitMentions } from "./mentions";
 
 type Decide = (id: ApprovalId, decision: ApprovalDecision) => Promise<void>;
 
@@ -143,6 +144,7 @@ function MessageItem({
   const name =
     sender.kind === "user" ? "你" : (bots.find((bot) => bot.id === sender.bot_id)?.name ?? "Bot");
   const waiting = state === "streaming" && message.content === "" && message.steps.length === 0;
+  const mentioned = message.mentions.flatMap((id) => bots.find((bot) => bot.id === id)?.name ?? []);
   return (
     <li className="sa-msg" data-sender={sender.kind} data-state={state}>
       <div className="sa-msg-head">
@@ -151,16 +153,18 @@ function MessageItem({
           {formatTime(message.created_at)}
         </time>
       </div>
-      {message.steps.length > 0 && (
-        <ul className="sa-steps" aria-label="工具调用">
-          {message.steps.map((step, index) => (
-            <StepItem key={`${step.id}-${index}`} step={step} onDecide={onDecide} />
-          ))}
-        </ul>
-      )}
+      {message.steps.length > 0 && <Steps steps={message.steps} onDecide={onDecide} />}
       {message.content !== "" && (
         <div className="sa-msg-body">
-          {message.content}
+          {splitMentions(message.content, mentioned).map((piece, index) =>
+            piece.mention ? (
+              <span key={index} className="sa-mention">
+                {piece.text}
+              </span>
+            ) : (
+              piece.text
+            ),
+          )}
           {state === "streaming" && <span className="sa-caret" aria-hidden="true" />}
         </div>
       )}
@@ -184,6 +188,44 @@ const STEP_LABEL: Record<ToolStep["state"], string> = {
   cancelled: "已停止",
   denied: "没有批准",
 };
+
+/** 需要人看一眼的步骤：还在进行、等批准，或者没做成。 */
+const NEEDS_ATTENTION: readonly ToolStep["state"][] = ["waiting", "running", "error", "denied"];
+
+/**
+ * 一条消息的工具步骤。都顺利做完时折成一行，点开才看细节；
+ * 有步骤在进行、等批准或者失败时自动展开。人手动点过之后以人的选择为准。
+ */
+function Steps({ steps, onDecide }: { steps: readonly ToolStep[]; onDecide: Decide }) {
+  const [chosen, setChosen] = useState<boolean | null>(null);
+  const attention = steps.some((step) => NEEDS_ATTENTION.includes(step.state));
+  // 等批准的卡片必须看得到，不能被折起来。
+  const mustShow = steps.some((step) => step.state === "waiting");
+  const open = mustShow || (chosen ?? attention);
+  const failed = steps.filter((step) => step.state === "error" || step.state === "denied").length;
+  const summary = failed > 0 ? `${steps.length} 步操作，${failed} 步没做成` : `${steps.length} 步操作`;
+  return (
+    <div className="sa-steps-box" data-open={open}>
+      <button
+        type="button"
+        className="sa-steps-toggle"
+        aria-expanded={open}
+        disabled={mustShow}
+        onClick={() => setChosen(!open)}
+      >
+        <span className="sa-steps-arrow" aria-hidden="true" />
+        {summary}
+      </button>
+      {open && (
+        <ul className="sa-steps" aria-label="工具调用">
+          {steps.map((step, index) => (
+            <StepItem key={`${step.id}-${index}`} step={step} onDecide={onDecide} />
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
 
 function StepItem({ step, onDecide }: { step: ToolStep; onDecide: Decide }) {
   return (

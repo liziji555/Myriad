@@ -1,9 +1,11 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   applyDelta,
   emptyChat,
   mergePage,
   resetChat,
+  removeMessage,
+  setActivity,
   upsertMessage,
   watchRoom,
   type ChatState,
@@ -12,15 +14,31 @@ import { ApiRequestError, api } from "./client";
 import type {
   ApprovalDecision,
   ApprovalId,
+  Bot,
+  BotId,
+  CreateBotRequest,
   Event,
   Message,
   MessageDelta,
+  MessageRef,
   Room,
+  RoomActivity,
   RoomId,
+  UpdateBotRequest,
+  UpdateRoomRequest,
 } from "./types";
 import { applyEvent, emptyWorkspace, type Workspace } from "./workspace";
 
 export type Phase = "loading" | "ready" | "unauthorized";
+
+export interface Team {
+  createBot(body: CreateBotRequest): Promise<Bot>;
+  updateBot(botId: BotId, body: UpdateBotRequest): Promise<void>;
+  deleteBot(botId: BotId): Promise<void>;
+  updateRoom(roomId: RoomId, body: UpdateRoomRequest): Promise<void>;
+  addMember(roomId: RoomId, botId: BotId): Promise<void>;
+  removeMember(roomId: RoomId, botId: BotId): Promise<void>;
+}
 
 export interface WorkspaceView extends Workspace {
   readonly phase: Phase;
@@ -30,6 +48,8 @@ export interface WorkspaceView extends Workspace {
   /** 每次需要重新拉消息时加一（重新连上、或者片段丢了）。 */
   readonly epoch: number;
   createRoom(name: string): Promise<Room>;
+  /** Bot 和房间成员的管理。结果先放进本地状态，事件流稍后送来同样的内容。 */
+  readonly team: Team;
   /** 打开一个房间：关注它的消息事件，并拉最新一页。失败时抛出。 */
   openRoom(roomId: RoomId): Promise<void>;
   /** 再往前拉一页。 */
@@ -42,9 +62,17 @@ export interface WorkspaceView extends Workspace {
 const SNAPSHOT_RETRY_MS = 2000;
 
 function applyChatEvent(chat: ChatState, event: Event): ChatState {
-  return event.kind === "message.created" || event.kind === "message.updated"
-    ? upsertMessage(chat, event.payload as Message)
-    : chat;
+  switch (event.kind) {
+    case "message.created":
+    case "message.updated":
+      return upsertMessage(chat, event.payload as Message);
+    case "message.deleted":
+      return removeMessage(chat, event.payload as MessageRef);
+    case "room.activity":
+      return setActivity(chat, event.payload as RoomActivity);
+    default:
+      return chat;
+  }
 }
 
 /**
@@ -155,6 +183,30 @@ export function useWorkspace(): WorkspaceView {
     return room;
   }, []);
 
+  const team = useMemo<Team>(() => {
+    // 接口返回的就是最新的样子：当成一条事件放进去，不用等事件流。
+    const apply = (kind: Event["kind"], payload: Room | Bot | { id: BotId }) =>
+      setWorkspace((current) =>
+        applyEvent(current, { seq: 0, room_id: null, kind, payload, created_at: 0 }),
+      );
+    return {
+      createBot: async (body) => {
+        const bot = await api.createBot(body);
+        apply("bot.created", bot);
+        return bot;
+      },
+      updateBot: async (botId, body) => apply("bot.updated", await api.updateBot(botId, body)),
+      deleteBot: async (botId) => {
+        await api.deleteBot(botId);
+        apply("bot.deleted", { id: botId });
+      },
+      updateRoom: async (roomId, body) => apply("room.updated", await api.updateRoom(roomId, body)),
+      addMember: async (roomId, botId) => apply("room.updated", await api.addMember(roomId, botId)),
+      removeMember: async (roomId, botId) =>
+        apply("room.updated", await api.removeMember(roomId, botId)),
+    };
+  }, []);
+
   const openRoom = useCallback(async (roomId: RoomId) => {
     activeRoom.current = roomId;
     // 先关注再拉：拉取期间事件流送来的消息会留下来，和拉到的那一页合并。
@@ -192,6 +244,7 @@ export function useWorkspace(): WorkspaceView {
     chat,
     epoch,
     createRoom,
+    team,
     openRoom,
     loadOlder,
     sendMessage,

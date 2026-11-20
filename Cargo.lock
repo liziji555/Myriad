@@ -1597,12 +1597,14 @@ name = "sa-orchestrator"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "futures-util",
  "sa-engine",
  "sa-kernel",
  "sa-llm",
  "sa-protocol",
  "sa-store",
  "sa-tools",
+ "serde",
  "serde_json",
  "tempfile",
  "thiserror",

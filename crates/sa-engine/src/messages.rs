@@ -1,11 +1,12 @@
 //! 消息：人发的一次写完，Bot 发的先建一条「正在写」的草稿，边写边广播，结束时定稿。
 
+use crate::team::find_mentions;
 use crate::{now_ms, to_json, Engine, EngineError, Result, MAX_MESSAGE_CHARS};
 use sa_protocol::{
-    BotId, EventKind, Message, MessageDelta, MessageId, MessagePage, MessageState, RoomId, Sender,
-    SessionId, StepState, ToolStep,
+    BotId, EventKind, Message, MessageDelta, MessageId, MessagePage, MessageRef, MessageState,
+    RoomActivity, RoomId, Sender, SessionId, StepState, ToolStep,
 };
-use sa_store::{events, messages, rooms, sessions, usage};
+use sa_store::{bots, events, messages, rooms, sessions, usage};
 use tokio::sync::broadcast;
 
 pub const MAX_PAGE: u32 = 200;
@@ -14,8 +15,9 @@ pub const MAX_PAGE: u32 = 200;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsageRecord {
     pub room_id: RoomId,
-    pub bot_id: BotId,
-    pub session_id: SessionId,
+    /// 哪个 Bot 花的。决定谁来接话的那次调用不属于任何 Bot。
+    pub bot_id: Option<BotId>,
+    pub session_id: Option<SessionId>,
     pub model: String,
     pub in_tokens: i64,
     pub out_tokens: i64,
@@ -33,17 +35,21 @@ impl Engine {
                 "消息不能超过 {MAX_MESSAGE_CHARS} 个字"
             )));
         }
+        // 人写的 `@名字` 在这里认出来：只认房间里启用着的成员。
         self.insert_message(
             room_id,
             Sender::User,
             content.into(),
             MessageState::Complete,
+            None,
+            0,
         )
     }
 
     /// Bot 开始写一条回复：先放一条空的「正在写」消息，之后用
     /// [`Engine::append_delta`]、[`Engine::set_steps`]、[`Engine::finish_message`] 推进。
-    pub fn begin_bot_message(&self, room_id: &RoomId, bot_id: &BotId) -> Result<Message> {
+    /// `hop` 是这条回复在 Bot 之间转到了第几手。
+    pub fn begin_bot_message(&self, room_id: &RoomId, bot_id: &BotId, hop: u32) -> Result<Message> {
         let message = self.insert_message(
             room_id,
             Sender::Bot {
@@ -51,31 +57,69 @@ impl Engine {
             },
             String::new(),
             MessageState::Streaming,
+            Some(vec![]),
+            hop,
         )?;
         self.drafts().insert(message.id.clone(), message.clone());
         Ok(message)
     }
 
+    /// Bot 对另一个 Bot 说的一句话：一次写完，房间里的人都看得到。
+    pub fn post_bot_message(
+        &self,
+        room_id: &RoomId,
+        bot_id: &BotId,
+        content: &str,
+        mentions: Vec<BotId>,
+        hop: u32,
+    ) -> Result<Message> {
+        self.insert_message(
+            room_id,
+            Sender::Bot {
+                bot_id: bot_id.clone(),
+            },
+            content.into(),
+            MessageState::Complete,
+            Some(mentions),
+            hop,
+        )
+    }
+
+    /// `mentions` 为 `None` 时从内容里的 `@名字` 认。
     fn insert_message(
         &self,
         room_id: &RoomId,
         sender: Sender,
         content: String,
         state: MessageState,
+        mentions: Option<Vec<BotId>>,
+        hop: u32,
     ) -> Result<Message> {
         let now = now_ms();
         let (message, seq) = self
             .store
             .write(|tx| {
-                if rooms::get(tx, room_id)?.is_none() {
+                let Some(room) = rooms::get(tx, room_id)? else {
                     return Ok(None);
-                }
+                };
+                let mentions = match mentions {
+                    Some(mentions) => mentions,
+                    None => {
+                        let members: Vec<_> = bots::list(tx)?
+                            .into_iter()
+                            .filter(|bot| bot.enabled && room.member_bot_ids.contains(&bot.id))
+                            .collect();
+                        find_mentions(&content, &members)
+                    }
+                };
                 let mut message = Message {
                     id: MessageId::new(),
                     seq: 0,
                     room_id: room_id.clone(),
                     sender,
                     content,
+                    mentions,
+                    hop,
                     steps: vec![],
                     state,
                     error: None,
@@ -247,6 +291,53 @@ impl Engine {
             .read(|c| messages::list_user_after(c, room_id, after_seq))?)
     }
 
+    /// 房间里 `after_seq` 之后的全部消息，人和 Bot 的都算。正在写的那些内容是落库时的样子。
+    pub fn messages_after(&self, room_id: &RoomId, after_seq: i64) -> Result<Vec<Message>> {
+        Ok(self
+            .store
+            .read(|c| messages::list_after(c, room_id, after_seq))?)
+    }
+
+    /// 撤掉一条正在写的消息（Bot 决定不说话）。界面上这条消息会消失。
+    pub fn discard_message(&self, id: &MessageId) -> Result<()> {
+        let mut drafts = self.drafts();
+        let draft = drafts
+            .remove(id)
+            .ok_or_else(|| EngineError::NotFound("这条消息已经写完了".into()))?;
+        let gone = MessageRef {
+            id: id.clone(),
+            room_id: draft.room_id.clone(),
+        };
+        let seq = self.store.write(|tx| {
+            messages::delete(tx, id)?;
+            events::append(
+                tx,
+                Some(&gone.room_id),
+                EventKind::MessageDeleted,
+                &to_json(&gone),
+                now_ms(),
+            )
+        })?;
+        drop(drafts);
+        self.publish(seq);
+        Ok(())
+    }
+
+    /// 广播房间里现在谁在说话、谁在排队。
+    pub fn record_activity(&self, activity: &RoomActivity) -> Result<()> {
+        let seq = self.store.write(|tx| {
+            events::append(
+                tx,
+                Some(&activity.room_id),
+                EventKind::RoomActivity,
+                &to_json(activity),
+                now_ms(),
+            )
+        })?;
+        self.publish(seq);
+        Ok(())
+    }
+
     /// 某个 Bot 在某个房间里的入口会话，没有就建一个。
     pub fn ensure_front_session(&self, room_id: &RoomId, bot_id: &BotId) -> Result<SessionId> {
         Ok(self
@@ -257,8 +348,8 @@ impl Engine {
     pub fn record_usage(&self, record: UsageRecord) -> Result<()> {
         let row = usage::UsageRow {
             room_id: Some(record.room_id),
-            bot_id: Some(record.bot_id),
-            session_id: Some(record.session_id),
+            bot_id: record.bot_id,
+            session_id: record.session_id,
             model: record.model,
             in_tokens: record.in_tokens,
             out_tokens: record.out_tokens,
@@ -326,7 +417,7 @@ mod tests {
     fn bot_message_streams_then_settles() {
         let (engine, room, bot) = engine();
         let mut live = engine.subscribe_live();
-        let draft = engine.begin_bot_message(&room, &bot).unwrap();
+        let draft = engine.begin_bot_message(&room, &bot, 0).unwrap();
         assert_eq!(draft.state, MessageState::Streaming);
 
         engine.append_delta(&draft.id, "你");
@@ -404,7 +495,7 @@ mod tests {
             engine.ensure_defaults().unwrap();
             let room = engine.list_rooms().unwrap().remove(0);
             let draft = engine
-                .begin_bot_message(&room.id, room.host_bot_id.as_ref().unwrap())
+                .begin_bot_message(&room.id, room.host_bot_id.as_ref().unwrap(), 0)
                 .unwrap();
             engine.append_delta(&draft.id, "写到一半");
             let step = |id: &str, state| ToolStep {

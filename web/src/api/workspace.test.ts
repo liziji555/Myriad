@@ -6,6 +6,7 @@ const bot: Bot = {
   id: "bot_1",
   name: "助手",
   kind: "assistant",
+  persona: "",
   tier: "mid",
   enabled: true,
   created_at: 1,
@@ -41,6 +42,28 @@ describe("applyEvent", () => {
     const botCreated = event(2, "bot.created", bot);
     const withBot = applyEvent(once, botCreated);
     expect(applyEvent(withBot, botCreated).bots).toEqual([bot]);
+  });
+
+  it("updates rooms and bots in place and removes deleted bots", () => {
+    let state = applyEvent(emptyWorkspace, event(1, "room.created", room("room_1", "开发")));
+    state = applyEvent(state, event(2, "room.created", room("room_2", "助理")));
+    state = applyEvent(state, event(3, "bot.created", bot));
+    const coder: Bot = { ...bot, id: "bot_2", name: "Coder" };
+    state = applyEvent(state, event(4, "bot.created", coder));
+
+    const renamed = { ...room("room_1", "新名字"), member_bot_ids: [bot.id, coder.id] };
+    state = applyEvent(state, event(5, "room.updated", renamed));
+    // 改名不改变房间在列表里的位置。
+    expect(state.rooms.map((r) => r.name)).toEqual(["助理", "新名字"]);
+    expect(state.rooms[1].member_bot_ids).toEqual([bot.id, coder.id]);
+
+    state = applyEvent(state, event(6, "bot.updated", { ...bot, enabled: false }));
+    expect(state.bots.map((b) => [b.name, b.enabled])).toEqual([
+      ["助手", false],
+      ["Coder", true],
+    ]);
+    state = applyEvent(state, event(7, "bot.deleted", { id: coder.id }));
+    expect(state.bots.map((b) => b.id)).toEqual([bot.id]);
   });
 
   it("does not mutate the previous state", () => {

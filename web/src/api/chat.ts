@@ -1,4 +1,4 @@
-import type { Message, MessageDelta, MessagePage, RoomId } from "./types";
+import type { Message, MessageDelta, MessagePage, MessageRef, RoomActivity, RoomId } from "./types";
 
 export interface RoomChat {
   /** 按 `seq` 升序。 */
@@ -7,6 +7,8 @@ export interface RoomChat {
   readonly hasMore: boolean;
   /** 最新一页拉到了没有。没拉到之前 `messages` 里只有事件流送来的消息。 */
   readonly loaded: boolean;
+  /** 现在谁在说话、谁在排队。没收到过就是没有。 */
+  readonly activity?: RoomActivity;
 }
 
 export interface ChatState {
@@ -48,6 +50,21 @@ export function upsertMessage(state: ChatState, message: Message): ChatState {
   });
 }
 
+/** 一条消息被撤掉了（Bot 决定不说话）。 */
+export function removeMessage(state: ChatState, gone: MessageRef): ChatState {
+  const room = state.rooms[gone.room_id];
+  if (!room || !room.messages.some((m) => m.id === gone.id)) return state;
+  const messages = room.messages.filter((m) => m.id !== gone.id);
+  return { ...state, rooms: { ...state.rooms, [gone.room_id]: { ...room, messages } } };
+}
+
+/** 房间里谁在说话、谁在排队变了。 */
+export function setActivity(state: ChatState, activity: RoomActivity): ChatState {
+  const room = state.rooms[activity.room_id];
+  if (!room) return state;
+  return { ...state, rooms: { ...state.rooms, [activity.room_id]: { ...room, activity } } };
+}
+
 /** 拉到的一页消息并进来。`older` 表示这是往前翻的一页，否则是最新的一页。 */
 export function mergePage(
   state: ChatState,
@@ -67,7 +84,7 @@ export function mergePage(
   const messages = [...byId.values()].sort((a, b) => a.seq - b.seq);
   const next: RoomChat = older
     ? { ...room, messages, hasMore: page.has_more }
-    : { messages, hasMore: page.has_more, loaded: true };
+    : { ...room, messages, hasMore: page.has_more, loaded: true };
   return drainPending({ ...state, rooms: { ...state.rooms, [roomId]: next } });
 }
 

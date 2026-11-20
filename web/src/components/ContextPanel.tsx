@@ -1,4 +1,6 @@
+import type { Team } from "../api/useWorkspace";
 import type { Bot, Room } from "../api/types";
+import { MembersPanel } from "./MembersPanel";
 
 export type PanelTab = "tasks" | "members" | "files" | "activity";
 
@@ -21,10 +23,12 @@ interface Props {
   onClose(): void;
   room: Room;
   members: readonly Bot[];
+  bots: readonly Bot[];
+  team: Team;
   activity: readonly ActivityNode[];
 }
 
-export function ContextPanel({ tab, onTab, onClose, room, members, activity }: Props) {
+export function ContextPanel({ tab, onTab, onClose, room, members, bots, team, activity }: Props) {
   return (
     <aside className="sa-panel" aria-label="上下文面板">
       <div className="sa-tabs" role="tablist">
@@ -49,20 +53,7 @@ export function ContextPanel({ tab, onTab, onClose, room, members, activity }: P
       <div className="sa-panel-body" role="tabpanel" id="sa-tabpanel" aria-labelledby={`sa-tab-${tab}`}>
         {tab === "tasks" && <p className="sa-panel-empty">还没有任务。</p>}
         {tab === "files" && <p className="sa-panel-empty">还没有文件。</p>}
-        {tab === "members" &&
-          (members.length === 0 ? (
-            <p className="sa-panel-empty">这个房间还没有 Bot。</p>
-          ) : (
-            <ul className="sa-list">
-              {members.map((bot) => (
-                <li key={bot.id} className="sa-row sa-row-static">
-                  <span className="sa-dot" data-state={bot.enabled ? "idle" : "off"} aria-hidden="true" />
-                  <span className="sa-row-label">{bot.name}</span>
-                  {bot.id === room.host_bot_id && <span className="sa-tag">入口</span>}
-                </li>
-              ))}
-            </ul>
-          ))}
+        {tab === "members" && <MembersPanel room={room} members={members} bots={bots} team={team} />}
         {tab === "activity" &&
           (activity.length === 0 ? (
             <p className="sa-panel-empty">还没有活动。</p>

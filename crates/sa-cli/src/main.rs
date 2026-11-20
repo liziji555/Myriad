@@ -5,6 +5,7 @@ mod doctor;
 mod models;
 mod paths;
 mod serve;
+mod team;
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -27,6 +28,16 @@ enum Command {
     Serve(serve::ServeArgs),
     /// 在终端里和 Bot 对话（和 sa serve 用同一份数据，不能同时运行）
     Chat(chat::ChatArgs),
+    /// 管理 Bot：列出、新建、修改、删除
+    Bot {
+        #[command(subcommand)]
+        command: team::BotCommand,
+    },
+    /// 管理房间：列出、新建、拉 Bot 进来、请出去、换入口 Bot
+    Room {
+        #[command(subcommand)]
+        command: team::RoomCommand,
+    },
     /// 检查配置、密钥、数据库、端口是否正常
     Doctor,
 }
@@ -36,6 +47,8 @@ fn main() -> ExitCode {
     let result = paths::DataDir::resolve(cli.data_dir).and_then(|data_dir| match cli.command {
         Command::Serve(args) => serve::run(&data_dir, args).map(|()| ExitCode::SUCCESS),
         Command::Chat(args) => chat::run(&data_dir, args),
+        Command::Bot { command } => team::run(&data_dir, team::Command::Bot(command)),
+        Command::Room { command } => team::run(&data_dir, team::Command::Room(command)),
         Command::Doctor => Ok(doctor::run(&data_dir)),
     });
     match result {
