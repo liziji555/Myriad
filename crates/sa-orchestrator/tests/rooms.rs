@@ -242,7 +242,8 @@ async fn hello_gets_a_streamed_reply_from_the_host_bot() {
             "write",
             "edit",
             "shell",
-            "todo"
+            "todo",
+            "create_task"
         ]
     );
     rig.orchestrator.shutdown().await;
