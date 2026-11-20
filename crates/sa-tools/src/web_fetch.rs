@@ -6,6 +6,7 @@ use reqwest::Url;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 const TIMEOUT: Duration = Duration::from_secs(20);
@@ -13,6 +14,9 @@ const MAX_BYTES: usize = 1024 * 1024;
 const MAX_REDIRECTS: usize = 5;
 const MAX_CHARS: usize = 20_000;
 const TEXT_WIDTH: usize = 100;
+/// 同时最多有几个网页在解析。
+const MAX_CONVERSIONS: usize = 4;
+static CONVERTING: AtomicUsize = AtomicUsize::new(0);
 
 pub struct WebFetchTool;
 
@@ -151,19 +155,55 @@ async fn fetch(mut url: Url, allow_private: bool) -> ToolResult {
             body.extend_from_slice(&chunk);
         }
         let text = if is_html {
-            let text = html2text::from_read(body.as_slice(), TEXT_WIDTH)
-                .map_err(|e| ToolError(format!("{url} 的 HTML 解析不了：{e}")))?;
-            // 转成纯文本时 <title> 会丢，单独取出来放在最前面。
-            match html_title(&String::from_utf8_lossy(&body)) {
-                Some(title) => format!("标题：{title}\n\n{text}"),
-                None => text,
-            }
+            html_to_text(body).await?
         } else {
             String::from_utf8_lossy(&body).into_owned()
         };
         return Ok(wrap(&url, &text, cut));
     }
     Err(ToolError(format!("跳转超过 {MAX_REDIRECTS} 次，已放弃。")))
+}
+
+/// 把 HTML 转成纯文本，标题放在最前面。
+///
+/// 解析在单独的线程里做：嵌套很深的网页解析起来可能要几十秒甚至更久，放在异步任务里会让
+/// 超时和停止都不起作用。调用方等不及放弃之后，线程会自己跑完再退出，不会拖住进程退出；
+/// 同时在跑的线程数有上限，到了上限就先不接新的。
+async fn html_to_text(body: Vec<u8>) -> Result<String, ToolError> {
+    struct Slot;
+    impl Drop for Slot {
+        fn drop(&mut self) {
+            CONVERTING.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+    if CONVERTING.fetch_add(1, Ordering::SeqCst) >= MAX_CONVERSIONS {
+        CONVERTING.fetch_sub(1, Ordering::SeqCst);
+        return Err(ToolError::new(
+            "前面还有几个网页没解析完，暂时抓不了新的网页，过一会儿再试。",
+        ));
+    }
+    let slot = Slot;
+    let (done, result) = tokio::sync::oneshot::channel();
+    std::thread::Builder::new()
+        .name("sa-html".into())
+        .spawn(move || {
+            let _slot = slot;
+            let _ = done.send(convert_html(&body));
+        })
+        .map_err(|e| ToolError(format!("没法开始解析网页：{e}")))?;
+    result
+        .await
+        .unwrap_or_else(|_| Err(ToolError::new("网页解析中途出错了。")))
+}
+
+fn convert_html(body: &[u8]) -> Result<String, ToolError> {
+    let text = html2text::from_read(body, TEXT_WIDTH)
+        .map_err(|e| ToolError(format!("网页的 HTML 解析不了：{e}")))?;
+    // 转成纯文本时 <title> 会丢，单独取出来放在最前面。
+    Ok(match html_title(&String::from_utf8_lossy(body)) {
+        Some(title) => format!("标题：{title}\n\n{text}"),
+        None => text,
+    })
 }
 
 /// 网页的 `<title>`，压成一行。没有或者是空的就返回 `None`。
@@ -176,14 +216,19 @@ fn html_title(html: &str) -> Option<String> {
     use html5ever::{local_name, ns, parse_document, ParseOpts};
     use markup5ever_rcdom::{Handle, NodeData, RcDom};
 
-    fn find_title(node: &Handle) -> Option<Handle> {
-        if let NodeData::Element { name, .. } = &node.data {
-            if name.ns == ns!(html) && name.local == local_name!("title") {
-                return Some(node.clone());
+    /// 按文档顺序找第一个 `<title>`。用自己的栈，不用递归：网页可以嵌套几十万层。
+    fn find_title(root: &Handle) -> Option<Handle> {
+        let mut pending = vec![root.clone()];
+        while let Some(node) = pending.pop() {
+            if let NodeData::Element { name, .. } = &node.data {
+                if name.ns == ns!(html) && name.local == local_name!("title") {
+                    return Some(node);
+                }
             }
+            // <template> 的内容不在 children 里，自然不会被找到。
+            pending.extend(node.children.borrow().iter().rev().cloned());
         }
-        // <template> 的内容不在 children 里，自然不会被找到。
-        node.children.borrow().iter().find_map(find_title)
+        None
     }
 
     let options = ParseOpts {
@@ -357,6 +402,15 @@ mod tests {
             )
             .route("/big", get(|| async { "字".repeat(MAX_CHARS + 10) }))
             .route(
+                "/deep",
+                get(|| async {
+                    (
+                        [(header::CONTENT_TYPE, "text/html")],
+                        format!("{}最里面", "<div>".repeat(1_500)),
+                    )
+                }),
+            )
+            .route(
                 "/missing",
                 get(|| async { StatusCode::NOT_FOUND.into_response() }),
             )
@@ -406,6 +460,8 @@ mod tests {
         let big = fetch("/big").await.unwrap();
         assert!(big.contains(&format!("只有前 {MAX_CHARS} 字")));
         assert!(big.chars().count() < WebFetchTool.max_result_chars());
+
+        assert!(fetch("/deep").await.unwrap().contains("最里面"));
 
         assert!(fetch("/missing").await.unwrap_err().0.contains("HTTP 404"));
         assert!(fetch("/image").await.unwrap_err().0.contains("不是文本"));
@@ -466,6 +522,13 @@ mod tests {
             .as_deref(),
             Some("真标题 <b>不是标签</b>")
         );
+        // 嵌套很深的网页不会把栈撑爆（解析器对深度是平方级的慢，这里不用太深）。
+        let deep = "<div>".repeat(3_000);
+        assert_eq!(html_title(&deep), None);
+        assert_eq!(
+            html_title(&format!("{deep}<title>深处的标题</title>")).as_deref(),
+            Some("深处的标题")
+        );
         // 只认第一个；正文里的（SVG 图标的）不算。
         assert_eq!(
             html_title("<title>第一个</title><title>第二个</title>").as_deref(),
@@ -493,6 +556,26 @@ mod tests {
             .as_deref(),
             Some("网页标题")
         );
+    }
+
+    /// 解析很慢的网页不能卡住调用方：超时照常生效，占用的名额在解析结束后归还。
+    #[tokio::test]
+    async fn slow_html_conversion_does_not_block_the_caller() {
+        let deep = format!("{}最里面", "<div>".repeat(6_000)).into_bytes();
+        let started = std::time::Instant::now();
+        let waited = tokio::time::timeout(Duration::from_millis(100), html_to_text(deep)).await;
+        assert!(waited.is_err(), "这么深的网页不该在 100 毫秒内解析完");
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "{:?}",
+            started.elapsed()
+        );
+
+        // 放弃等待之后，别的网页照常能解析。
+        let quick = html_to_text(b"<title>T</title><p>hi</p>".to_vec())
+            .await
+            .unwrap();
+        assert_eq!(quick.trim(), "标题：T\n\nhi");
     }
 
     #[test]
