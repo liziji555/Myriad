@@ -756,7 +756,7 @@ async fn long_conversation_is_compacted_and_survives_a_restart() {
 #[tokio::test]
 async fn context_limit_is_reported_on_the_message() {
     let dir = tempfile::tempdir().unwrap();
-    let replies = vec![MockReply::Fail(sa_llm::LlmError::BadRequest("太长".into()))];
+    let replies = vec![MockReply::text("不会用到")];
     let rig = build(
         dir.path(),
         replies,
@@ -772,7 +772,9 @@ async fn context_limit_is_reported_on_the_message() {
         reply.error.as_deref().unwrap().contains("对话太长"),
         "{reply:?}"
     );
-    assert_eq!(reply.steps[0].state, StepState::Error);
+    // 刚发的话不会被压缩成摘要，也没有别的可压缩：不白调模型。
+    assert!(reply.steps.is_empty(), "{reply:?}");
+    assert!(rig.provider.requests().is_empty());
     rig.orchestrator.shutdown().await;
 }
 

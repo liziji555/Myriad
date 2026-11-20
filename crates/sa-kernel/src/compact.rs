@@ -110,6 +110,7 @@ pub(crate) struct Plan {
 /// 决定哪些留下、哪些写成摘要。没有东西可压缩时返回 `None`。
 ///
 /// 从最新的一条往回数，在 `keep_budget` 以内的留下；切口不会落在工具调用和它的结果中间。
+/// 人刚说的、模型还没回应的话一定留下，再长也不压缩：模型要回答的是原话，不是它的摘要。
 pub(crate) fn plan(
     transcript: &Transcript,
     keep_budget: usize,
@@ -119,6 +120,10 @@ pub(crate) fn plan(
     let start = transcript.live_start();
     let mut cut = entries.len();
     let mut total = 0;
+    while cut > start && matches!(entries[cut - 1].body, EntryBody::User { .. }) {
+        total += estimate_entry(&entries[cut - 1].body);
+        cut -= 1;
+    }
     while cut > start {
         total += estimate_entry(&entries[cut - 1].body);
         if total > keep_budget {
@@ -328,6 +333,27 @@ mod tests {
         let plan = plan(&transcript, 16, 100_000).unwrap();
         assert_eq!(plan.kept, 0);
         assert!(plan.text.contains("结果二"));
+    }
+
+    #[test]
+    fn plan_always_keeps_what_the_user_just_said() {
+        let (_dir, log) = transcript(vec![
+            user("以前的问题"),
+            says("以前的回答"),
+            user(&"刚贴的一大段".repeat(500)),
+            user("还有一句"),
+        ]);
+        // 预算远小于刚发的这两条，它们也要原样留下。
+        let made = plan(&log, 10, 100_000).unwrap();
+        assert_eq!(made.kept, 2);
+        assert_eq!(
+            made.text,
+            "【对话记录】\n用户：以前的问题\n助手：以前的回答\n"
+        );
+
+        // 只有刚说的话：没有可以压缩的。
+        let (_dir, only) = transcript(vec![user(&"长".repeat(5_000))]);
+        assert_eq!(plan(&only, 10, 100_000), None);
     }
 
     #[test]
