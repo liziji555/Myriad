@@ -262,7 +262,7 @@ pub struct TeamTemplate {
 }
 
 /// 导入的结果。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct ImportReport {
     /// 新建的 Bot。
