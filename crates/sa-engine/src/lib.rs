@@ -3,6 +3,7 @@
 //! 约定：所有状态变更都经过这里，并且「改状态」和「记事件」在同一个事务里。
 //! 这一层不调用模型、不发 HTTP。
 
+mod audit;
 mod budget;
 pub mod cron;
 mod external;
@@ -22,6 +23,9 @@ use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{broadcast, watch};
 
+pub use audit::{
+    Audit, AuditFilter, AUDIT_KEEP_DAYS, MAX_AUDIT_DETAIL_CHARS, MAX_AUDIT_SUMMARY_CHARS,
+};
 pub use budget::{micros_to_cost, NewNotice, TaskSpend, UsageBreakdown};
 pub use external::{Incoming, IncomingKind, Receipt, PAIRING_TTL_MS};
 pub use messages::UsageRecord;
