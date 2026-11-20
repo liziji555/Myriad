@@ -4,6 +4,7 @@
 //! 这一层不调用模型、不发 HTTP。
 
 mod budget;
+pub mod cron;
 mod messages;
 mod rules;
 mod tasks;
