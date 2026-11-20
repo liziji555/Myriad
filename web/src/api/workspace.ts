@@ -18,5 +18,8 @@ export function applyEvent(state: Workspace, event: Event): Workspace {
       const bot = event.payload as Bot;
       return { ...state, bots: [...state.bots.filter((b) => b.id !== bot.id), bot] };
     }
+    default:
+      // 消息类事件归 chat.ts 管。
+      return state;
   }
 }
