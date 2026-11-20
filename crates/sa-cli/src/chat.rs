@@ -58,7 +58,7 @@ async fn ctrl_c() {
 fn pick_room(app: &App, wanted: Option<&str>) -> Result<Room> {
     let mut rooms = app.engine.list_rooms()?;
     // 按创建时间排，第一个是默认房间。
-    rooms.sort_by(|a, b| (a.created_at, a.id.to_string()).cmp(&(b.created_at, b.id.to_string())));
+    rooms.sort_by_key(|room| (room.created_at, room.id.to_string()));
     let Some(wanted) = wanted else {
         return rooms.into_iter().next().context("还没有房间");
     };
