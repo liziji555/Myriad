@@ -93,6 +93,7 @@ impl Tool for ReadTool {
             let start = input.offset.unwrap_or(1).max(1);
             let limit = input.limit.unwrap_or(DEFAULT_LINES).max(1);
             let mut out = String::new();
+            let mut out_chars = 0usize;
             let mut number = 0usize;
             let mut shown_lines = 0usize;
             let mut stopped_early = false;
@@ -107,21 +108,30 @@ impl Tool for ReadTool {
                 if number < start {
                     continue;
                 }
-                if shown_lines >= limit || out.len() >= MAX_CHARS {
+                if shown_lines >= limit {
                     // 只需要知道「后面还有」，不必为了数总行数把整个文件读完。
                     stopped_early = true;
                     break;
                 }
                 let line = String::from_utf8_lossy(&raw);
                 let line = line.trim_end_matches(['\n', '\r']);
-                out.push_str(&format!("{number:>6}\t"));
+                let mut numbered = format!("{number:>6}\t");
                 if line.chars().count() > MAX_LINE_CHARS {
-                    out.extend(line.chars().take(MAX_LINE_CHARS));
-                    out.push_str(" …（这一行太长，后面省略）");
+                    numbered.extend(line.chars().take(MAX_LINE_CHARS));
+                    numbered.push_str(" …（这一行太长，后面省略）");
                 } else {
-                    out.push_str(line);
+                    numbered.push_str(line);
                 }
-                out.push('\n');
+                numbered.push('\n');
+                // 放不下就整行留给下一页。超出上限的结果会被从中间截掉，
+                // 而尾注里的 offset 是按「这些行都给全了」算的，那样被截掉的行就再也读不到了。
+                let size = numbered.chars().count();
+                if out_chars + size > MAX_CHARS && shown_lines > 0 {
+                    stopped_early = true;
+                    break;
+                }
+                out.push_str(&numbered);
+                out_chars += size;
                 shown_lines += 1;
             }
             let last_shown = start + shown_lines.saturating_sub(1);
@@ -219,6 +229,45 @@ mod tests {
         let out = read(dir.path(), json!({"path": "big.txt"})).await.unwrap();
         assert!(out.len() < ReadTool.max_result_chars());
         assert!(out.contains("后面还有"));
+    }
+
+    /// 每页都不超过上限（超了会被内核从中间截掉），并且顺着尾注的 offset 读下去一行都不漏。
+    #[tokio::test]
+    async fn following_the_offset_hint_never_skips_a_line() {
+        let dir = tempfile::tempdir().unwrap();
+        // 长行、中文、短行混在一起：最容易在上限附近多塞一行。
+        let body: String = (1..=400)
+            .map(|n| match n % 3 {
+                0 => format!("L{n} {}\n", "长".repeat(1990)),
+                1 => format!("L{n} {}\n", "x".repeat(700)),
+                _ => format!("L{n}\n"),
+            })
+            .collect();
+        fs::write(dir.path().join("mixed.txt"), body).unwrap();
+
+        let mut seen = vec![];
+        let mut offset = 1usize;
+        loop {
+            let out = read(dir.path(), json!({"path": "mixed.txt", "offset": offset}))
+                .await
+                .unwrap();
+            assert!(
+                out.chars().count() <= ReadTool.max_result_chars(),
+                "第 {offset} 行起的那一页超了"
+            );
+            seen.extend(
+                out.lines()
+                    .filter_map(|line| line.split_once('\t'))
+                    .filter_map(|(number, _)| number.trim().parse::<usize>().ok()),
+            );
+            match out.rsplit_once("offset=") {
+                Some((_, rest)) if out.contains("后面还有") => {
+                    offset = rest.trim_end_matches('）').parse().unwrap();
+                }
+                _ => break,
+            }
+        }
+        assert_eq!(seen, (1..=400).collect::<Vec<_>>());
     }
 
     #[tokio::test]
