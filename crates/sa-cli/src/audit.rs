@@ -34,7 +34,7 @@ pub struct AuditArgs {
 pub fn run(data_dir: &DataDir, args: AuditArgs) -> Result<ExitCode> {
     init_logging(tracing::Level::WARN);
     let (engine, _lock) = open_state(data_dir)?;
-    let filter = AuditFilter {
+    let mut filter = AuditFilter {
         room_id: match &args.room {
             Some(wanted) => Some(find_room(&engine, wanted)?.id),
             None => None,
@@ -46,25 +46,47 @@ pub fn run(data_dir: &DataDir, args: AuditArgs) -> Result<ExitCode> {
         action: args.action.clone(),
         before: None,
     };
-    let page = engine.list_audit(&filter, args.limit)?;
+    let (entries, has_more) = collect(&engine, &mut filter, args.limit)?;
     let mut out = std::io::stdout();
     if args.json {
-        for entry in &page.entries {
+        for entry in &entries {
             writeln!(out, "{}", serde_json::to_string(entry)?)?;
         }
         return Ok(ExitCode::SUCCESS);
     }
-    if page.entries.is_empty() {
+    if entries.is_empty() {
         writeln!(out, "没有符合条件的审计记录。")?;
         return Ok(ExitCode::SUCCESS);
     }
-    for entry in &page.entries {
+    for entry in &entries {
         print(entry, &when(entry.at), &mut out)?;
     }
-    if page.has_more {
+    if has_more {
         writeln!(out, "更早的还有；用 --limit 多看几条。")?;
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// 取最新的 `limit` 条。一页装不下就接着往前翻，要多少给多少。返回这些记录，以及更早的还有没有。
+fn collect(
+    engine: &Engine,
+    filter: &mut AuditFilter,
+    limit: u32,
+) -> Result<(Vec<AuditEntry>, bool)> {
+    let limit = limit.max(1) as usize;
+    let mut entries: Vec<AuditEntry> = vec![];
+    loop {
+        let want = (limit - entries.len()).min(u32::MAX as usize) as u32;
+        let page = engine.list_audit(filter, want)?;
+        let Some(oldest) = page.entries.last() else {
+            return Ok((entries, false));
+        };
+        filter.before = Some(oldest.id);
+        entries.extend(page.entries);
+        if entries.len() >= limit || !page.has_more {
+            return Ok((entries, page.has_more));
+        }
+    }
 }
 
 /// 任务 ID 可以只写开头几位。任务删不掉，所以审计里出现过的任务都找得到。
@@ -161,6 +183,23 @@ mod tests {
              2026-01-02 03:04:05  你  [approval.allowed]  Coder 要「执行 cargo test」：允许一次\n\
              2026-01-02 03:04:05  Coder  [tool.shell]  执行 cargo test\n    cargo test\n    --workspace\n"
         );
+        // 要的比一页多：接着往前翻，要多少给多少，不重不漏。
+        for n in 0..450 {
+            engine.audit(Audit::user("bot.updated", format!("第 {n} 次")));
+        }
+        let mut all = AuditFilter {
+            action: Some("bot.".into()),
+            ..Default::default()
+        };
+        let (entries, has_more) = collect(&engine, &mut all, 420).unwrap();
+        assert_eq!(entries.len(), 420);
+        assert!(has_more);
+        assert_eq!(entries[0].summary, "第 449 次");
+        assert_eq!(entries[419].summary, "第 30 次");
+        assert!(entries.windows(2).all(|pair| pair[0].id > pair[1].id));
+        let mut all = AuditFilter::default();
+        let (entries, has_more) = collect(&engine, &mut all, 1_000).unwrap();
+        assert_eq!((entries.len(), has_more), (453, false));
         // 任务 ID 对不上时说清楚。
         let error = find_task(&engine, "task_nope").unwrap_err().to_string();
         assert!(
