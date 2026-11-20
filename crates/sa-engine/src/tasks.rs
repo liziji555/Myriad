@@ -528,3 +528,204 @@ fn card(
         updated_at: now,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sa_protocol::ReportStatus;
+    use sa_store::Store;
+
+    fn engine() -> (Engine, RoomId, BotId) {
+        let engine = Engine::new(Store::open_in_memory().unwrap()).unwrap();
+        engine.ensure_defaults().unwrap();
+        let room = engine.list_rooms().unwrap().remove(0);
+        let bot = room.host_bot_id.clone().unwrap();
+        (engine, room.id, bot)
+    }
+
+    fn new_task(room_id: &RoomId, owner: Option<&BotId>) -> NewTask {
+        NewTask {
+            room_id: room_id.clone(),
+            title: "修登录 bug".into(),
+            scope: "Safari 上登录按钮点了没反应".into(),
+            acceptance: "测试通过".into(),
+            owner_bot_id: owner.cloned(),
+            created_by: Sender::User,
+        }
+    }
+
+    fn done(summary: &str) -> RunOutcome {
+        RunOutcome {
+            state: RunState::Succeeded,
+            report: Some(Report {
+                status: ReportStatus::Done,
+                summary: summary.into(),
+            }),
+            error: None,
+            task_state: Some(TaskState::Review),
+            note: String::new(),
+            artifacts: Some(vec![(
+                ArtifactKind::File,
+                "src/login.rs".into(),
+                "修改".into(),
+            )]),
+        }
+    }
+
+    #[test]
+    fn a_task_goes_from_open_through_a_run_to_done() {
+        let (engine, room_id, bot) = engine();
+        let task = engine.create_task(new_task(&room_id, Some(&bot))).unwrap();
+        assert_eq!(task.state, TaskState::Open);
+
+        let (run, message, _session) = engine.start_run(&task.id, &bot).unwrap();
+        assert_eq!(run.attempt, 1);
+        assert_eq!(message.kind, MessageKind::Run);
+        assert_eq!(message.state, MessageState::Streaming);
+        assert_eq!(engine.get_task(&task.id).unwrap().state, TaskState::Working);
+        // 同一个任务不能同时再开一次运行。
+        assert!(engine.start_run(&task.id, &bot).is_err());
+
+        let task = engine.finish_run(&run.id, done("修好了")).unwrap();
+        assert_eq!(task.state, TaskState::Review);
+        assert_eq!(task.artifacts.len(), 1);
+        engine
+            .finish_message(&message.id, MessageState::Complete, None)
+            .unwrap();
+
+        // 时间线上依次是：任务卡、运行过程、交付卡。
+        let page = engine.list_messages(&room_id, None, 50).unwrap();
+        let kinds: Vec<_> = page.messages.iter().map(|m| m.kind).collect();
+        assert_eq!(
+            kinds,
+            [MessageKind::Task, MessageKind::Run, MessageKind::Delivery]
+        );
+        assert_eq!(page.messages[2].content, "修好了");
+        assert_eq!(page.messages[2].run_id, Some(run.id.clone()));
+        assert!(page
+            .messages
+            .iter()
+            .all(|m| m.task_id.as_ref() == Some(&task.id)));
+        // 人开的任务卡不算人说的话，不会引出 Bot 的回复。
+        assert!(engine.user_messages_after(&room_id, 0).unwrap().is_empty());
+
+        let task = engine.move_task(&task.id, TaskState::Done, "").unwrap();
+        assert_eq!(task.state, TaskState::Done);
+        assert!(engine.move_task(&task.id, TaskState::Open, "").is_err());
+        let runs = engine.task_runs(&task.id).unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].state, RunState::Succeeded);
+    }
+
+    #[test]
+    fn rejecting_reopens_the_task_and_carries_the_note_to_the_next_run() {
+        let (engine, room_id, bot) = engine();
+        let task = engine.create_task(new_task(&room_id, Some(&bot))).unwrap();
+        let (run, _, session) = engine.start_run(&task.id, &bot).unwrap();
+        engine.finish_run(&run.id, done("第一版")).unwrap();
+
+        let task = engine
+            .resume_task(&task.id, "还要兼容旧版本", None)
+            .unwrap();
+        assert_eq!(task.state, TaskState::Open);
+        assert_eq!(task.note, "还要兼容旧版本");
+        let (second, _, again) = engine.start_run(&task.id, &bot).unwrap();
+        assert_eq!(second.attempt, 2);
+        // 重做时接着同一个工作会话。
+        assert_eq!(session, again);
+        assert_eq!(engine.take_task_input(&task.id).unwrap(), "还要兼容旧版本");
+        assert_eq!(engine.take_task_input(&task.id).unwrap(), "");
+
+        // 正在做的时候人补一句：只带话，不改状态。
+        let task = engine.resume_task(&task.id, "顺便更新文档", None).unwrap();
+        assert_eq!(task.state, TaskState::Working);
+        assert!(engine.resume_task(&task.id, "", None).is_err());
+        assert_eq!(engine.take_task_input(&task.id).unwrap(), "顺便更新文档");
+
+        // 重做之后文件类交付物换成新的一份。
+        let mut outcome = done("第二版");
+        outcome.artifacts = Some(vec![(
+            ArtifactKind::File,
+            "src/compat.rs".into(),
+            "新增".into(),
+        )]);
+        let task = engine.finish_run(&second.id, outcome).unwrap();
+        let files: Vec<_> = task
+            .artifacts
+            .iter()
+            .map(|a| a.reference.as_str())
+            .collect();
+        assert_eq!(files, ["src/compat.rs"]);
+    }
+
+    #[test]
+    fn a_draft_needs_an_owner_from_the_room_before_it_can_start() {
+        let (engine, room_id, bot) = engine();
+        let task = engine.create_task(new_task(&room_id, None)).unwrap();
+        assert_eq!(task.state, TaskState::Draft);
+        assert!(engine.start_run(&task.id, &bot).is_err());
+        assert!(engine.resume_task(&task.id, "", None).is_err());
+
+        let outsider = engine
+            .create_bot("外人", sa_protocol::ModelTier::Mid, "")
+            .unwrap();
+        assert!(engine
+            .resume_task(&task.id, "", Some(&outsider.id))
+            .is_err());
+        assert!(engine
+            .create_task(new_task(&room_id, Some(&outsider.id)))
+            .is_err());
+
+        let task = engine.resume_task(&task.id, "", Some(&bot)).unwrap();
+        assert_eq!(task.state, TaskState::Open);
+        assert_eq!(task.owner_bot_id, Some(bot));
+    }
+
+    #[test]
+    fn a_decision_made_by_a_person_during_the_run_wins() {
+        let (engine, room_id, bot) = engine();
+        let task = engine.create_task(new_task(&room_id, Some(&bot))).unwrap();
+        let (run, _, _) = engine.start_run(&task.id, &bot).unwrap();
+        engine
+            .move_task(&task.id, TaskState::Cancelled, "不做了")
+            .unwrap();
+
+        let mut outcome = done("其实做完了");
+        outcome.state = RunState::Cancelled;
+        outcome.report = None;
+        let task = engine.finish_run(&run.id, outcome).unwrap();
+        assert_eq!(task.state, TaskState::Cancelled);
+        assert_eq!(task.note, "不做了");
+    }
+
+    #[test]
+    fn restart_marks_running_runs_interrupted_and_reopens_their_tasks() {
+        let (engine, room_id, bot) = engine();
+        let task = engine.create_task(new_task(&room_id, Some(&bot))).unwrap();
+        let (run, _, _) = engine.start_run(&task.id, &bot).unwrap();
+
+        assert_eq!(engine.recover_runs().unwrap(), 1);
+        assert_eq!(engine.recover_runs().unwrap(), 0);
+        let task = engine.get_task(&task.id).unwrap();
+        assert_eq!(task.state, TaskState::Open);
+        let runs = engine.task_runs(&task.id).unwrap();
+        assert_eq!(runs[0].id, run.id);
+        assert_eq!(runs[0].state, RunState::Interrupted);
+        assert!(engine.take_task_input(&task.id).unwrap().contains("中断"));
+    }
+
+    #[test]
+    fn a_room_holds_a_limited_number_of_unfinished_tasks() {
+        let (engine, room_id, bot) = engine();
+        for _ in 0..MAX_ACTIVE_TASKS {
+            engine.create_task(new_task(&room_id, Some(&bot))).unwrap();
+        }
+        let error = engine
+            .create_task(new_task(&room_id, Some(&bot)))
+            .unwrap_err();
+        assert!(error.to_string().contains("没做完的任务"), "{error}");
+        let mut blank = new_task(&room_id, Some(&bot));
+        blank.scope = "  ".into();
+        assert!(engine.create_task(blank).is_err());
+    }
+}
