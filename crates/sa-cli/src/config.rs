@@ -218,7 +218,12 @@ impl Config {
                     .iter()
                     .filter_map(|key| Some((key.clone(), env(key)?)))
                     .collect();
-                vars.extend(server.env.iter().map(|(key, value)| (key.clone(), value.clone())));
+                vars.extend(
+                    server
+                        .env
+                        .iter()
+                        .map(|(key, value)| (key.clone(), value.clone())),
+                );
                 sa_tools::mcp::McpSpec {
                     name: name.clone(),
                     command: server.command.clone(),
@@ -239,7 +244,8 @@ impl Config {
             }
         }
         for (name, server) in &self.mcp {
-            let plain = |c: char| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_';
+            let plain =
+                |c: char| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_';
             if name.is_empty() || name.len() > 24 || !name.chars().all(plain) {
                 bail!("[mcp.{name}] 的名字只能用小写字母、数字、横线和下划线，最多 24 个字符");
             }
