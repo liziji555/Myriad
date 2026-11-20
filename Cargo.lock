@@ -1790,6 +1790,7 @@ dependencies = [
  "http-body-util",
  "mime_guess",
  "rust-embed",
+ "sa-adapters",
  "sa-engine",
  "sa-llm",
  "sa-orchestrator",

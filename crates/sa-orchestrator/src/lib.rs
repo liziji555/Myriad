@@ -119,6 +119,8 @@ pub(crate) struct Shared {
     pub works: work::Works,
     /// 这个进程在租约上签的名字。
     pub owner: String,
+    /// 连上 Telegram 之后，机器人在那边的用户名。
+    pub telegram_username: Mutex<Option<String>>,
     /// 正在做定时任务的房间。一个房间里的定时任务一个一个来。
     pub routine_rooms: Mutex<std::collections::HashSet<RoomId>>,
 }
@@ -167,6 +169,7 @@ impl Orchestrator {
                 approvals: Mutex::new(HashMap::new()),
                 works: work::Works::default(),
                 owner: format!("sa-{}", sa_protocol::RoutineId::new()),
+                telegram_username: Mutex::default(),
                 routine_rooms: Mutex::default(),
             }),
             rooms: Mutex::new(HashMap::new()),
@@ -209,6 +212,11 @@ impl Orchestrator {
             self.arrived(message);
         }
         Ok(receipt)
+    }
+
+    /// 机器人在 Telegram 上的用户名。还没连上时是 `None`。
+    pub fn telegram_username(&self) -> Option<String> {
+        self.shared.telegram_username.lock().unwrap().clone()
     }
 
     /// 房间里来了一条要有人回应的消息：叫醒房间。
