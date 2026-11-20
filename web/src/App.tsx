@@ -1,8 +1,10 @@
 import { useEffect, useState } from "react";
+import { STATE_LABEL } from "./api/tasks";
 import { api } from "./api/client";
 import type { RoomId, TaskId } from "./api/types";
 import { useWorkspace } from "./api/useWorkspace";
 import { noticesFor } from "./api/workspace";
+import { CommandPalette, type PaletteEntry } from "./components/CommandPalette";
 import { Composer } from "./components/Composer";
 import { ContextPanel, type ActivityNode, type PanelTab } from "./components/ContextPanel";
 import { Notices } from "./components/Notices";
@@ -30,6 +32,19 @@ function Shell() {
   const [version, setVersion] = useState("");
   const [loadError, setLoadError] = useState<string | null>(null);
   const [retry, setRetry] = useState(0);
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [createSignal, setCreateSignal] = useState(0);
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        setPaletteOpen((open) => !open);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   useEffect(() => {
     api.health().then((health) => setVersion(health.version), () => {});
@@ -110,8 +125,85 @@ function Shell() {
     });
   };
 
+  const tabAction = (id: PanelTab, title: string): PaletteEntry => ({
+    id: `action:tab-${id}`,
+    group: "action",
+    title,
+    run: () => showPanel(id),
+  });
+  const paletteEntries: PaletteEntry[] = [
+    ...workspace.rooms.map(
+      (r): PaletteEntry => ({
+        id: `room:${r.id}`,
+        group: "room",
+        title: r.name,
+        hint: r.id === room?.id ? "正开着" : undefined,
+        run: () => setSelected(r.id),
+      }),
+    ),
+    ...workspace.bots.map(
+      (bot): PaletteEntry => ({
+        id: `bot:${bot.id}`,
+        group: "bot",
+        title: bot.name,
+        hint: bot.persona.split("\n")[0] || (bot.enabled ? undefined : "已停用"),
+        run: () => showPanel("members"),
+      }),
+    ),
+    // 只有打开过的房间的任务在手上。
+    ...Object.values(workspace.board.rooms)
+      .flat()
+      .map(
+        (task): PaletteEntry => ({
+          id: `task:${task.id}`,
+          group: "task",
+          title: task.title,
+          hint: [workspace.rooms.find((r) => r.id === task.room_id)?.name, STATE_LABEL[task.state]]
+            .filter(Boolean)
+            .join(" · "),
+          run: () => {
+            setSelected(task.room_id);
+            setFocusTask(task.id);
+            showPanel("tasks");
+          },
+        }),
+      ),
+    {
+      id: "action:new-room",
+      group: "action",
+      title: "新建房间",
+      run: () => setCreateSignal((n) => n + 1),
+    },
+    ...(room
+      ? [
+          tabAction("tasks", "打开任务页"),
+          tabAction("routines", "打开定时任务"),
+          tabAction("members", "管理 Bot 和房间成员"),
+          tabAction("usage", "看用量和花费"),
+          tabAction("activity", "看任务图"),
+          {
+            id: "action:toggle-panel",
+            group: "action" as const,
+            title: panelOpen ? "收起右侧栏" : "展开右侧栏",
+            run: () => setPanelOpen((open) => !open),
+          },
+        ]
+      : []),
+    ...(room && replying
+      ? [
+          {
+            id: "action:stop",
+            group: "action" as const,
+            title: "停止正在进行的回复",
+            run: () => void workspace.stopReply(room.id),
+          },
+        ]
+      : []),
+  ];
+
   return (
     <div className="sa-shell" data-panel-open={panelOpen}>
+      {paletteOpen && <CommandPalette entries={paletteEntries} onClose={() => setPaletteOpen(false)} />}
       <Sidebar
         rooms={workspace.rooms}
         bots={workspace.bots}
@@ -120,6 +212,8 @@ function Shell() {
         version={version}
         onSelect={setSelected}
         onCreateRoom={async (name) => setSelected((await workspace.createRoom(name)).id)}
+        createSignal={createSignal}
+        onOpenPalette={() => setPaletteOpen(true)}
       />
       <main className="sa-main">
         {room ? (
@@ -198,6 +292,8 @@ function Shell() {
           taskActions={workspace.tasks}
           focusTask={focusTask}
           onFocusTask={setFocusTask}
+          routines={workspace.routines.filter((routine) => routine.room_id === room.id)}
+          routineActions={workspace.routineActions}
           activity={demoNodes}
           usageKey={workspace.notices.length}
         />

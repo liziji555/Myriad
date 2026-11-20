@@ -1593,6 +1593,7 @@ name = "sa-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "clap",
  "dirs",
  "sa-engine",
@@ -1616,6 +1617,7 @@ dependencies = [
 name = "sa-engine"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "sa-protocol",
  "sa-store",
  "serde",

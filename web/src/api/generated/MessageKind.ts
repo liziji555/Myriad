@@ -3,4 +3,4 @@
 /**
  * 一条消息在时间线上是什么。
  */
-export type MessageKind = "chat" | "task" | "run" | "delivery";
+export type MessageKind = "chat" | "task" | "run" | "delivery" | "routine";

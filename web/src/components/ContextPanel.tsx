@@ -1,11 +1,13 @@
 import type { TaskBoard } from "../api/tasks";
-import type { TaskActions, Team } from "../api/useWorkspace";
-import type { Bot, Room, TaskId } from "../api/types";
+import type { RoutineActions, TaskActions, Team } from "../api/useWorkspace";
+import type { Bot, Room, Routine, TaskId } from "../api/types";
 import { MembersPanel } from "./MembersPanel";
+import { RoutinesPanel } from "./RoutinesPanel";
+import { TaskGraph } from "./TaskGraph";
 import { TasksPanel } from "./TasksPanel";
 import { UsagePanel } from "./UsagePanel";
 
-export type PanelTab = "tasks" | "members" | "usage" | "files" | "activity";
+export type PanelTab = "tasks" | "routines" | "members" | "usage" | "files" | "activity";
 
 export interface ActivityNode {
   id: string;
@@ -15,6 +17,7 @@ export interface ActivityNode {
 
 const TABS: readonly { id: PanelTab; label: string }[] = [
   { id: "tasks", label: "任务" },
+  { id: "routines", label: "定时" },
   { id: "members", label: "成员" },
   { id: "usage", label: "用量" },
   { id: "files", label: "文件" },
@@ -34,6 +37,9 @@ interface Props {
   /** 任务页里展开的是哪个任务。 */
   focusTask: TaskId | null;
   onFocusTask(taskId: TaskId | null): void;
+  /** 这个房间的定时任务。 */
+  routines: readonly Routine[];
+  routineActions: RoutineActions;
   activity: readonly ActivityNode[];
   /** 变了就让「用量」页重新拉一次。 */
   usageKey: number;
@@ -51,6 +57,8 @@ export function ContextPanel({
   taskActions,
   focusTask,
   onFocusTask,
+  routines,
+  routineActions,
   activity,
   usageKey,
 }: Props) {
@@ -87,27 +95,48 @@ export function ContextPanel({
             onFocus={onFocusTask}
           />
         )}
+        {tab === "routines" && (
+          <RoutinesPanel
+            room={room}
+            members={members.filter((bot) => bot.enabled)}
+            bots={bots}
+            routines={routines}
+            actions={routineActions}
+          />
+        )}
         {tab === "usage" && <UsagePanel refreshKey={usageKey} />}
         {tab === "files" && <p className="sa-panel-empty">还没有文件。</p>}
         {tab === "members" && <MembersPanel room={room} members={members} bots={bots} team={team} />}
-        {tab === "activity" &&
-          (activity.length === 0 ? (
-            <p className="sa-panel-empty">还没有活动。</p>
-          ) : (
-            <ol className="sa-nodes">
-              {activity.map((node) => (
-                <li key={node.id} className="sa-node" data-node-id={node.id} data-arrived={node.arrived}>
-                  {!node.arrived && (
-                    <svg className="light-running-border" aria-hidden="true">
-                      <rect x="1" y="1" width="calc(100% - 2px)" height="calc(100% - 2px)" rx="8" pathLength="100" />
-                    </svg>
-                  )}
-                  <span className="sa-row-label">{node.title}</span>
-                  <span className="sa-row-meta">{node.arrived ? "已到达" : "飞行中"}</span>
-                </li>
-              ))}
-            </ol>
-          ))}
+        {tab === "activity" && (
+          <>
+            <TaskGraph
+              key={room.id}
+              tasks={board.rooms[room.id] ?? []}
+              runs={board.runs}
+              focus={focusTask}
+              onShowTask={(taskId) => {
+                onFocusTask(taskId);
+                onTab("tasks");
+              }}
+              loadRuns={taskActions.loadRuns}
+            />
+            {activity.length > 0 && (
+              <ol className="sa-nodes">
+                {activity.map((node) => (
+                  <li key={node.id} className="sa-node" data-node-id={node.id} data-arrived={node.arrived}>
+                    {!node.arrived && (
+                      <svg className="light-running-border" aria-hidden="true">
+                        <rect x="1" y="1" width="calc(100% - 2px)" height="calc(100% - 2px)" rx="8" pathLength="100" />
+                      </svg>
+                    )}
+                    <span className="sa-row-label">{node.title}</span>
+                    <span className="sa-row-meta">{node.arrived ? "已到达" : "飞行中"}</span>
+                  </li>
+                ))}
+              </ol>
+            )}
+          </>
+        )}
       </div>
     </aside>
   );

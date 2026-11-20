@@ -4,6 +4,7 @@ mod config;
 mod doctor;
 mod models;
 mod paths;
+mod routine;
 mod serve;
 mod task;
 mod team;
@@ -40,6 +41,11 @@ enum Command {
         #[command(subcommand)]
         command: team::RoomCommand,
     },
+    /// 定时任务：列出、新建、删除、启用、停用（不能和 sa serve 同时运行；到点之后由 sa serve 来做）
+    Routine {
+        #[command(subcommand)]
+        command: routine::RoutineCommand,
+    },
     /// 任务：列出、开任务、继续、验收、打回、取消（不能和 sa serve 同时运行）
     Task(task::TaskArgs),
     /// 看今天和最近几天花了多少（不能和 sa serve 同时运行）
@@ -55,6 +61,7 @@ fn main() -> ExitCode {
         Command::Chat(args) => chat::run(&data_dir, args),
         Command::Bot { command } => team::run(&data_dir, team::Command::Bot(command)),
         Command::Room { command } => team::run(&data_dir, team::Command::Room(command)),
+        Command::Routine { command } => routine::run(&data_dir, command),
         Command::Task(args) => task::run(&data_dir, args),
         Command::Usage => usage::run(&data_dir),
         Command::Doctor => Ok(doctor::run(&data_dir)),

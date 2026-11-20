@@ -46,6 +46,15 @@ pub enum EventKind {
     /// 提醒被人收起来了。payload 是完整的 [`crate::Notice`]。
     #[serde(rename = "notice.updated")]
     NoticeUpdated,
+    /// 多了一个定时任务。payload 是完整的 [`crate::Routine`]。
+    #[serde(rename = "routine.created")]
+    RoutineCreated,
+    /// 定时任务变了（改了内容、启停、到点之后的结果）。payload 是完整的 [`crate::Routine`]。
+    #[serde(rename = "routine.updated")]
+    RoutineUpdated,
+    /// 定时任务被删掉了。payload 是 [`crate::RoutineRef`]。
+    #[serde(rename = "routine.deleted")]
+    RoutineDeleted,
 }
 
 impl EventKind {
@@ -65,6 +74,9 @@ impl EventKind {
             Self::RunUpdated => "run.updated",
             Self::NoticeCreated => "notice.created",
             Self::NoticeUpdated => "notice.updated",
+            Self::RoutineCreated => "routine.created",
+            Self::RoutineUpdated => "routine.updated",
+            Self::RoutineDeleted => "routine.deleted",
         }
     }
 
@@ -84,6 +96,9 @@ impl EventKind {
             "run.updated" => Some(Self::RunUpdated),
             "notice.created" => Some(Self::NoticeCreated),
             "notice.updated" => Some(Self::NoticeUpdated),
+            "routine.created" => Some(Self::RoutineCreated),
+            "routine.updated" => Some(Self::RoutineUpdated),
+            "routine.deleted" => Some(Self::RoutineDeleted),
             _ => None,
         }
     }
@@ -131,6 +146,9 @@ mod tests {
             EventKind::TaskUpdated,
             EventKind::NoticeCreated,
             EventKind::NoticeUpdated,
+            EventKind::RoutineCreated,
+            EventKind::RoutineUpdated,
+            EventKind::RoutineDeleted,
             EventKind::RunUpdated,
         ] {
             assert_eq!(EventKind::parse(kind.as_str()), Some(kind));

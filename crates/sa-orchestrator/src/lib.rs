@@ -14,6 +14,7 @@ mod episode;
 mod github;
 mod room;
 mod router;
+mod routines;
 mod watchdog;
 mod work;
 mod workdir;
@@ -21,6 +22,7 @@ mod workdir;
 pub use budget::{Budget, Price};
 pub use episode::{MAX_BOT_TURNS, MAX_HOP, MAX_PAIR_ASKS};
 pub use github::{GitHub, DEFAULT_API_BASE};
+pub use routines::Routines;
 pub use watchdog::Watchdog;
 pub use work::MAX_PARALLEL_RUNS;
 
@@ -79,6 +81,8 @@ pub struct Settings {
     pub budget: Budget,
     /// 看门狗看什么、多严。
     pub watchdog: Watchdog,
+    /// 定时任务多久看一遍、等多久。
+    pub routines: Routines,
 }
 
 /// 审批卡默认等 10 分钟。
@@ -111,6 +115,10 @@ pub(crate) struct Shared {
     pub approvals: Mutex<HashMap<ApprovalId, oneshot::Sender<ApprovalDecision>>>,
     /// 正在跑的任务。
     pub works: work::Works,
+    /// 这个进程在租约上签的名字。
+    pub owner: String,
+    /// 正在做定时任务的房间。一个房间里的定时任务一个一个来。
+    pub routine_rooms: Mutex<std::collections::HashSet<RoomId>>,
 }
 
 struct RoomHandle {
@@ -126,6 +134,8 @@ pub(crate) struct RoomLink {
     episode: Mutex<Episode>,
     /// 人发的消息已经处理到哪一条（`seq`）。`-1` 表示还没从会话记录里算出来。
     pub handled: AtomicI64,
+    /// 房间的后台任务是不是正在干活（挑人、Bot 说话、排着队）。
+    pub active: std::sync::atomic::AtomicBool,
 }
 
 impl RoomLink {
@@ -134,6 +144,7 @@ impl RoomLink {
             current: Mutex::new(None),
             episode: Mutex::new(Episode::default()),
             handled: AtomicI64::new(-1),
+            active: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -153,6 +164,8 @@ impl Orchestrator {
                 shutdown: CancellationToken::new(),
                 approvals: Mutex::new(HashMap::new()),
                 works: work::Works::default(),
+                owner: format!("sa-{}", sa_protocol::RoutineId::new()),
+                routine_rooms: Mutex::default(),
             }),
             rooms: Mutex::new(HashMap::new()),
         }

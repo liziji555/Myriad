@@ -1,4 +1,4 @@
-use crate::{ApprovalDecision, BotId, Message, ModelTier, Run, Task};
+use crate::{ApprovalDecision, BotId, Message, ModelTier, RoomId, Run, Task};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
@@ -131,4 +131,38 @@ pub struct TaskDetail {
     pub task: Task,
     /// 按开始时间升序。
     pub runs: Vec<Run>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct CreateRoutineRequest {
+    pub room_id: RoomId,
+    /// 不给就是房间的入口 Bot。
+    #[serde(default)]
+    #[ts(optional)]
+    pub bot_id: Option<BotId>,
+    pub title: String,
+    pub prompt: String,
+    pub schedule: String,
+}
+
+/// 只改给出的字段。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct UpdateRoutineRequest {
+    #[serde(default)]
+    #[ts(optional)]
+    pub bot_id: Option<BotId>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub title: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub prompt: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub schedule: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub enabled: Option<bool>,
 }

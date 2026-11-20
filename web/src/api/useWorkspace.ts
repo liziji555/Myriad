@@ -27,6 +27,7 @@ import type {
   Bot,
   BotId,
   CreateBotRequest,
+  CreateRoutineRequest,
   CreateTaskRequest,
   Event,
   Message,
@@ -36,11 +37,14 @@ import type {
   Room,
   RoomActivity,
   RoomId,
+  Routine,
+  RoutineId,
   Run,
   Task,
   TaskId,
   UpdateBotRequest,
   UpdateRoomRequest,
+  UpdateRoutineRequest,
 } from "./types";
 import { applyEvent, emptyWorkspace, type Workspace } from "./workspace";
 
@@ -68,6 +72,15 @@ export interface TaskActions {
   loadRuns(taskId: TaskId): Promise<void>;
 }
 
+/** 对定时任务的操作。结果先放进本地状态，事件流稍后送来同样的内容。失败时抛出。 */
+export interface RoutineActions {
+  create(body: CreateRoutineRequest): Promise<void>;
+  update(id: RoutineId, body: UpdateRoutineRequest): Promise<void>;
+  remove(id: RoutineId): Promise<void>;
+  /** 现在就做一次，不等到点。 */
+  runNow(id: RoutineId): Promise<void>;
+}
+
 export interface WorkspaceView extends Workspace {
   readonly phase: Phase;
   /** 事件流当前是否连着。断开时浏览器会自动重连。 */
@@ -75,6 +88,7 @@ export interface WorkspaceView extends Workspace {
   readonly chat: ChatState;
   readonly board: TaskBoard;
   readonly tasks: TaskActions;
+  readonly routineActions: RoutineActions;
   /** 每次需要重新拉消息时加一（重新连上、或者片段丢了）。 */
   readonly epoch: number;
   createRoom(name: string): Promise<Room>;
@@ -155,13 +169,14 @@ export function useWorkspace(): WorkspaceView {
 
     const loadSnapshot = async (mine: number) => {
       try {
-        const [rooms, bots, notices] = await Promise.all([
+        const [rooms, bots, notices, routines] = await Promise.all([
           api.listRooms(),
           api.listBots(),
           api.listNotices(),
+          api.listRoutines(),
         ]);
         if (closed || mine !== generation) return;
-        setWorkspace((buffered ?? []).reduce(applyEvent, { rooms, bots, notices }));
+        setWorkspace((buffered ?? []).reduce(applyEvent, { rooms, bots, notices, routines }));
         buffered = null;
         setPhase("ready");
       } catch (error) {
@@ -292,6 +307,24 @@ export function useWorkspace(): WorkspaceView {
     };
   }, []);
 
+  const routineActions = useMemo<RoutineActions>(() => {
+    const apply = (kind: Event["kind"], payload: Routine | { id: RoutineId }) =>
+      setWorkspace((current) =>
+        applyEvent(current, { seq: 0, room_id: null, kind, payload, created_at: 0 }),
+      );
+    return {
+      create: async (body) => apply("routine.created", await api.createRoutine(body)),
+      update: async (id, body) => apply("routine.updated", await api.updateRoutine(id, body)),
+      remove: async (id) => {
+        await api.deleteRoutine(id);
+        apply("routine.deleted", { id });
+      },
+      runNow: async (id) => {
+        await api.runRoutine(id);
+      },
+    };
+  }, []);
+
   const loadOlder = useCallback(async (roomId: RoomId) => {
     const oldest = chatRef.current.rooms[roomId]?.messages[0];
     if (!oldest) return;
@@ -334,6 +367,7 @@ export function useWorkspace(): WorkspaceView {
     chat,
     board,
     tasks,
+    routineActions,
     epoch,
     createRoom,
     team,

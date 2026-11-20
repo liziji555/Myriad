@@ -101,6 +101,7 @@ fn start_full(
         github,
         budget: Default::default(),
         watchdog: Default::default(),
+        routines: Default::default(),
     };
     let models = Arc::new(Models {
         front: front.clone(),

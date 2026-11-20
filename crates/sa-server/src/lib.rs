@@ -82,6 +82,15 @@ pub fn router(state: AppState) -> Router {
         .route("/usage", get(routes::usage))
         .route("/notices", get(routes::list_notices))
         .route("/notices/{notice_id}/dismiss", post(routes::dismiss_notice))
+        .route(
+            "/routines",
+            get(routes::list_routines).post(routes::create_routine),
+        )
+        .route(
+            "/routines/{routine_id}",
+            patch(routes::update_routine).delete(routes::delete_routine),
+        )
+        .route("/routines/{routine_id}/run", post(routes::run_routine))
         .route("/events", get(sse::events))
         .fallback(routes::api_not_found)
         .layer(middleware::from_fn_with_state(

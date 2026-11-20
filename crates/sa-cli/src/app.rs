@@ -109,6 +109,7 @@ impl App {
                 db_path: Some(data_dir.database()),
                 ..Default::default()
             },
+            routines: Default::default(),
         };
         tune(&mut settings);
         let orchestrator = Arc::new(Orchestrator::new(engine.clone(), models, settings));

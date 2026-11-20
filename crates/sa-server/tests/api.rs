@@ -43,6 +43,7 @@ fn app() -> (Router, Arc<Engine>) {
         github: None,
         budget: Default::default(),
         watchdog: Default::default(),
+        routines: Default::default(),
     };
     let orchestrator = Arc::new(Orchestrator::new(
         engine.clone(),
@@ -979,4 +980,46 @@ async fn usage_and_notices_are_served_and_a_notice_can_be_dismissed() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
     assert_eq!(json::<ApiError>(response).await.code, "not_found");
+}
+
+#[tokio::test]
+async fn routines_are_created_changed_and_deleted() {
+    let (app, engine) = app();
+    let call = |request: Request<Body>| {
+        let app = app.clone();
+        async move { app.oneshot(request).await.unwrap() }
+    };
+    let room = engine.list_rooms().unwrap().remove(0);
+    let body = serde_json::json!({
+        "room_id": room.id, "title": "早报", "prompt": "看看新消息", "schedule": "0 9 * * *"
+    })
+    .to_string();
+    let response = call(post("/api/routines", &body)).await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let routine: sa_protocol::Routine = json(response).await;
+    assert_eq!(Some(&routine.bot_id), room.host_bot_id.as_ref());
+    assert!(routine.enabled && routine.next_at.is_some());
+
+    // 时间写错：400，说明原因。
+    let bad = body.replace("0 9 * * *", "每天九点");
+    let response = call(post("/api/routines", &bad)).await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let listed: Vec<sa_protocol::Routine> = json(call(get("/api/routines")).await).await;
+    assert_eq!(listed, std::slice::from_ref(&routine));
+
+    let path = format!("/api/routines/{}", routine.id);
+    let response = call(send("PATCH", &path, r#"{"enabled":false}"#)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let stopped: sa_protocol::Routine = json(response).await;
+    assert!(!stopped.enabled && stopped.next_at.is_none());
+
+    let response = call(send("PATCH", "/api/routines/rtn_none", "{}")).await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let response = call(post("/api/routines/rtn_none/run", "")).await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    assert_eq!(call(delete(&path)).await.status(), StatusCode::NO_CONTENT);
+    assert_eq!(call(delete(&path)).await.status(), StatusCode::NOT_FOUND);
+    assert!(engine.list_routines().unwrap().is_empty());
 }

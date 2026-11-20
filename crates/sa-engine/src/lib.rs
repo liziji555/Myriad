@@ -4,7 +4,9 @@
 //! 这一层不调用模型、不发 HTTP。
 
 mod budget;
+pub mod cron;
 mod messages;
+mod routines;
 mod rules;
 mod tasks;
 mod team;
@@ -21,6 +23,9 @@ use tokio::sync::{broadcast, watch};
 
 pub use budget::{micros_to_cost, NewNotice, TaskSpend, UsageBreakdown};
 pub use messages::UsageRecord;
+pub use routines::{
+    RoutinePatch, MAX_ROOM_ROUTINES, MAX_ROUTINE_FAILURES, MAX_ROUTINE_TITLE_CHARS,
+};
 pub use sa_store::tasks::Workdir;
 pub use tasks::{
     state_label, NewTask, RunOutcome, MAX_ACTIVE_TASKS, MAX_TASK_TEXT_CHARS, MAX_TASK_TITLE_CHARS,

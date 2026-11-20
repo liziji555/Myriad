@@ -54,6 +54,7 @@ pub fn run(data_dir: &DataDir, args: ServeArgs) -> Result<()> {
             // 上次退出时没做完的任务接着排队。
             app.orchestrator.resume_tasks();
             app.orchestrator.start_watchdog();
+            app.orchestrator.start_routines();
             let state = AppState::new(app.engine.clone(), app.orchestrator.clone(), token);
             let orchestrator = app.orchestrator.clone();
             sa_server::serve(listener, state, async move {

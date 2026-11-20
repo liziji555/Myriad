@@ -12,6 +12,7 @@ pub mod events;
 pub mod messages;
 pub mod notices;
 pub mod rooms;
+pub mod routines;
 pub mod rules;
 pub mod sessions;
 pub mod tasks;
