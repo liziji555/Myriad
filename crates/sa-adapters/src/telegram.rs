@@ -97,7 +97,6 @@ pub fn intent(message: &TgMessage, me: &str) -> Intent {
     let Some(text) = message.text.as_deref().map(str::trim) else {
         return Intent::Skip("不是文字");
     };
-    let at_me = format!("@{}", me.to_lowercase());
     if let Some(rest) = text.strip_prefix('/') {
         let (command, argument) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
         // 群里的命令可以写成 `/pair@机器人`；写给别的机器人的不管。
@@ -110,8 +109,8 @@ pub fn intent(message: &TgMessage, me: &str) -> Intent {
             _ => Intent::Skip("不认识的命令"),
         };
     }
-    let lower = text.to_lowercase();
-    let mentioned = !me.is_empty() && lower.contains(&at_me);
+    let mentions = mention_spans(text, me);
+    let mentioned = !mentions.is_empty();
     let replied = message
         .reply_to_message
         .as_ref()
@@ -121,32 +120,47 @@ pub fn intent(message: &TgMessage, me: &str) -> Intent {
     if message.chat.kind != "private" && !mentioned && !replied {
         return Intent::Skip("群里不是对机器人说的");
     }
-    let said = if mentioned {
-        strip_mention(text, &at_me)
-    } else {
-        text.to_string()
-    };
+    // 去掉 `@机器人`，剩下的才是要说的话。
+    let mut said = String::new();
+    let mut from = 0;
+    for span in mentions {
+        said.push_str(&text[from..span.start]);
+        from = span.end;
+    }
+    said.push_str(&text[from..]);
     if said.trim().is_empty() {
         return Intent::Skip("没有文字");
     }
     Intent::Say(said.trim().to_string())
 }
 
-/// 去掉文字里的 `@机器人`（不分大小写）。
-fn strip_mention(text: &str, at_me: &str) -> String {
-    let lower = text.to_lowercase();
-    let mut out = String::new();
-    let mut from = 0;
-    // 小写之后字节位置可能和原文对不上（极少数字符）：对不上就原样留着。
-    if lower.len() != text.len() {
-        return text.to_string();
+/// 文字里每一处 `@机器人` 的位置（不分大小写）。后面还接着用户名字符的不算：
+/// `@sa_bot2` 是另一个机器人，不是 `@sa_bot`。
+fn mention_spans(text: &str, me: &str) -> Vec<std::ops::Range<usize>> {
+    let (bytes, name) = (text.as_bytes(), me.as_bytes());
+    let mut spans = vec![];
+    if name.is_empty() {
+        return spans;
     }
-    while let Some(at) = lower[from..].find(at_me) {
-        out.push_str(&text[from..from + at]);
-        from += at + at_me.len();
+    let mut at = 0;
+    while let Some(found) = text[at..].find('@') {
+        let start = at + found;
+        let end = start + 1 + name.len();
+        // 用户名只有 ASCII 字符，按字节比：对上了，两头就都落在字符的边界上。
+        let same = bytes
+            .get(start + 1..end)
+            .is_some_and(|candidate| candidate.eq_ignore_ascii_case(name));
+        let goes_on = bytes
+            .get(end)
+            .is_some_and(|next| next.is_ascii_alphanumeric() || *next == b'_');
+        if same && !goes_on {
+            spans.push(start..end);
+            at = end;
+        } else {
+            at = start + 1;
+        }
     }
-    out.push_str(&text[from..]);
-    out
+    spans
 }
 
 /// 把一段话切成 Telegram 一条装得下的几段，尽量在换行的地方切。
@@ -310,6 +324,43 @@ mod tests {
             intent(&message("group", "@sa_bot"), "sa_bot"),
             Intent::Skip("没有文字")
         );
+    }
+
+    #[test]
+    fn mentions_match_the_whole_username_and_survive_any_text() {
+        let say = |text: &str| Intent::Say(text.into());
+        let skip = Intent::Skip("群里不是对机器人说的");
+        // 名字更长的是另一个机器人。
+        assert_eq!(
+            intent(&message("group", "@sa_bot2 看下日志"), "sa_bot"),
+            skip
+        );
+        assert_eq!(
+            intent(&message("group", "@sa_botX @SA_BOT_ 在吗"), "sa_bot"),
+            skip
+        );
+        assert_eq!(
+            intent(&message("group", "@sa_bot2 和 @sa_bot，看下日志"), "sa_bot"),
+            say("@sa_bot2 和 ，看下日志")
+        );
+        assert_eq!(
+            intent(&message("group", "看下日志@sa_bot"), "sa_bot"),
+            say("看下日志")
+        );
+        // 大小写转换会改变长度的字符、多字节字符紧挨着 @：不会切到字符中间。
+        for text in [
+            "İİ @sa_bot ßſ 看下",
+            "ǰ@sa_bot",
+            "@日志 @sa_bot",
+            "@sa_bo日 @SA_bot 😀",
+        ] {
+            assert!(
+                matches!(intent(&message("group", text), "sa_bot"), Intent::Say(_)),
+                "{text}"
+            );
+        }
+        assert_eq!(intent(&message("group", "İ@ @sa_bo"), "sa_bot"), skip);
+        assert_eq!(intent(&message("group", "@"), ""), skip);
     }
 
     #[test]
