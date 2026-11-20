@@ -9,6 +9,8 @@ const message = (seq: number, patch: Partial<Message> = {}): Message => ({
   room_id: ROOM,
   sender: { kind: "user" },
   content: `第 ${seq} 条`,
+  mentions: [],
+  hop: 0,
   steps: [],
   state: "complete",
   error: null,

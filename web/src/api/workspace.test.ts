@@ -6,6 +6,7 @@ const bot: Bot = {
   id: "bot_1",
   name: "助手",
   kind: "assistant",
+  persona: "",
   tier: "mid",
   enabled: true,
   created_at: 1,

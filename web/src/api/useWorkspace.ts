@@ -4,6 +4,8 @@ import {
   emptyChat,
   mergePage,
   resetChat,
+  removeMessage,
+  setActivity,
   upsertMessage,
   watchRoom,
   type ChatState,
@@ -15,7 +17,9 @@ import type {
   Event,
   Message,
   MessageDelta,
+  MessageRef,
   Room,
+  RoomActivity,
   RoomId,
 } from "./types";
 import { applyEvent, emptyWorkspace, type Workspace } from "./workspace";
@@ -42,9 +46,17 @@ export interface WorkspaceView extends Workspace {
 const SNAPSHOT_RETRY_MS = 2000;
 
 function applyChatEvent(chat: ChatState, event: Event): ChatState {
-  return event.kind === "message.created" || event.kind === "message.updated"
-    ? upsertMessage(chat, event.payload as Message)
-    : chat;
+  switch (event.kind) {
+    case "message.created":
+    case "message.updated":
+      return upsertMessage(chat, event.payload as Message);
+    case "message.deleted":
+      return removeMessage(chat, event.payload as MessageRef);
+    case "room.activity":
+      return setActivity(chat, event.payload as RoomActivity);
+    default:
+      return chat;
+  }
 }
 
 /**
