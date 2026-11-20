@@ -92,6 +92,8 @@ impl Tool for ReadTool {
 
             let start = input.offset.unwrap_or(1).max(1);
             let limit = input.limit.unwrap_or(DEFAULT_LINES).max(1);
+            // 尾注里要写一遍路径，路径很长时从正文的额度里扣掉，保证整页不超上限。
+            let budget = MAX_CHARS.saturating_sub(shown.chars().count());
             let mut out = String::new();
             let mut out_chars = 0usize;
             let mut number = 0usize;
@@ -126,7 +128,7 @@ impl Tool for ReadTool {
                 // 放不下就整行留给下一页。超出上限的结果会被从中间截掉，
                 // 而尾注里的 offset 是按「这些行都给全了」算的，那样被截掉的行就再也读不到了。
                 let size = numbered.chars().count();
-                if out_chars + size > MAX_CHARS && shown_lines > 0 {
+                if out_chars + size > budget && shown_lines > 0 {
                     stopped_early = true;
                     break;
                 }
@@ -298,6 +300,28 @@ mod tests {
             .await
             .unwrap()
             .contains("a\u{FFFD}"));
+    }
+
+    // Windows 默认不允许这么长的路径，那里也就遇不到这个问题。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_very_deep_path_does_not_push_the_page_over_the_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut deep = dir.path().to_path_buf();
+        for _ in 0..12 {
+            deep.push("很".repeat(80));
+        }
+        fs::create_dir_all(&deep).unwrap();
+        let body: String = (0..3000)
+            .map(|_| format!("{}\n", "x".repeat(100)))
+            .collect();
+        fs::write(deep.join("big.txt"), body).unwrap();
+        let relative = deep.strip_prefix(dir.path()).unwrap().join("big.txt");
+        let out = read(dir.path(), json!({"path": relative.to_str().unwrap()}))
+            .await
+            .unwrap();
+        assert!(out.contains("后面还有"));
+        assert!(out.chars().count() <= ReadTool.max_result_chars());
     }
 
     /// 没有写入方的命名管道：打开它会一直卡住，所以必须在打开之前就拒绝。
