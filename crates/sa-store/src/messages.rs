@@ -125,6 +125,20 @@ pub fn list_in_state(conn: &Connection, state: MessageState) -> Result<Vec<Messa
     rows.map(|row| row?).collect()
 }
 
+/// `seq` 之前最近的一条「引出回复的话」：人说的、定时任务到点、外面来的事。
+pub fn last_trigger_before(
+    conn: &Connection,
+    room_id: &RoomId,
+    seq: i64,
+) -> Result<Option<Message>> {
+    let sql = format!(
+        "SELECT {COLUMNS} FROM messages WHERE room_id = ?1 AND seq < ?2 AND sender_kind = 'user' AND kind IN ('chat', 'routine', 'event') ORDER BY seq DESC LIMIT 1"
+    );
+    conn.query_row(&sql, params![room_id.as_str(), seq], read_row)
+        .optional()?
+        .transpose()
+}
+
 fn steps_to_json(steps: &[ToolStep]) -> String {
     serde_json::to_string(steps).expect("步骤总能序列化成 JSON")
 }
