@@ -104,9 +104,21 @@ async fn work(
         if let Some(last) = fresh.last() {
             link.handled.fetch_max(last.seq, Ordering::SeqCst);
             let first = dispatch(shared, &room, &members, &fresh, link).await;
+            // 定时任务和外面来的事各有指定的 Bot，别的 Bot 看不到它们：攒了几条时，
+            // 每个被指定的都要轮到，不只是 `dispatch` 挑出来的那一个。
+            let mut starters: Vec<BotId> = first.into_iter().collect();
+            for message in &fresh {
+                let targeted = matches!(message.kind, MessageKind::Routine | MessageKind::Event);
+                let Some(target) = message.mentions.first().filter(|_| targeted) else {
+                    continue;
+                };
+                if members.iter().any(|bot| &bot.id == target) && !starters.contains(target) {
+                    starters.push(target.clone());
+                }
+            }
             // 人说了新的话：之前排着队的不算了，重新开始一轮。
             link.episode()
-                .restart(first.map(|bot_id| Job { bot_id, hop: 0 }));
+                .restart(starters.into_iter().map(|bot_id| Job { bot_id, hop: 0 }));
         }
 
         let Some(job) = link.episode().next() else {

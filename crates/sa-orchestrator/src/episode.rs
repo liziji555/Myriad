@@ -36,8 +36,8 @@ pub(crate) struct Episode {
 }
 
 impl Episode {
-    /// 人说了新的话：之前排着的都不算了，重新记账，由 `first` 来接。
-    pub fn restart(&mut self, first: Option<Job>) {
+    /// 人说了新的话：之前排着的都不算了，重新记账，由 `first` 里的依次来接。
+    pub fn restart(&mut self, first: impl IntoIterator<Item = Job>) {
         *self = Self::default();
         self.queue.extend(first);
     }

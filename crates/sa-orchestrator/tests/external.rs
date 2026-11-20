@@ -200,6 +200,44 @@ async fn an_event_nobody_needs_to_act_on_costs_no_model_call_and_pass_leaves_not
 }
 
 #[tokio::test]
+async fn events_that_pile_up_for_different_bots_each_reach_their_bot() {
+    let dir = tempfile::tempdir().unwrap();
+    let rig = start(
+        dir.path(),
+        vec![
+            MockReply::text("第一件我看了。"),
+            MockReply::text("第二件我看了。"),
+        ],
+        Budget::default(),
+    );
+    rig.engine.link_repo(&rig.room, "me/app").unwrap();
+    let first = rig.engine.get_room(&rig.room).unwrap().host_bot_id.unwrap();
+    let second = rig.engine.create_bot("Coder", ModelTier::Mid, "").unwrap();
+    rig.engine.add_room_member(&rig.room, &second.id).unwrap();
+
+    // 房间还没醒的时候来了两件事，中间换过入口 Bot：一件是给原来那个的，一件是给新的。
+    rig.engine.receive(issue("d-1", true)).unwrap();
+    rig.engine
+        .update_room(&rig.room, None, Some(&second.id))
+        .unwrap();
+    rig.engine.receive(issue("d-2", true)).unwrap();
+    // 第三件只摆出来，顺便把房间叫醒。
+    rig.orchestrator.receive(issue("d-3", false)).await.unwrap();
+    rig.settled(2).await;
+
+    let speakers: Vec<Sender> = rig
+        .messages()
+        .into_iter()
+        .filter(|m| m.kind == MessageKind::Chat)
+        .map(|m| m.sender)
+        .collect();
+    assert_eq!(speakers.len(), 2, "{speakers:?}");
+    assert!(speakers.contains(&Sender::Bot { bot_id: first }));
+    assert!(speakers.contains(&Sender::Bot { bot_id: second.id }));
+    rig.orchestrator.shutdown().await;
+}
+
+#[tokio::test]
 async fn what_is_said_in_a_paired_telegram_chat_is_answered_back_there() {
     let dir = tempfile::tempdir().unwrap();
     let rig = start(
