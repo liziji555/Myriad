@@ -10,6 +10,7 @@ mod grep;
 mod list_dir;
 mod read;
 mod shell;
+mod todo;
 mod walk;
 mod web_fetch;
 mod write;
@@ -21,6 +22,7 @@ pub use grep::GrepTool;
 pub use list_dir::ListDirTool;
 pub use read::ReadTool;
 pub use shell::ShellTool;
+pub use todo::TodoTool;
 pub use web_fetch::WebFetchTool;
 pub use write::WriteTool;
 
@@ -134,12 +136,13 @@ impl ToolRegistry {
         registry
     }
 
-    /// 只读工具加上写文件、改文件、执行命令。
+    /// 只读工具加上写文件、改文件、执行命令、待办清单。
     pub fn standard() -> Self {
         let mut registry = Self::read_only();
         registry.register(WriteTool);
         registry.register(EditTool);
         registry.register(ShellTool);
+        registry.register(TodoTool);
         registry
     }
 

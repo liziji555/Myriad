@@ -196,7 +196,8 @@ async fn hello_gets_a_streamed_reply_from_the_host_bot() {
             "web_fetch",
             "write",
             "edit",
-            "shell"
+            "shell",
+            "todo"
         ]
     );
     rig.orchestrator.shutdown().await;
