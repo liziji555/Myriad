@@ -212,10 +212,14 @@ fn bot(engine: &Engine, command: BotCommand, out: &mut impl Write) -> Result<()>
                 writeln!(out, "已经有 {name}，没有动它")?;
             }
             if !update && !report.skipped.is_empty() {
-                writeln!(
-                    out,
+                // 模板带了房间时再导一次会多出一个同名的房间，所以不劝人重来。
+                let how = if report.room.is_some() {
+                    "想让已有的同名 Bot 也照模板改，用 sa bot set 改它们；\
+                     再导一次会多建一个同名的房间。下次导入时可以直接加 --update。"
+                } else {
                     "想让已有的同名 Bot 也照模板改，加上 --update 再导一次。"
-                )?;
+                };
+                writeln!(out, "{how}")?;
             }
             if let Some(room) = &report.room {
                 writeln!(out, "已新建房间「{}」（{}）", room.name, room.id)?;
@@ -413,10 +417,21 @@ mod tests {
         );
         // 再导一次不会多出 Bot。
         let out = sa(&there, &format!("bot import {}", file.display())).unwrap();
+        // 这份模板带着房间：不劝人「再导一次」，那样会多出一个同名的房间。
         assert!(
-            out.contains("已经有 Coder，没有动它") && out.contains("--update"),
+            out.contains("已经有 Coder，没有动它") && out.contains("sa bot set"),
             "{out}"
         );
+        assert!(!out.contains("再导一次。"), "{out}");
+        // 不带房间的模板可以放心重来。
+        let bots_only = dir.path().join("bots.toml");
+        sa(
+            &here,
+            &format!("bot export Coder -o {}", bots_only.display()),
+        )
+        .unwrap();
+        let out = sa(&there, &format!("bot import {}", bots_only.display())).unwrap();
+        assert!(out.contains("加上 --update 再导一次。"), "{out}");
         assert_eq!(there.list_bots().unwrap().len(), 2);
         // 已有的同名 Bot 默认不动；加上 --update 才照模板改。
         sa(&there, "bot set Coder --tier cheap --enable").unwrap();
