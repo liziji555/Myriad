@@ -53,6 +53,12 @@ pub fn run(data_dir: &DataDir, args: ServeArgs) -> Result<()> {
             }
             // 上次退出时没做完的任务接着排队。
             app.orchestrator.resume_tasks();
+            // 上次退出时还没有 Bot 接的话，现在接着回应。
+            match app.orchestrator.resume_rooms() {
+                Ok(0) => {}
+                Ok(rooms) => println!("上次退出时有 {rooms} 个房间里的话还没人接，现在接着回应。"),
+                Err(error) => tracing::warn!("检查上次没接的话时出错：{error}"),
+            }
             app.orchestrator.start_watchdog();
             app.orchestrator.start_routines();
             // 外部 MCP 服务在后台连：连上了工具才出现，没连上不耽误别的。
@@ -79,13 +85,30 @@ pub fn run(data_dir: &DataDir, args: ServeArgs) -> Result<()> {
             }
             let orchestrator = app.orchestrator.clone();
             sa_server::serve(listener, state, async move {
-                let _ = tokio::signal::ctrl_c().await;
+                stop_signal().await;
                 // 先让 Bot 停笔、把没写完的回复标成「中断」，再关连接：浏览器还来得及收到这个状态。
                 orchestrator.shutdown().await;
             })
             .await?;
             Ok(())
         })
+}
+
+/// 等到有人要它停：Ctrl+C，或者（Linux、macOS 上）`kill` 发来的 SIGTERM——
+/// 用 systemd 之类管着它的时候，停服务发的就是这个，也要好好收尾。
+async fn stop_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        if let Ok(mut terminate) = signal(SignalKind::terminate()) {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = terminate.recv() => {}
+            }
+            return;
+        }
+    }
+    let _ = tokio::signal::ctrl_c().await;
 }
 
 /// 环境变量的值。没设或者是空的算没有。
