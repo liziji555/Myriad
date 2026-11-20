@@ -75,10 +75,21 @@ impl Engine {
         if ids.is_empty() {
             bots.extend(all.iter().map(template));
         }
-        for id in ids {
+        for (index, id) in ids.iter().enumerate() {
+            // 同一个 Bot 写了两次只导出一次：重名的模板是导不进去的。
+            if ids[..index].contains(id) {
+                continue;
+            }
             let bot = all.iter().find(|bot| &bot.id == id);
             let bot = bot.ok_or_else(|| EngineError::NotFound("没有这个 Bot".into()))?;
             bots.push(template(bot));
+        }
+        // 导出来的文件必须导得回去。
+        if bots.len() > MAX_TEMPLATE_BOTS {
+            return Err(EngineError::Invalid(format!(
+                "一份模板里最多 {MAX_TEMPLATE_BOTS} 个 Bot，现在有 {} 个。请挑着导出，分成几份",
+                bots.len()
+            )));
         }
         Ok(TeamTemplate {
             version: TEMPLATE_VERSION,
@@ -429,6 +440,28 @@ mod tests {
         assert_eq!(one.room, None);
         assert_eq!(engine.export_bots(&[]).unwrap().bots.len(), 2);
         assert!(engine.export_bots(&[BotId::new()]).is_err());
+        // 同一个 Bot 点了两次只导出一次。
+        let twice = engine
+            .export_bots(&[kept.id.clone(), kept.id.clone()])
+            .unwrap();
+        assert_eq!(twice.bots.len(), 1);
+        // 多到导不回去的不导出：一份模板最多这么多个。
+        for n in 0..MAX_TEMPLATE_BOTS - 1 {
+            engine
+                .create_bot(&format!("b{n}"), ModelTier::Mid, "")
+                .unwrap();
+        }
+        let error = engine.export_bots(&[]).unwrap_err().to_string();
+        assert!(error.contains("最多"), "{error}");
+        let some: Vec<BotId> = engine
+            .list_bots()
+            .unwrap()
+            .into_iter()
+            .take(3)
+            .map(|b| b.id)
+            .collect();
+        let part = engine.export_bots(&some).unwrap();
+        engine.import_team(&part).unwrap();
     }
 
     #[test]
