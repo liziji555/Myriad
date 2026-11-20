@@ -3,6 +3,7 @@ import {
   looksLikeRepo,
   minutesLeft,
   pairingCommand,
+  pairingGroupCommand,
   pairingLink,
   repoFromInput,
   safeUrl,
@@ -50,6 +51,10 @@ describe("pairing", () => {
     expect(pairingLink(pairing)).toBeUndefined();
     expect(pairingLink({ ...pairing, bot_username: "sa_bot" })).toBe("https://t.me/sa_bot?start=ABC234");
     expect(pairingLink({ ...pairing, bot_username: "a/b?x" })).toBeUndefined();
+    // 群里要点名机器人，否则默认的隐私模式下它收不到这条命令。
+    expect(pairingGroupCommand(pairing)).toBeUndefined();
+    expect(pairingGroupCommand({ ...pairing, bot_username: "sa_bot" })).toBe("/pair@sa_bot ABC234");
+    expect(pairingGroupCommand({ ...pairing, bot_username: "a b" })).toBeUndefined();
   });
 
   it("counts the minutes left, rounding up", () => {

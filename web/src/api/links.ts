@@ -36,14 +36,25 @@ export function safeUrl(url: string | undefined): string | undefined {
   }
 }
 
-/** 在 Telegram 聊天里发这句话来配对。 */
+/** 在和机器人的私聊里发这句话来配对。 */
 export const pairingCommand = (pairing: Pairing): string => `/pair ${pairing.code}`;
+
+const botName = (pairing: Pairing): string | undefined =>
+  pairing.bot_username && /^\w+$/.test(pairing.bot_username) ? pairing.bot_username : undefined;
+
+/**
+ * 在群里发这句话来配对。群里的机器人默认只收得到点了它名字的命令，所以要写成 `/pair@机器人`。
+ * 还不知道机器人叫什么时没有。
+ */
+export function pairingGroupCommand(pairing: Pairing): string | undefined {
+  const name = botName(pairing);
+  return name ? `/pair@${name} ${pairing.code}` : undefined;
+}
 
 /** 点开就在和机器人的私聊里配对的链接。还不知道机器人叫什么时没有。 */
 export function pairingLink(pairing: Pairing): string | undefined {
-  const name = pairing.bot_username;
-  if (!name || !/^\w+$/.test(name)) return undefined;
-  return `https://t.me/${name}?start=${encodeURIComponent(pairing.code)}`;
+  const name = botName(pairing);
+  return name ? `https://t.me/${name}?start=${encodeURIComponent(pairing.code)}` : undefined;
 }
 
 /** 配对码还剩几分钟（向上取整）。过期了是 0。 */

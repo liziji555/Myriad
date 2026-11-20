@@ -1,5 +1,12 @@
 import { useEffect, useState, type FormEvent } from "react";
-import { looksLikeRepo, minutesLeft, pairingCommand, pairingLink, repoFromInput } from "../api/links";
+import {
+  looksLikeRepo,
+  minutesLeft,
+  pairingCommand,
+  pairingGroupCommand,
+  pairingLink,
+  repoFromInput,
+} from "../api/links";
 import type { LinkActions } from "../api/useWorkspace";
 import type { Link, Pairing, Room } from "../api/types";
 
@@ -50,6 +57,7 @@ export function LinksPanel({ room, links, actions }: Props) {
   const wanted = repoFromInput(repo);
   const left = pairing ? minutesLeft(pairing) : 0;
   const link = pairing ? pairingLink(pairing) : undefined;
+  const groupCommand = pairing ? pairingGroupCommand(pairing) : undefined;
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -131,9 +139,7 @@ export function LinksPanel({ room, links, actions }: Props) {
         )}
         {pairing && left > 0 ? (
           <div className="sa-pairing" role="status">
-            <p>
-              在 Telegram 里把这句话发给机器人（群里也可以，先把机器人拉进群）：
-            </p>
+            <p>在 Telegram 里和机器人的私聊里发：</p>
             <code className="sa-pairing-code">{pairingCommand(pairing)}</code>
             {link ? (
               <p>
@@ -148,6 +154,16 @@ export function LinksPanel({ room, links, actions }: Props) {
                 现在还没连上 Telegram：要先把机器人的令牌放进环境变量 <code>TELEGRAM_BOT_TOKEN</code> 再启动
                 sa serve，否则这个码没有人收。
               </p>
+            )}
+            {groupCommand && (
+              <>
+                <p>要连一个群：先把机器人拉进群，再在群里发（要带上机器人的名字）：</p>
+                <code className="sa-pairing-code">{groupCommand}</code>
+                <p className="sa-links-hint">
+                  群里的机器人默认只收得到带它名字的命令和对它的话的回复，收不到 @它 的普通消息。想在群里直接
+                  @它 说话，要在 @BotFather 里用 /setprivacy 关掉它的隐私模式（关掉之后把它请出群再拉进来），或者把它设成群管理员。
+                </p>
+              </>
             )}
             <p className="sa-links-hint">这个码只能用一次，还有 {left} 分钟过期。</p>
           </div>
