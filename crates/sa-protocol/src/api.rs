@@ -1,4 +1,4 @@
-use crate::{ApprovalDecision, BotId, Message, ModelTier};
+use crate::{ApprovalDecision, BotId, Message, ModelTier, Run, Task};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
@@ -92,4 +92,43 @@ pub struct UpdateRoomRequest {
     #[serde(default)]
     #[ts(optional)]
     pub host_bot_id: Option<BotId>,
+}
+
+/// 人开一个任务。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct CreateTaskRequest {
+    pub title: String,
+    /// 要做什么。
+    pub scope: String,
+    #[serde(default)]
+    #[ts(optional)]
+    pub acceptance: Option<String>,
+    /// 派给谁。不给就先放着（草稿），之后再派。
+    #[serde(default)]
+    #[ts(optional)]
+    pub owner_bot_id: Option<BotId>,
+}
+
+/// 对任务做一个动作（继续、验收、打回、停下、取消）时附的话。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TaskActionRequest {
+    /// 给负责的 Bot 的话：补充的信息、打回的原因。
+    #[serde(default)]
+    #[ts(optional)]
+    pub note: Option<String>,
+    /// 「继续」时顺便换一个负责人。
+    #[serde(default)]
+    #[ts(optional)]
+    pub owner_bot_id: Option<BotId>,
+}
+
+/// 一个任务和它的执行历史。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TaskDetail {
+    pub task: Task,
+    /// 按开始时间升序。
+    pub runs: Vec<Run>,
 }

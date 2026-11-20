@@ -48,6 +48,9 @@ id_type!(MessageId, "msg");
 id_type!(SessionId, "ses");
 id_type!(ApprovalId, "apr");
 id_type!(RuleId, "rule");
+id_type!(TaskId, "task");
+id_type!(RunId, "run");
+id_type!(ArtifactId, "art");
 
 #[cfg(test)]
 mod tests {
