@@ -144,7 +144,8 @@ async fn work(
 /// 这个工具会不会在外面留下痕迹（改文件、执行命令、推送、叫外部服务、派活）。会的要记进审计日志；
 /// 只是读和查的不记。
 fn leaves_a_mark(tool: &str) -> bool {
-    const READ_ONLY: [&str; 8] = [
+    const READ_ONLY: [&str; 9] = [
+        "compact",
         "read",
         "list_dir",
         "glob",
@@ -155,6 +156,17 @@ fn leaves_a_mark(tool: &str) -> bool {
         "agent",
     ];
     !READ_ONLY.contains(&tool)
+}
+
+/// 留底时记工具的哪些参数。写文件、改文件只记是哪个文件：内容在文件里，不往审计里抄一份。
+fn audit_arguments(tool: &str, arguments: &str) -> String {
+    if !matches!(tool, "write" | "edit") {
+        return arguments.to_string();
+    }
+    let path = serde_json::from_str::<Value>(arguments)
+        .ok()
+        .and_then(|input| input["path"].as_str().map(str::to_string));
+    path.unwrap_or_default()
 }
 
 /// 新来的人类消息由谁接。点了名的听点名的，没点名的由路由挑。
@@ -787,10 +799,12 @@ impl Observer for RoomObserver {
         self.shared.engine.append_delta(&self.message_id, &all);
     }
 
-    async fn tool_started(&self, call_id: &str, tool: &str, title: &str) {
+    async fn tool_started(&self, call_id: &str, tool: &str, title: &str, arguments: &str) {
         self.beat();
         if leaves_a_mark(tool) {
-            let entry = Audit::bot(&self.bot.name, &format!("tool.{tool}"), title);
+            // 标题是给人扫一眼的，会截短；留底要留完整的参数——不用批准就做了的那些，只有这里有记录。
+            let entry = Audit::bot(&self.bot.name, &format!("tool.{tool}"), title)
+                .detail(audit_arguments(tool, arguments));
             self.audit(entry).await;
         }
         self.steps.lock().unwrap().push(ToolStep {

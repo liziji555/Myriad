@@ -209,7 +209,7 @@ impl Observer for Quiet<'_> {
     async fn text_delta(&self, _text: &str) {
         self.beat();
     }
-    async fn tool_started(&self, _call_id: &str, _tool: &str, _title: &str) {
+    async fn tool_started(&self, _call_id: &str, _tool: &str, _title: &str, _arguments: &str) {
         self.beat();
     }
     async fn tool_finished(&self, _call_id: &str, _ok: bool) {

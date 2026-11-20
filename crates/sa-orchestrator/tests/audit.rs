@@ -155,6 +155,11 @@ async fn commands_and_approvals_are_on_record_and_reading_is_not() {
         (AuditActor::Bot, bot.name.as_str())
     );
     assert!(entries[0].summary.contains("echo 一"), "{:?}", entries[0]);
+    // 参数原文留在细节里，不受标题长度的限制。
+    assert_eq!(
+        entries[0].detail.as_deref(),
+        Some(r#"{"command":"echo 一"}"#)
+    );
     assert_eq!(entries[1].actor, AuditActor::User);
     assert!(entries[1].summary.contains("允许一次") && entries[1].summary.contains("echo 一"));
     assert!(entries[3].summary.contains("拒绝") && entries[3].summary.contains("echo 二"));

@@ -58,7 +58,8 @@ pub trait Inbox: Send {
 pub trait Observer: Send + Sync {
     /// 模型又说了一小段话。
     async fn text_delta(&self, text: &str);
-    async fn tool_started(&self, call_id: &str, tool: &str, title: &str);
+    /// 一步开始了。`arguments` 是模型给这个工具的参数原文（JSON），内部的步骤（压缩）是空的。
+    async fn tool_started(&self, call_id: &str, tool: &str, title: &str, arguments: &str);
     async fn tool_finished(&self, call_id: &str, ok: bool);
     /// 一次模型调用结束，报告用量。
     async fn usage(&self, model: &str, usage: Usage);
@@ -326,7 +327,7 @@ impl Turn {
                 self.compactions
             );
             observer
-                .tool_started(&step, "compact", "对话太长，压缩前面的内容")
+                .tool_started(&step, "compact", "对话太长，压缩前面的内容", "")
                 .await;
             let summary = self
                 .summarise(provider, config, plan.text, observer, cancel)
@@ -572,7 +573,7 @@ async fn run_one(
         return None;
     }
     observer
-        .tool_started(&call.id, &call.name, &prepared.title)
+        .tool_started(&call.id, &call.name, &prepared.title, &call.arguments)
         .await;
     let result = match &prepared.runnable {
         Err(message) => Some(Err(message.clone())),
@@ -713,7 +714,7 @@ mod tests {
                 }
             }
         }
-        async fn tool_started(&self, call_id: &str, tool: &str, title: &str) {
+        async fn tool_started(&self, call_id: &str, tool: &str, title: &str, _arguments: &str) {
             self.log
                 .lock()
                 .unwrap()
