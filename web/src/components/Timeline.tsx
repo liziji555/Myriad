@@ -59,6 +59,13 @@ export function Timeline({
 }: Props) {
   const scroller = useRef<HTMLElement>(null);
   const stick = useRef(true);
+  /** 人往上翻走了：不再跟着新内容滚，给一个「回到最新」。 */
+  const [away, setAway] = useState(false);
+  const toLatest = () => {
+    stick.current = true;
+    setAway(false);
+    scroller.current?.scrollTo({ top: scroller.current.scrollHeight });
+  };
   /** 往前翻页之前的内容高度，用来在新内容插到上面之后保持视线位置。 */
   const heightBeforeOlder = useRef<number | null>(null);
   const [loadingOlder, setLoadingOlder] = useState(false);
@@ -214,9 +221,15 @@ export function Timeline({
       onScroll={(event) => {
         const el = event.currentTarget;
         stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < STICK_PX;
+        setAway(!stick.current);
       }}
     >
       {body}
+      {away && messages.length > 0 && (
+        <button type="button" className="sa-chip sa-to-latest" onClick={toLatest}>
+          回到最新 ↓
+        </button>
+      )}
     </section>
   );
 }

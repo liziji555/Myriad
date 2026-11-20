@@ -606,6 +606,15 @@ button.sa-row:hover {
 .sa-mention-menu li[aria-selected="true"] {
   background: var(--sa-active);
 }
+/* 往上翻走之后浮在时间线底部的「回到最新」。 */
+.sa-to-latest {
+  position: sticky;
+  bottom: var(--sa-space-2);
+  display: block;
+  margin: 0 auto;
+  background: var(--sa-bg);
+  box-shadow: 0 2px 8px color-mix(in srgb, #000 14%, transparent);
+}
 .sa-menu-group {
   margin: 0;
   padding: var(--sa-space-1) var(--sa-space-2) 0;
