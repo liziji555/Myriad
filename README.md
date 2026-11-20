@@ -44,6 +44,22 @@ export DEEPSEEK_API_KEY=sk-...
 sa serve
 ```
 
+也可以用别的 OpenAI 兼容服务。以 OpenCode Go 为例，在数据目录的 `config.toml` 里加一段，
+再把 `[tiers]` 里三个档位的 `provider` 和 `model` 改过去，密钥放进 `OPENCODE_API_KEY`：
+
+```toml
+[providers.opencode-go]
+kind = "openai_compat"
+base_url = "https://opencode.ai/inference/go/v1"
+api_key_env = "OPENCODE_API_KEY"
+session_header = "x-opencode-session"   # 这个网关要求每个会话带一个固定的请求头
+
+[tiers]
+cheap = { provider = "opencode-go", model = "deepseek-v4.1-flash", thinking = false }
+mid = { provider = "opencode-go", model = "deepseek-v4.1-flash" }
+strong = { provider = "opencode-go", model = "deepseek-v4.1-flash" }
+```
+
 密钥只从环境变量读，不会写进配置文件或数据库。`config.toml` 里的每日花费上限这个版本还没有生效，
 花费请在模型服务的控制台里看。换模型、换服务地址改数据目录里的 `config.toml`，
 改完用 `sa doctor` 检查。
