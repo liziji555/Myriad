@@ -1494,3 +1494,58 @@ async fn one_human_message_gets_at_most_six_bot_turns() {
     assert!(refused >= 1, "应该有一次因为到了上限被拒绝");
     t.rig.orchestrator.shutdown().await;
 }
+
+fn heard_tools(provider: &MockProvider) -> Vec<String> {
+    let requests = provider.requests();
+    requests
+        .last()
+        .unwrap()
+        .messages
+        .iter()
+        .filter(|m| m.role == sa_llm::Role::Tool)
+        .map(|m| m.content.clone())
+        .collect()
+}
+
+/// 三个 Bot 轮着说同一句话：次数上限还没到，看门狗先发现在转圈，停下这个房间里的对话。
+#[tokio::test]
+async fn the_watchdog_stops_bots_that_keep_saying_the_same_thing() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = team(
+        dir.path(),
+        vec![],
+        vec![
+            ask("a1", "Reviewer", "你来看看"),
+            MockReply::text("收到，我转给别人。"),
+            ask("a2", "助手", "登录页的事交给你"),
+            MockReply::text("收到，我转给别人。"),
+            ask("a3", "Coder", "还是得你来改"),
+            MockReply::text("收到， 我转给别人。"),
+            MockReply::Hang(vec![]),
+        ],
+    );
+    t.rig.say("@coder 看一下登录页").await;
+    for _ in 0..500 {
+        if t.rig.provider.requests().len() >= 7 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        t.rig.provider.requests().len(),
+        7,
+        "{:#?}",
+        heard_tools(&t.rig.provider)
+    );
+
+    let found = t.rig.orchestrator.watchdog_tick().await;
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].kind, sa_protocol::NoticeKind::Loop);
+    assert_eq!(found[0].room_id.as_ref(), Some(&t.rig.room));
+
+    // 正在说话的那个被停下，房间安静下来；再看一遍没有新的提醒。
+    let messages = t.rig.settled(5).await;
+    assert_eq!(messages.last().unwrap().state, MessageState::Cancelled);
+    assert!(t.rig.orchestrator.watchdog_tick().await.is_empty());
+    t.rig.orchestrator.shutdown().await;
+}
