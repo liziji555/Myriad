@@ -933,6 +933,67 @@ async fn a_task_runs_is_rejected_then_accepted_over_http() {
 }
 
 #[tokio::test]
+async fn the_audit_log_is_served_filtered_and_paged() {
+    let (app, engine) = app();
+    let room = engine.list_rooms().unwrap().remove(0);
+    let created = app
+        .clone()
+        .oneshot(post("/api/bots", r#"{"name":"Coder","persona":"写代码"}"#))
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let other = engine.create_room("另一个").unwrap();
+    engine.link_repo(&room.id, "acme/web").unwrap();
+
+    let all: sa_protocol::AuditPage =
+        json(app.clone().oneshot(get("/api/audit")).await.unwrap()).await;
+    let actions: Vec<&str> = all.entries.iter().map(|e| e.action.as_str()).collect();
+    assert_eq!(actions, ["link.created", "room.created", "bot.created"]);
+    assert!(!all.has_more);
+
+    let in_room = format!("/api/audit?room={}", room.id);
+    let page: sa_protocol::AuditPage =
+        json(app.clone().oneshot(get(&in_room)).await.unwrap()).await;
+    assert_eq!(page.entries.len(), 1);
+    assert_eq!(
+        page.entries[0].summary,
+        "把 GitHub 仓库 acme/web 连到了房间"
+    );
+    let elsewhere = format!("/api/audit?room={}&action=link.", other.id);
+    let page: sa_protocol::AuditPage =
+        json(app.clone().oneshot(get(&elsewhere)).await.unwrap()).await;
+    assert!(page.entries.is_empty());
+
+    // 翻页：一次一条，接着上一页最后一条往前。
+    let first: sa_protocol::AuditPage = json(
+        app.clone()
+            .oneshot(get("/api/audit?limit=1"))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(first.has_more);
+    let next = format!(
+        "/api/audit?limit=1&before={}&action=bot.",
+        first.entries[0].id
+    );
+    let second: sa_protocol::AuditPage = json(app.clone().oneshot(get(&next)).await.unwrap()).await;
+    assert_eq!(second.entries[0].action, "bot.created");
+    assert!(!second.has_more);
+
+    let bad = app
+        .clone()
+        .oneshot(get("/api/audit?limit=abc"))
+        .await
+        .unwrap();
+    assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+    // 没带令牌的看不了。
+    let anonymous = Request::get("/api/audit").body(Body::empty()).unwrap();
+    let refused = app.clone().oneshot(anonymous).await.unwrap();
+    assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
 async fn usage_and_notices_are_served_and_a_notice_can_be_dismissed() {
     let (app, engine) = app();
     let response = app.clone().oneshot(get("/api/usage")).await.unwrap();
