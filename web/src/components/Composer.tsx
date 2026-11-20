@@ -133,7 +133,9 @@ export function Composer({
         setPicked((index + step + count) % count);
         return;
       }
-      if (event.key === "Enter" || event.key === "Tab") {
+      // 命令只认单独的回车：Shift+回车照常换行，Tab 照常挪走焦点。点名的菜单回车和 Tab 都是补全。
+      const plainEnter = event.key === "Enter" && !event.shiftKey;
+      if (command ? plainEnter : event.key === "Enter" || event.key === "Tab") {
         event.preventDefault();
         if (command) runCommand(command);
         else if (choice) complete(choice);
