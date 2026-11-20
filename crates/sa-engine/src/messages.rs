@@ -3,13 +3,30 @@
 use crate::team::find_mentions;
 use crate::{now_ms, to_json, Engine, EngineError, Result, MAX_MESSAGE_CHARS};
 use sa_protocol::{
-    BotId, EventKind, Message, MessageDelta, MessageId, MessagePage, MessageRef, MessageState,
-    RoomActivity, RoomId, Sender, SessionId, StepState, ToolStep,
+    BotId, EventKind, Message, MessageDelta, MessageId, MessageKind, MessagePage, MessageRef,
+    MessageState, RoomActivity, RoomId, Sender, SessionId, StepState, ToolStep,
 };
+use sa_store::Transaction;
 use sa_store::{bots, events, messages, rooms, sessions, usage};
 use tokio::sync::broadcast;
 
 pub const MAX_PAGE: u32 = 200;
+
+/// 在事务里写入一条新消息并记一条「多了一条消息」的事件。返回带 `seq` 的消息和事件的序号。
+pub(crate) fn add_message(
+    tx: &Transaction<'_>,
+    mut message: Message,
+) -> sa_store::Result<(Message, i64)> {
+    message.seq = messages::insert(tx, &message)?;
+    let seq = events::append(
+        tx,
+        Some(&message.room_id),
+        EventKind::MessageCreated,
+        &to_json(&message),
+        message.created_at,
+    )?;
+    Ok((message, seq))
+}
 
 /// 一次模型调用的用量。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -112,7 +129,7 @@ impl Engine {
                         find_mentions(&content, &members)
                     }
                 };
-                let mut message = Message {
+                let message = Message {
                     id: MessageId::new(),
                     seq: 0,
                     room_id: room_id.clone(),
@@ -120,6 +137,9 @@ impl Engine {
                     content,
                     mentions,
                     hop,
+                    kind: MessageKind::Chat,
+                    task_id: None,
+                    run_id: None,
                     steps: vec![],
                     state,
                     error: None,
@@ -127,15 +147,7 @@ impl Engine {
                     created_at: now,
                     updated_at: now,
                 };
-                message.seq = messages::insert(tx, &message)?;
-                let seq = events::append(
-                    tx,
-                    Some(room_id),
-                    EventKind::MessageCreated,
-                    &to_json(&message),
-                    now,
-                )?;
-                Ok(Some((message, seq)))
+                Ok(Some(add_message(tx, message)?))
             })?
             .ok_or_else(|| EngineError::NotFound("没有这个房间".into()))?;
         self.publish(seq);
@@ -365,7 +377,9 @@ impl Engine {
         self.live.subscribe()
     }
 
-    fn drafts(&self) -> std::sync::MutexGuard<'_, std::collections::HashMap<MessageId, Message>> {
+    pub(crate) fn drafts(
+        &self,
+    ) -> std::sync::MutexGuard<'_, std::collections::HashMap<MessageId, Message>> {
         self.drafts.lock().unwrap_or_else(|e| e.into_inner())
     }
 }

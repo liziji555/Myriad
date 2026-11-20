@@ -5,6 +5,7 @@
 
 mod messages;
 mod rules;
+mod tasks;
 mod team;
 
 use sa_protocol::{
@@ -18,6 +19,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{broadcast, watch};
 
 pub use messages::UsageRecord;
+pub use sa_store::tasks::Workdir;
+pub use tasks::{
+    state_label, NewTask, RunOutcome, MAX_ACTIVE_TASKS, MAX_TASK_TEXT_CHARS, MAX_TASK_TITLE_CHARS,
+};
 pub use team::{find_mentions, BotPatch, MAX_BOT_NAME_CHARS, MAX_PERSONA_CHARS, MAX_ROOM_MEMBERS};
 
 pub const MAX_ROOM_NAME_CHARS: usize = 60;

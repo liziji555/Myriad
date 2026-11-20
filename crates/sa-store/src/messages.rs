@@ -88,10 +88,10 @@ pub fn list_before(
     Ok(messages)
 }
 
-/// 房间里 `seq` 大于 `after` 的、人发的消息，按 `seq` 升序。
+/// 房间里 `seq` 大于 `after` 的、人说的话（不算人开的任务卡），按 `seq` 升序。
 pub fn list_user_after(conn: &Connection, room_id: &RoomId, after: i64) -> Result<Vec<Message>> {
     let mut stmt = conn.prepare(&format!(
-        "SELECT {COLUMNS} FROM messages WHERE room_id = ?1 AND seq > ?2 AND sender_kind = 'user' ORDER BY seq"
+        "SELECT {COLUMNS} FROM messages WHERE room_id = ?1 AND seq > ?2 AND sender_kind = 'user' AND kind = 'chat' ORDER BY seq"
     ))?;
     let rows = stmt.query_map(params![room_id.as_str(), after], read_row)?;
     rows.map(|row| row?).collect()
