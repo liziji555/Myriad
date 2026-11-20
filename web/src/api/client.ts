@@ -1,4 +1,14 @@
-import type { ApiError, Bot, CreateRoomRequest, Health, Room } from "./types";
+import type {
+  ApiError,
+  Bot,
+  CreateRoomRequest,
+  Health,
+  Message,
+  MessagePage,
+  Room,
+  RoomId,
+  StopResponse,
+} from "./types";
 
 export class ApiRequestError extends Error {
   constructor(
@@ -41,4 +51,13 @@ export const api = {
   listRooms: () => request<Room[]>("/api/rooms"),
   listBots: () => request<Bot[]>("/api/bots"),
   createRoom: (body: CreateRoomRequest) => postJson<Room>("/api/rooms", body),
+  /** 房间里 `before`（某条消息的 seq）之前的一页消息；不给就是最新的一页。 */
+  listMessages: (roomId: RoomId, before?: number) =>
+    request<MessagePage>(
+      `/api/rooms/${encodeURIComponent(roomId)}/messages${before === undefined ? "" : `?before=${before}`}`,
+    ),
+  postMessage: (roomId: RoomId, content: string) =>
+    postJson<Message>(`/api/rooms/${encodeURIComponent(roomId)}/messages`, { content }),
+  stopReply: (roomId: RoomId) =>
+    postJson<StopResponse>(`/api/rooms/${encodeURIComponent(roomId)}/stop`, {}),
 };
