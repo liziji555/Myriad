@@ -606,6 +606,40 @@ button.sa-row:hover {
 .sa-mention-menu li[aria-selected="true"] {
   background: var(--sa-active);
 }
+.sa-menu-group {
+  margin: 0;
+  padding: var(--sa-space-1) var(--sa-space-2) 0;
+  color: var(--sa-fg-faint);
+  font-size: var(--sa-text-xs);
+}
+.sa-menu-item {
+  padding: var(--sa-space-1) var(--sa-space-2);
+  border-radius: var(--sa-radius-sm);
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+.sa-menu-item[aria-selected="true"] {
+  background: var(--sa-hover);
+}
+.sa-menu-empty {
+  padding: var(--sa-space-2);
+  color: var(--sa-fg-muted);
+  font-size: var(--sa-text-sm);
+}
+.sa-examples {
+  display: grid;
+  gap: var(--sa-space-2);
+  justify-items: center;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.sa-examples .sa-chip {
+  height: auto;
+  min-height: 28px;
+  white-space: normal;
+  text-align: left;
+}
 .sa-mention-name {
   font-weight: 600;
 }

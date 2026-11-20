@@ -1,7 +1,16 @@
-import { useRef, useState, type KeyboardEvent } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent } from "react";
+import { loadDraft, saveDraft } from "../api/drafts";
+import { groupCommands, matchCommands, slashQuery, type SlashCommand } from "../api/slash";
 import type { Bot } from "../api/types";
 
 interface Props {
+  /** 哪个房间的输入框。写了一半的话按房间记着。 */
+  roomId: string;
+  /** 别处（空房间里的示例）要填进来的一句话。填完之后调用 `onPrefilled`，同一句不会填两次。 */
+  prefill: string | null;
+  onPrefilled(): void;
+  /** 输入 `/` 时列出来的命令。 */
+  commands: readonly SlashCommand[];
   /** 不能发消息的原因；能发时为空。 */
   disabledReason: string | null;
   /** Bot 是否正在回复。 */
@@ -21,12 +30,27 @@ export function mentionAt(text: string, caret: number): { start: number; query: 
   return /\s/.test(query) ? null : { start, query };
 }
 
-export function Composer({ disabledReason, replying, members, onSend, onStop }: Props) {
+export function Composer({
+  roomId,
+  prefill,
+  onPrefilled,
+  commands,
+  disabledReason,
+  replying,
+  members,
+  onSend,
+  onStop,
+}: Props) {
   const input = useRef<HTMLTextAreaElement>(null);
   const [caret, setCaret] = useState(0);
   const [picked, setPicked] = useState(0);
   const [dismissed, setDismissed] = useState(false);
-  const [text, setText] = useState("");
+  const [text, setDraft] = useState(() => loadDraft(roomId));
+  /** 改输入框里的内容，同时记成这个房间的草稿。 */
+  const setText = (next: string) => {
+    setDraft(next);
+    saveDraft(roomId, next);
+  };
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const canSend = !disabledReason && !sending && text.trim() !== "";
@@ -52,11 +76,40 @@ export function Composer({ disabledReason, replying, members, onSend, onStop }: 
     setSending(false);
   };
 
-  const mention = dismissed ? null : mentionAt(text, caret);
+  useEffect(() => {
+    if (prefill === null) return;
+    setText(prefill);
+    setCaret(prefill.length);
+    onPrefilled();
+    requestAnimationFrame(() => {
+      input.current?.focus();
+      input.current?.setSelectionRange(prefill.length, prefill.length);
+    });
+    // 只跟着要填的那句话走。
+  }, [prefill]);
+
+  const slash = dismissed ? null : slashQuery(text);
+  const commandOptions = slash === null ? [] : matchCommands(commands, slash);
+  const mention = dismissed || slash !== null ? null : mentionAt(text, caret);
   const options = mention
     ? members.filter((bot) => bot.name.toLowerCase().startsWith(mention.query.toLowerCase()))
     : [];
-  const choice = options[Math.min(picked, options.length - 1)];
+  const count = slash === null ? options.length : commandOptions.length;
+  const index = Math.min(picked, count - 1);
+  const choice = slash === null ? options[index] : undefined;
+  const command = slash === null ? undefined : commandOptions[index];
+  /** 菜单开着但一个都对不上：告诉人没有，不是悄悄消失。 */
+  const noMatch =
+    count === 0 &&
+    (slash !== null ||
+      // 邮箱、包名里的 `@` 不是在点名：只有单独起头的 `@` 才提示。
+      (mention !== null && mention.query !== "" && (mention.start === 0 || /\s/.test(text[mention.start - 1]))));
+
+  const runCommand = (picked: SlashCommand) => {
+    setText("");
+    setPicked(0);
+    picked.run();
+  };
 
   const complete = (bot: Bot) => {
     if (!mention) return;
@@ -72,23 +125,24 @@ export function Composer({ disabledReason, replying, members, onSend, onStop }: 
   };
 
   const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (choice && !event.nativeEvent.isComposing) {
+    if (count > 0 && !event.nativeEvent.isComposing) {
       const step = event.key === "ArrowDown" ? 1 : event.key === "ArrowUp" ? -1 : 0;
       if (step !== 0) {
         event.preventDefault();
-        setPicked((Math.min(picked, options.length - 1) + step + options.length) % options.length);
+        setPicked((index + step + count) % count);
         return;
       }
       if (event.key === "Enter" || event.key === "Tab") {
         event.preventDefault();
-        complete(choice);
+        if (command) runCommand(command);
+        else if (choice) complete(choice);
         return;
       }
-      if (event.key === "Escape") {
-        event.preventDefault();
-        setDismissed(true);
-        return;
-      }
+    }
+    if ((count > 0 || noMatch) && event.key === "Escape" && !event.nativeEvent.isComposing) {
+      event.preventDefault();
+      setDismissed(true);
+      return;
     }
     // 输入法选字时的回车不算发送。
     if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) return;
@@ -122,6 +176,36 @@ export function Composer({ disabledReason, replying, members, onSend, onStop }: 
           ))}
         </ul>
       )}
+      {command && (
+        <div className="sa-mention-menu" role="listbox" aria-label="命令">
+          {groupCommands(commandOptions).map(({ group, items }) => (
+            <div key={group} role="group" aria-label={group}>
+              <p className="sa-menu-group" aria-hidden="true">
+                {group}
+              </p>
+              {items.map((item) => (
+                <div
+                  key={item.id}
+                  className="sa-menu-item"
+                  role="option"
+                  aria-selected={item.id === command.id}
+                  onMouseDown={(event) => {
+                    event.preventDefault();
+                    runCommand(item);
+                  }}
+                >
+                  {item.title}
+                </div>
+              ))}
+            </div>
+          ))}
+        </div>
+      )}
+      {noMatch && (
+        <p className="sa-mention-menu sa-menu-empty" role="status">
+          {slash === null ? "没有匹配的 Bot" : "没有匹配的命令"}，按 Esc 关掉
+        </p>
+      )}
       <div className="sa-composer-row">
         <textarea
           ref={input}
@@ -129,7 +213,7 @@ export function Composer({ disabledReason, replying, members, onSend, onStop }: 
           value={text}
           disabled={disabledReason !== null}
           aria-label="输入消息"
-          placeholder={disabledReason ?? "发消息给 Bot。输入 @ 点名，回车发送，Shift+回车换行"}
+          placeholder={disabledReason ?? "发消息给 Bot。输入 @ 点名、/ 找命令，回车发送，Shift+回车换行"}
           onChange={(event) => {
             setText(event.target.value);
             setCaret(event.target.selectionStart);

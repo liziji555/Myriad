@@ -28,10 +28,19 @@ interface Props {
   /** 答复一张审批卡。 */
   onDecide: Decide;
   onLightDemo(source: HTMLElement): void;
+  /** 空房间里点了一句示例：把它填进输入框，由人自己决定发不发。 */
+  onExample(text: string): void;
 }
 
 /** 离底部这么近就算「在看最新的」，新内容来了自动跟着滚。 */
 const STICK_PX = 80;
+
+/** 空房间里给人点的几句话：各自用到读文件、开任务、点名这几样本事。 */
+const EXAMPLES = [
+  "看一下工作目录里有什么，用三句话告诉我这是个什么项目",
+  "把 README 里写错的地方找出来，开一个任务去改",
+  "这个房间里有哪些 Bot，各自负责什么？",
+];
 
 export function Timeline({
   chat,
@@ -46,6 +55,7 @@ export function Timeline({
   onLoadOlder,
   onDecide,
   onLightDemo,
+  onExample,
 }: Props) {
   const scroller = useRef<HTMLElement>(null);
   const stick = useRef(true);
@@ -120,7 +130,17 @@ export function Timeline({
     body = (
       <div className="sa-empty">
         <h2>这个房间还没有消息</h2>
-        <p>在下面输入内容，回车发送。也可以先看看「过程连到结果」的光线效果：</p>
+        <p>在下面输入内容，回车发送。不知道说什么的话，点一句试试（会填进输入框，不会直接发出去）：</p>
+        <ul className="sa-examples" aria-label="示例">
+          {EXAMPLES.map((example) => (
+            <li key={example}>
+              <button type="button" className="sa-chip" onClick={() => onExample(example)}>
+                {example}
+              </button>
+            </li>
+          ))}
+        </ul>
+        <p>也可以先看看「过程连到结果」的光线效果：</p>
         <button type="button" className="sa-button" onClick={(event) => onLightDemo(event.currentTarget)}>
           演示光线
         </button>

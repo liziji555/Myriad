@@ -1,5 +1,6 @@
 import { useEffect, useState, type CSSProperties } from "react";
 import { loadLayout, saveLayout, type Layout } from "./api/layout";
+import type { SlashCommand } from "./api/slash";
 import { STATE_LABEL } from "./api/tasks";
 import { api } from "./api/client";
 import type { RoomId, TaskId } from "./api/types";
@@ -28,6 +29,7 @@ function Shell() {
   const [selected, setSelected] = useState<RoomId | null>(null);
   const [tab, setTab] = useState<PanelTab>("tasks");
   const [panelOpen, setPanelOpen] = useState(true);
+  const [prefill, setPrefill] = useState<string | null>(null);
   const [layout, setLayout] = useState(loadLayout);
   const changeLayout = (patch: Partial<Layout>) =>
     setLayout((current) => {
@@ -218,6 +220,17 @@ function Shell() {
       : []),
   ];
 
+  // 输入框里 `/` 列出来的命令：就是命令面板里的那些动作，分成「面板」和「动作」两组。
+  const slashCommands: SlashCommand[] = paletteEntries
+    .filter((entry) => entry.group === "action")
+    .map((entry) => ({
+      id: entry.id,
+      group: entry.id.startsWith("action:tab-") ? "面板" : "动作",
+      title: entry.title,
+      run: entry.run,
+    }))
+    .sort((a, b) => Number(b.group === "面板") - Number(a.group === "面板"));
+
   return (
     <div
       className="sa-shell"
@@ -276,6 +289,7 @@ function Shell() {
               onLoadOlder={() => workspace.loadOlder(room.id)}
               onDecide={workspace.decideApproval}
               onLightDemo={runLightDemo}
+              onExample={setPrefill}
             />
             {roomChat?.activity?.routing ? (
               <p className="sa-room-status" role="status">
@@ -290,6 +304,10 @@ function Shell() {
             )}
             <Composer
               key={`composer-${room.id}`}
+              roomId={room.id}
+              prefill={prefill}
+              onPrefilled={() => setPrefill(null)}
+              commands={slashCommands}
               disabledReason={room.host_bot_id ? null : "这个房间里还没有 Bot，发了也没人回应"}
               replying={replying}
               members={members.filter((bot) => bot.enabled)}
