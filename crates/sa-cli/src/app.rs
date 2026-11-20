@@ -54,6 +54,16 @@ impl App {
         args: &RunArgs,
         models: impl FnOnce(&Config) -> Arc<dyn ModelRouter>,
     ) -> Result<Self> {
+        Self::open_tuned(data_dir, args, models, |_| {})
+    }
+
+    /// 和 [`App::open_with`] 一样，另外可以在启动前调整设置。测试用它把等待时间调短。
+    pub fn open_tuned(
+        data_dir: &DataDir,
+        args: &RunArgs,
+        models: impl FnOnce(&Config) -> Arc<dyn ModelRouter>,
+        tune: impl FnOnce(&mut Settings),
+    ) -> Result<Self> {
         create_private_dir(data_dir.root())
             .with_context(|| format!("无法创建数据目录 {}", data_dir.root().display()))?;
         let lock = lock_data_dir(&data_dir.lock())?;
@@ -90,7 +100,7 @@ impl App {
         }
 
         let models = models(&config);
-        let settings = Settings {
+        let mut settings = Settings {
             sessions_dir: data_dir.sessions(),
             fence,
             prompt,
@@ -98,6 +108,7 @@ impl App {
             allow_private_network: false,
             approval_timeout: sa_orchestrator::DEFAULT_APPROVAL_TIMEOUT,
         };
+        tune(&mut settings);
         let orchestrator = Arc::new(Orchestrator::new(engine.clone(), models, settings));
         Ok(Self {
             config,
