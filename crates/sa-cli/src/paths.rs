@@ -47,6 +47,11 @@ impl DataDir {
     }
 
     /// 可选的系统提示词。有这个文件就用它，没有就用内置的。
+    /// 技能放在这里：`<名字>/SKILL.md` 或者 `<名字>.md`。
+    pub fn skills(&self) -> PathBuf {
+        self.root.join("skills")
+    }
+
     pub fn chat_prompt(&self) -> PathBuf {
         self.root.join("prompts").join("chat.md")
     }

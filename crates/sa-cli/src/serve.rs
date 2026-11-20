@@ -55,6 +55,12 @@ pub fn run(data_dir: &DataDir, args: ServeArgs) -> Result<()> {
             app.orchestrator.resume_tasks();
             app.orchestrator.start_watchdog();
             app.orchestrator.start_routines();
+            // 外部 MCP 服务在后台连：连上了工具才出现，没连上不耽误别的。
+            let mcp = app.mcp_specs();
+            if !mcp.is_empty() {
+                println!("正在连接 {} 个 MCP 服务。", mcp.len());
+                app.orchestrator.start_mcp(mcp);
+            }
             let mut state = AppState::new(app.engine.clone(), app.orchestrator.clone(), token);
             // 外面的连接都是可选的：没设对应的环境变量就不开。
             let github = &app.config.github;

@@ -113,6 +113,7 @@ impl App {
         };
         tune(&mut settings);
         let orchestrator = Arc::new(Orchestrator::new(engine.clone(), models, settings));
+        orchestrator.use_skills(data_dir.skills());
         Ok(Self {
             config,
             engine,
@@ -121,6 +122,15 @@ impl App {
             mock: args.mock,
             _lock: lock,
         })
+    }
+}
+
+impl App {
+    /// 配置里启用着的 MCP 服务。它们在工作目录里启动。
+    pub fn mcp_specs(&self) -> Vec<sa_tools::mcp::McpSpec> {
+        let env = |key: &str| std::env::var(key).ok().filter(|value| !value.is_empty());
+        self.config
+            .mcp_specs(std::path::Path::new(&self.workdir), env)
     }
 }
 

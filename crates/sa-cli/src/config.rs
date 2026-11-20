@@ -20,6 +20,9 @@ pub struct Config {
     /// 连 Telegram 用。老的配置文件里没有这一节，用默认值。
     #[serde(default)]
     pub telegram: Telegram,
+    /// 外部 MCP 服务：名字 → 怎么启动。它们的工具会加给每个 Bot。
+    #[serde(default)]
+    pub mcp: BTreeMap<String, McpServer>,
     /// 各个模型每一百万 token 多少钱，算花费用。`default` 是没有单独写的模型的价格。
     /// 老的配置文件里没有这一节，用内置的偏高的价格。
     #[serde(default)]
@@ -59,6 +62,30 @@ pub struct GitHub {
     pub webhook_secret_env: String,
     /// 只收带这些标签之一的新 issue。空着就都收。
     pub issue_labels: Vec<String>,
+}
+
+/// 一个外部 MCP 服务：启动一个本机的程序，通过标准输入输出和它说话。
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpServer {
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// 给它的环境变量。
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    /// 把自己环境里的这几个变量原样传给它（密钥放在环境变量里，不写进配置文件）。
+    #[serde(default)]
+    pub env_from: Vec<String>,
+    /// 这些工具不用问人，直接执行。别的每次都要批准。
+    #[serde(default)]
+    pub auto_approve: Vec<String>,
+    #[serde(default = "enabled_by_default")]
+    pub enabled: bool,
+}
+
+fn enabled_by_default() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -177,11 +204,47 @@ impl Config {
         }
     }
 
+    /// 启用着的 MCP 服务怎么启动。`cwd` 是它们的工作目录，`env` 用来查 `env_from` 里写的变量。
+    pub fn mcp_specs(
+        &self,
+        cwd: &Path,
+        env: impl Fn(&str) -> Option<String>,
+    ) -> Vec<sa_tools::mcp::McpSpec> {
+        let enabled = self.mcp.iter().filter(|(_, server)| server.enabled);
+        enabled
+            .map(|(name, server)| {
+                let mut vars: Vec<(String, String)> = server
+                    .env_from
+                    .iter()
+                    .filter_map(|key| Some((key.clone(), env(key)?)))
+                    .collect();
+                vars.extend(server.env.iter().map(|(key, value)| (key.clone(), value.clone())));
+                sa_tools::mcp::McpSpec {
+                    name: name.clone(),
+                    command: server.command.clone(),
+                    args: server.args.clone(),
+                    env: vars,
+                    cwd: Some(cwd.to_path_buf()),
+                    auto_approve: server.auto_approve.clone(),
+                }
+            })
+            .collect()
+    }
+
     fn validate(&self) -> Result<()> {
         if let Some(repo) = &self.github.repo {
             let parts: Vec<&str> = repo.split('/').collect();
             if parts.len() != 2 || parts.iter().any(|part| part.trim().is_empty()) {
                 bail!("[github] 的 repo 要写成 \"owner/name\"，现在是「{repo}」");
+            }
+        }
+        for (name, server) in &self.mcp {
+            let plain = |c: char| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_';
+            if name.is_empty() || name.len() > 24 || !name.chars().all(plain) {
+                bail!("[mcp.{name}] 的名字只能用小写字母、数字、横线和下划线，最多 24 个字符");
+            }
+            if server.command.trim().is_empty() {
+                bail!("[mcp.{name}] 要写 command：启动这个服务的命令");
             }
         }
         if !self.telegram.api_base.starts_with("http") {
@@ -413,6 +476,53 @@ mod tests {
         let bad = DEFAULT_CONFIG_TOML.replace("https://api.telegram.org", "api.telegram.org");
         let error = Config::parse(&bad).unwrap_err();
         assert!(format!("{error:#}").contains("[telegram]"), "{error:#}");
+    }
+
+    #[test]
+    fn mcp_servers_are_read_checked_and_turned_into_specs() {
+        assert!(Config::parse(DEFAULT_CONFIG_TOML).unwrap().mcp.is_empty());
+        let with = |extra: &str| Config::parse(&format!("{DEFAULT_CONFIG_TOML}\n{extra}"));
+        let config = with(
+            r#"
+[mcp.files]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "."]
+env = { MODE = "ro" }
+env_from = ["FILES_TOKEN", "NOT_SET"]
+auto_approve = ["read_file"]
+
+[mcp.off]
+command = "uvx"
+enabled = false
+"#,
+        )
+        .unwrap();
+        let env = |key: &str| (key == "FILES_TOKEN").then(|| "t0ken".to_string());
+        let specs = config.mcp_specs(Path::new("/work"), env);
+        // 停用的不启动；没设的环境变量不传。
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].name, "files");
+        assert_eq!(specs[0].command, "npx");
+        assert_eq!(specs[0].args.len(), 3);
+        assert_eq!(
+            specs[0].env,
+            [
+                ("FILES_TOKEN".to_string(), "t0ken".to_string()),
+                ("MODE".to_string(), "ro".to_string())
+            ]
+        );
+        assert_eq!(specs[0].auto_approve, ["read_file"]);
+        assert_eq!(specs[0].cwd.as_deref(), Some(Path::new("/work")));
+
+        for (bad, needle) in [
+            ("[mcp.\"My Files\"]\ncommand = \"npx\"", "名字只能用"),
+            ("[mcp.files]\ncommand = \" \"", "要写 command"),
+            ("[mcp.files]\nargs = []", "command"),
+            ("[mcp.files]\ncommand = \"npx\"\nurl = \"http://x\"", "url"),
+        ] {
+            let error = format!("{:#}", with(bad).unwrap_err());
+            assert!(error.contains(needle), "{bad}: {error}");
+        }
     }
 
     #[test]
