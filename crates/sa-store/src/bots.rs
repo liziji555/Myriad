@@ -25,6 +25,10 @@ pub fn list(conn: &Connection) -> Result<Vec<Bot>> {
     rows.map(|row| row?).collect()
 }
 
+pub fn get(conn: &Connection, id: &BotId) -> Result<Option<Bot>> {
+    Ok(list(conn)?.into_iter().find(|bot| &bot.id == id))
+}
+
 pub fn count(conn: &Connection) -> Result<i64> {
     Ok(conn.query_row("SELECT COUNT(*) FROM bots", [], |row| row.get(0))?)
 }

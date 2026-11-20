@@ -1,4 +1,16 @@
-import type { ApiError, Bot, CreateRoomRequest, Health, Room } from "./types";
+import type {
+  ApiError,
+  ApprovalDecision,
+  ApprovalId,
+  Bot,
+  CreateRoomRequest,
+  Health,
+  Message,
+  MessagePage,
+  Room,
+  RoomId,
+  StopResponse,
+} from "./types";
 
 export class ApiRequestError extends Error {
   constructor(
@@ -25,6 +37,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       body.message ?? `请求失败（${response.status}）`,
     );
   }
+  // 204 没有内容可读。
+  if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
 }
 
@@ -41,4 +55,16 @@ export const api = {
   listRooms: () => request<Room[]>("/api/rooms"),
   listBots: () => request<Bot[]>("/api/bots"),
   createRoom: (body: CreateRoomRequest) => postJson<Room>("/api/rooms", body),
+  /** 房间里 `before`（某条消息的 seq）之前的一页消息；不给就是最新的一页。 */
+  listMessages: (roomId: RoomId, before?: number) =>
+    request<MessagePage>(
+      `/api/rooms/${encodeURIComponent(roomId)}/messages${before === undefined ? "" : `?before=${before}`}`,
+    ),
+  postMessage: (roomId: RoomId, content: string) =>
+    postJson<Message>(`/api/rooms/${encodeURIComponent(roomId)}/messages`, { content }),
+  stopReply: (roomId: RoomId) =>
+    postJson<StopResponse>(`/api/rooms/${encodeURIComponent(roomId)}/stop`, {}),
+  /** 答复一张审批卡。卡片已经处理过或过期时抛出 `approval_closed`。 */
+  decideApproval: (id: ApprovalId, decision: ApprovalDecision) =>
+    postJson<void>(`/api/approvals/${encodeURIComponent(id)}/decide`, { decision }),
 };

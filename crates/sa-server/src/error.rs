@@ -51,6 +51,9 @@ impl From<EngineError> for AppError {
     fn from(err: EngineError) -> Self {
         match err {
             EngineError::Invalid(message) => Self::new(StatusCode::BAD_REQUEST, "invalid", message),
+            EngineError::NotFound(message) => {
+                Self::new(StatusCode::NOT_FOUND, "not_found", message)
+            }
             EngineError::Store(e) => Self::internal(e),
         }
     }

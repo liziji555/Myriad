@@ -36,6 +36,16 @@ impl DataDir {
         self.root.join("serve.lock")
     }
 
+    /// 会话记录，一个会话一个 `.jsonl` 文件。
+    pub fn sessions(&self) -> PathBuf {
+        self.root.join("sessions")
+    }
+
+    /// 可选的系统提示词。有这个文件就用它，没有就用内置的。
+    pub fn chat_prompt(&self) -> PathBuf {
+        self.root.join("prompts").join("chat.md")
+    }
+
     pub fn token(&self) -> PathBuf {
         self.root.join("token")
     }

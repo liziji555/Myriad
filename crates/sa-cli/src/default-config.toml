@@ -10,14 +10,26 @@ port = 4517
 kind = "openai_compat"
 base_url = "https://api.deepseek.com"
 api_key_env = "DEEPSEEK_API_KEY"
+# 其他 OpenAI 兼容的服务也可以照这个格式加一段。有的网关要求每个会话带一个固定的请求头，
+# 用 session_header 指定名字，例如 OpenCode Go：
+#   [providers.opencode-go]
+#   kind = "openai_compat"
+#   base_url = "https://opencode.ai/inference/go/v1"
+#   api_key_env = "OPENCODE_API_KEY"
+#   session_header = "x-opencode-session"
+# 然后把 [tiers] 里的 provider 和 model 改成它（例如 model = "deepseek-v4.1-flash"）。
 
 # 模型档位。Bot 只引用档位（cheap / mid / strong），换模型只改这里。
+# thinking 控制思考模式：true 开、false 关，不写就用模型服务的默认值。
+# context_window 是模型的上下文窗口（token）。对话快占满时会自动把前面的部分压缩成摘要；
+# 不写就按 1,000,000 算。模型的窗口更小，或者想早点压缩省钱，就写上，例如 context_window = 128000。
 [tiers]
-cheap = { provider = "deepseek", model = "deepseek-flash" }
+cheap = { provider = "deepseek", model = "deepseek-flash", thinking = false }
 mid = { provider = "deepseek", model = "deepseek-flash" }
 strong = { provider = "deepseek", model = "deepseek-v4-pro" }
 
 [budget]
-# 每天的花费硬上限，到了就停止调用模型。
+# 每天的花费上限。注意：这个版本还不会按它拦截模型调用，花费请在模型服务的控制台里看；
+# 预算守卫做好之后，到了上限会停止调用模型。
 daily_limit = 50.0
 currency = "CNY"

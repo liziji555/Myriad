@@ -29,6 +29,9 @@ pub struct Provider {
     pub kind: ProviderKind,
     pub base_url: String,
     pub api_key_env: String,
+    /// 把会话 ID 放在这个请求头里发给服务端。不写就不发。
+    #[serde(default)]
+    pub session_header: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -51,7 +54,16 @@ pub struct Tiers {
 pub struct TierModel {
     pub provider: String,
     pub model: String,
+    /// 是否开启思考模式。不写就用模型服务自己的默认值。
+    #[serde(default)]
+    pub thinking: Option<bool>,
+    /// 这个模型的上下文窗口（token）。对话快占满时自动压缩。不写就用模型服务报的大小。
+    #[serde(default)]
+    pub context_window: Option<usize>,
 }
+
+/// 窗口再小，系统提示词和工具说明就放不下了。
+pub const MIN_CONTEXT_WINDOW: usize = 16_000;
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -98,10 +110,23 @@ impl Config {
             if model.model.trim().is_empty() {
                 bail!("[tiers] 的 {tier} 没有填 model");
             }
+            if model.context_window.is_some_and(|n| n < MIN_CONTEXT_WINDOW) {
+                bail!("[tiers] 的 {tier} 的 context_window 太小，至少要 {MIN_CONTEXT_WINDOW}");
+            }
         }
         for (name, provider) in &self.providers {
             if provider.api_key_env.trim().is_empty() {
                 bail!("[providers.{name}] 没有填 api_key_env");
+            }
+            if let Some(header) = &provider.session_header {
+                // HTTP 请求头名字允许的字符（RFC 9110 的 token）。
+                let valid = !header.is_empty()
+                    && header
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || "!#$%&'*+-.^_`|~".contains(c));
+                if !valid {
+                    bail!("[providers.{name}] 的 session_header「{header}」不是合法的请求头名字");
+                }
             }
         }
         let limit = self.budget.daily_limit;
@@ -137,6 +162,59 @@ mod tests {
             config.providers["deepseek"].kind,
             ProviderKind::OpenaiCompat
         );
+    }
+
+    #[test]
+    fn tier_thinking_is_optional() {
+        let config = Config::parse(DEFAULT_CONFIG_TOML).unwrap();
+        assert_eq!(config.tiers.cheap.thinking, Some(false));
+        assert_eq!(config.tiers.strong.thinking, None);
+    }
+
+    #[test]
+    fn tier_context_window_is_optional_and_checked() {
+        let config = Config::parse(DEFAULT_CONFIG_TOML).unwrap();
+        assert_eq!(config.tiers.mid.context_window, None);
+        let with_window = DEFAULT_CONFIG_TOML.replace(
+            r#"mid = { provider = "deepseek", model = "deepseek-flash" }"#,
+            r#"mid = { provider = "deepseek", model = "deepseek-flash", context_window = 128000 }"#,
+        );
+        let config = Config::parse(&with_window).unwrap();
+        assert_eq!(config.tiers.mid.context_window, Some(128_000));
+        let error = Config::parse(&with_window.replace("128000", "4000")).unwrap_err();
+        assert!(
+            error.to_string().contains("context_window 太小"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn provider_session_header_is_optional_and_checked() {
+        let config = Config::parse(DEFAULT_CONFIG_TOML).unwrap();
+        assert_eq!(config.providers["deepseek"].session_header, None);
+
+        let with_header = DEFAULT_CONFIG_TOML.replace(
+            r#"api_key_env = "DEEPSEEK_API_KEY""#,
+            "api_key_env = \"DEEPSEEK_API_KEY\"\nsession_header = \"x-opencode-session\"",
+        );
+        let config = Config::parse(&with_header).unwrap();
+        assert_eq!(
+            config.providers["deepseek"].session_header.as_deref(),
+            Some("x-opencode-session")
+        );
+        for valid in ["x.session-id", "X_Session~1"] {
+            let text = with_header.replace("x-opencode-session", valid);
+            let config = Config::parse(&text).unwrap();
+            assert_eq!(
+                config.providers["deepseek"].session_header.as_deref(),
+                Some(valid)
+            );
+        }
+        for invalid in ["x session", "x:session", "会话", ""] {
+            let text = with_header.replace("x-opencode-session", invalid);
+            let error = Config::parse(&text).unwrap_err().to_string();
+            assert!(error.contains("session_header"), "{invalid}: {error}");
+        }
     }
 
     #[test]

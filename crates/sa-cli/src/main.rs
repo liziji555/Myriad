@@ -1,5 +1,8 @@
+mod app;
+mod chat;
 mod config;
 mod doctor;
+mod models;
 mod paths;
 mod serve;
 
@@ -22,6 +25,8 @@ struct Cli {
 enum Command {
     /// 启动本机服务，在浏览器里打开界面
     Serve(serve::ServeArgs),
+    /// 在终端里和 Bot 对话（和 sa serve 用同一份数据，不能同时运行）
+    Chat(chat::ChatArgs),
     /// 检查配置、密钥、数据库、端口是否正常
     Doctor,
 }
@@ -30,6 +35,7 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = paths::DataDir::resolve(cli.data_dir).and_then(|data_dir| match cli.command {
         Command::Serve(args) => serve::run(&data_dir, args).map(|()| ExitCode::SUCCESS),
+        Command::Chat(args) => chat::run(&data_dir, args),
         Command::Doctor => Ok(doctor::run(&data_dir)),
     });
     match result {

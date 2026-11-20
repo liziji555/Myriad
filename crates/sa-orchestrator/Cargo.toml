@@ -1,0 +1,26 @@
+[package]
+name = "sa-orchestrator"
+description = "SuperAgent 的编排层：房间里来了消息，让谁接、怎么跑、结果写回哪"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+sa-engine.workspace = true
+sa-kernel.workspace = true
+sa-llm.workspace = true
+sa-protocol.workspace = true
+sa-tools.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+sa-store.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

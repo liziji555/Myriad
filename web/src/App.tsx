@@ -25,10 +25,27 @@ function Shell() {
   const [panelOpen, setPanelOpen] = useState(true);
   const [demoNodes, setDemoNodes] = useState<ActivityNode[]>([]);
   const [version, setVersion] = useState("");
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [retry, setRetry] = useState(0);
 
   useEffect(() => {
     api.health().then((health) => setVersion(health.version), () => {});
   }, []);
+
+  // 选中的房间（没选时是第一个）。换房间、重新连上、片段丢了，都重新拉一次最新的消息。
+  const roomId = (workspace.rooms.find((r) => r.id === selected) ?? workspace.rooms[0])?.id ?? null;
+  const { openRoom, epoch } = workspace;
+  useEffect(() => {
+    if (!roomId) return;
+    let stale = false;
+    setLoadError(null);
+    openRoom(roomId).catch((cause: unknown) => {
+      if (!stale) setLoadError(cause instanceof Error ? cause.message : String(cause));
+    });
+    return () => {
+      stale = true;
+    };
+  }, [roomId, epoch, retry, openRoom]);
 
   if (workspace.phase === "unauthorized") {
     return (
@@ -49,6 +66,8 @@ function Shell() {
   }
 
   const room = workspace.rooms.find((r) => r.id === selected) ?? workspace.rooms[0];
+  const roomChat = room ? workspace.chat.rooms[room.id] : undefined;
+  const replying = roomChat?.messages.some((message) => message.state === "streaming") ?? false;
   const members = room ? workspace.bots.filter((bot) => room.member_bot_ids.includes(bot.id)) : [];
   const showPanel = (next: PanelTab) => {
     setTab(next);
@@ -96,8 +115,23 @@ function Shell() {
               onShowMembers={() => showPanel("members")}
               onTogglePanel={() => setPanelOpen((open) => !open)}
             />
-            <Timeline onLightDemo={runLightDemo} />
-            <Composer />
+            <Timeline
+              key={room.id}
+              chat={roomChat}
+              bots={workspace.bots}
+              loadError={loadError}
+              onRetry={() => setRetry((n) => n + 1)}
+              onLoadOlder={() => workspace.loadOlder(room.id)}
+              onDecide={workspace.decideApproval}
+              onLightDemo={runLightDemo}
+            />
+            <Composer
+              key={`composer-${room.id}`}
+              disabledReason={room.host_bot_id ? null : "这个房间里还没有 Bot，发了也没人回应"}
+              replying={replying}
+              onSend={(content) => workspace.sendMessage(room.id, content)}
+              onStop={() => workspace.stopReply(room.id)}
+            />
           </>
         ) : (
           <div className="sa-empty">
