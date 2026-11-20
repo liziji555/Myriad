@@ -238,7 +238,7 @@ impl Printer {
             self.started = true;
             write!(out, "\nBot> ")?;
         }
-        write!(out, "{shown}")?;
+        write!(out, "{}", printable(shown))?;
         self.after_step = false;
         self.at_line_start = shown.ends_with('\n');
         out.flush()
@@ -253,7 +253,7 @@ impl Printer {
         if !self.at_line_start {
             writeln!(out)?;
         }
-        writeln!(out, "{line}")?;
+        writeln!(out, "{}", printable(line))?;
         self.at_line_start = true;
         self.after_step = is_step;
         out.flush()
@@ -303,6 +303,19 @@ impl Printer {
             None => Ok(()),
         }
     }
+}
+
+/// 去掉会被终端当成指令的字符。回复和工具标题里可能带着模型或文件里来的转义序列，
+/// 原样输出能改屏幕内容、窗口标题，有的终端还能写剪贴板。换行和制表符保留。
+fn printable(text: &str) -> std::borrow::Cow<'_, str> {
+    let unsafe_char = |c: char| c.is_control() && c != '\n' && c != '\t';
+    if !text.contains(unsafe_char) {
+        return text.into();
+    }
+    text.chars()
+        .map(|c| if unsafe_char(c) { '\u{fffd}' } else { c })
+        .collect::<String>()
+        .into()
 }
 
 #[cfg(test)]
@@ -424,6 +437,36 @@ mod tests {
         // 假模型会报出它在上下文里看到了几条用户消息。
         assert!(out.contains("第 2 条"), "{out}");
         app.orchestrator.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn control_characters_never_reach_the_terminal() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = open(dir.path());
+        // 文件里藏着：改窗口标题、写剪贴板（OSC 52）、清屏、回车覆盖、C1 控制符。
+        let hostile =
+            "正常开头\x1b]0;标题\x07\x1b]52;c;ZWNobyBoYWNrZWQ=\x07\x1b[2J\r覆盖\u{9b}31m 结尾\n";
+        std::fs::write(dir.path().join("work/恶意.md"), hostile).unwrap();
+        let (state, out) = say(&app, "读一下 `恶意.md`").await;
+        assert_eq!(state, MessageState::Complete);
+        assert!(out.contains("正常开头") && out.contains("结尾"), "{out:?}");
+        let leaked: Vec<char> = out
+            .chars()
+            .filter(|c| c.is_control() && *c != '\n' && *c != '\t')
+            .collect();
+        assert!(leaked.is_empty(), "{leaked:?} 出现在 {out:?}");
+        // 房间里存的还是原文，只在打印时处理。
+        let room = pick_room(&app, None).unwrap();
+        let stored = app
+            .engine
+            .list_messages(&room.id, None, 1)
+            .unwrap()
+            .messages;
+        assert!(stored[0].content.contains('\x1b'));
+        app.orchestrator.shutdown().await;
+
+        assert_eq!(printable("表格\t换行\n"), "表格\t换行\n");
+        assert_eq!(printable("a\x1b[31mb"), "a\u{fffd}[31mb");
     }
 
     #[test]
