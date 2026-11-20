@@ -1,5 +1,6 @@
 use crate::{
-    ApprovalId, ArtifactId, BotId, MessageId, Millis, NoticeId, RoomId, RuleId, RunId, TaskId,
+    ApprovalId, ArtifactId, BotId, MessageId, Millis, NoticeId, RoomId, RoutineId, RuleId, RunId,
+    TaskId,
 };
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -196,6 +197,9 @@ pub enum MessageKind {
     Run,
     /// 交付卡：一次运行交出来的结果。
     Delivery,
+    /// 定时任务到点了：内容是存好的那段话，`mentions` 是要做这件事的 Bot。
+    /// 不是人刚说的话，Bot 没什么可说时可以不出声。
+    Routine,
 }
 
 str_enum!(MessageKind {
@@ -203,6 +207,7 @@ str_enum!(MessageKind {
     Task => "task",
     Run => "run",
     Delivery => "delivery",
+    Routine => "routine",
 });
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -679,4 +684,63 @@ pub struct UsageSummary {
     pub bots: Vec<SpendRow>,
     /// 今天花得最多的任务。
     pub tasks: Vec<SpendRow>,
+}
+
+/// 定时任务上一次到点的结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum RoutineResult {
+    /// Bot 说了话。
+    Spoke,
+    /// Bot 看过了，没什么可说。
+    Silent,
+    /// 没做成（模型报错、被停下）。
+    Failed,
+    /// 这一次没做：错过太久、今天的花费到上限了、Bot 不在房间里。
+    Skipped,
+}
+
+str_enum!(RoutineResult {
+    Spoke => "spoke",
+    Silent => "silent",
+    Failed => "failed",
+    Skipped => "skipped",
+});
+
+/// 定时任务：到点让一个 Bot 在房间里做一件事。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct Routine {
+    pub id: RoutineId,
+    pub room_id: RoomId,
+    pub bot_id: BotId,
+    pub title: String,
+    /// 到点时交给 Bot 的那段话。
+    pub prompt: String,
+    /// 五段式 cron（分 时 日 月 周），按本机时间算。
+    pub schedule: String,
+    pub enabled: bool,
+    /// 下一次什么时候到点。停用时是 `None`。
+    #[ts(type = "number | null")]
+    pub next_at: Option<Millis>,
+    #[ts(type = "number | null")]
+    pub last_at: Option<Millis>,
+    pub last_result: Option<RoutineResult>,
+    /// 上一次没做成或者没做的原因。
+    pub last_note: String,
+    /// 连续没做成的次数。
+    pub failures: u32,
+    #[ts(type = "number")]
+    pub created_at: Millis,
+    #[ts(type = "number")]
+    pub updated_at: Millis,
+}
+
+/// 一个被删掉的定时任务。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct RoutineRef {
+    pub id: RoutineId,
+    pub room_id: RoomId,
 }
