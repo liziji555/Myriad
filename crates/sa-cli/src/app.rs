@@ -132,6 +132,17 @@ impl App {
         self.config
             .mcp_specs(std::path::Path::new(&self.workdir), env)
     }
+
+    /// 把配置里的 MCP 服务连上再往下走：接下来的第一步就可能用到它们的工具。没连上的说一声，不拦着。
+    pub async fn connect_mcp(&self) {
+        for spec in self.mcp_specs() {
+            let name = spec.name.clone();
+            let server = Arc::new(sa_tools::mcp::McpServer::spawned(spec));
+            if let Err(error) = self.orchestrator.connect_mcp(server).await {
+                eprintln!("MCP 服务「{name}」没连上：{error}");
+            }
+        }
+    }
 }
 
 /// 锁住数据目录并打开状态库。返回的文件持有期间，别的 `sa` 进程不能用这个数据目录。

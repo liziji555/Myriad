@@ -11,7 +11,6 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::io::Write;
 use std::process::ExitCode;
-use std::sync::Arc;
 use tokio::sync::broadcast::error::RecvError;
 
 #[derive(clap::Args)]
@@ -38,13 +37,7 @@ pub fn run(data_dir: &DataDir, args: ChatArgs) -> Result<ExitCode> {
             // 上次退出时没做完的任务接着排队。
             app.orchestrator.resume_tasks();
             // 先把外部 MCP 服务连上再开始聊：第一句话就可能用到它们的工具。
-            for spec in app.mcp_specs() {
-                let name = spec.name.clone();
-                let server = Arc::new(sa_tools::mcp::McpServer::spawned(spec));
-                if let Err(error) = app.orchestrator.connect_mcp(server).await {
-                    eprintln!("MCP 服务「{name}」没连上：{error}");
-                }
-            }
+            app.connect_mcp().await;
             let mut out = std::io::stdout();
             let result = match args.message {
                 Some(text) => {

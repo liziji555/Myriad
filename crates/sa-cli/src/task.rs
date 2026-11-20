@@ -88,6 +88,14 @@ pub fn run(data_dir: &DataDir, args: TaskArgs) -> Result<ExitCode> {
         .enable_all()
         .build()?
         .block_on(async move {
+            // 会让 Bot 动手的几个命令，先把外部 MCP 服务连上：任务里也用得到它们的工具。
+            let works = matches!(
+                args.command,
+                TaskCommand::Add { .. } | TaskCommand::Resume { .. } | TaskCommand::Reject { .. }
+            );
+            if works {
+                app.connect_mcp().await;
+            }
             let mut out = std::io::stdout();
             let result = execute(&app, args.command, &mut out).await;
             app.orchestrator.shutdown().await;
