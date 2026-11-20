@@ -157,9 +157,16 @@ impl Engine {
                     .map(|bot| bot.id.clone())
             };
             let mut room = self.create_room(&wanted.name)?;
-            for member in &wanted.members {
-                if let Some(bot_id) = id_of(member) {
-                    room = self.add_room_member(&room.id, &bot_id)?;
+            // 新房间会自动带上最早的那个 Bot；模板里没有它就请出去，房间里只留模板写的成员。
+            let wanted_ids: Vec<BotId> = wanted.members.iter().filter_map(|m| id_of(m)).collect();
+            for auto in room.member_bot_ids.clone() {
+                if !wanted_ids.contains(&auto) {
+                    room = self.remove_room_member(&room.id, &auto)?;
+                }
+            }
+            for bot_id in &wanted_ids {
+                if !room.member_bot_ids.contains(bot_id) {
+                    room = self.add_room_member(&room.id, bot_id)?;
                 }
             }
             if let Some(host) = wanted.host.as_deref().and_then(id_of) {
