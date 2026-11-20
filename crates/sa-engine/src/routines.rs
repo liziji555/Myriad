@@ -237,6 +237,7 @@ impl Engine {
                 kind: MessageKind::Routine,
                 task_id: None,
                 run_id: None,
+                origin: None,
                 steps: vec![],
                 state: MessageState::Complete,
                 error: None,

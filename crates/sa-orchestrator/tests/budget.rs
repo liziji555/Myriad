@@ -366,8 +366,9 @@ async fn the_watchdog_stops_a_task_that_has_gone_quiet() {
             MockReply::text("交完了。"),
         ],
         Budget::default(),
+        // 时限留得宽一些：慢的机器上从开工到第一次检查之间也会过去几十毫秒。
         Watchdog {
-            idle_limit: Duration::from_millis(50),
+            idle_limit: Duration::from_millis(500),
             ..Watchdog::default()
         },
     );
@@ -375,7 +376,7 @@ async fn the_watchdog_stops_a_task_that_has_gone_quiet() {
     rig.work_requests(1).await;
     // 刚开工，还没到「没动静」的时限。
     assert!(rig.orchestrator.watchdog_tick().await.is_empty());
-    tokio::time::sleep(Duration::from_millis(80)).await;
+    tokio::time::sleep(Duration::from_millis(600)).await;
 
     let found = rig.orchestrator.watchdog_tick().await;
     assert_eq!(found.len(), 1, "{found:?}");

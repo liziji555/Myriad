@@ -10,6 +10,7 @@ axum.workspace = true
 futures-util.workspace = true
 mime_guess.workspace = true
 rust-embed.workspace = true
+sa-adapters.workspace = true
 sa-engine.workspace = true
 sa-orchestrator.workspace = true
 sa-protocol.workspace = true

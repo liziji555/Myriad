@@ -17,6 +17,7 @@ sa-llm = { path = "crates/sa-llm" }
 sa-tools = { path = "crates/sa-tools" }
 sa-kernel = { path = "crates/sa-kernel" }
 sa-orchestrator = { path = "crates/sa-orchestrator" }
+sa-adapters = { path = "crates/sa-adapters" }
 
 anyhow = "1"
 async-trait = "0.1"
@@ -28,6 +29,8 @@ eventsource-stream = "0.2"
 fs4 = { version = "0.13", default-features = false, features = ["sync"] }
 futures-util = "0.3"
 globset = "0.4"
+hex = "0.4"
+hmac = "0.12"
 html5ever = "0.40"
 markup5ever_rcdom = "0.40"
 html2text = "0.17"
@@ -40,6 +43,7 @@ rusqlite = { version = "0.43", features = ["bundled"] }
 rust-embed = "8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time", "process", "io-util"] }

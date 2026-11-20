@@ -179,6 +179,7 @@ function Shell() {
           tabAction("tasks", "打开任务页"),
           tabAction("routines", "打开定时任务"),
           tabAction("members", "管理 Bot 和房间成员"),
+          tabAction("links", "连接 GitHub 仓库和 Telegram 聊天"),
           tabAction("usage", "看用量和花费"),
           tabAction("activity", "看任务图"),
           {
@@ -294,6 +295,8 @@ function Shell() {
           onFocusTask={setFocusTask}
           routines={workspace.routines.filter((routine) => routine.room_id === room.id)}
           routineActions={workspace.routineActions}
+          links={workspace.links.filter((link) => link.room_id === room.id)}
+          linkActions={workspace.linkActions}
           activity={demoNodes}
           usageKey={workspace.notices.length}
         />

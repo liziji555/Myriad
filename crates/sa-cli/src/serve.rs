@@ -55,7 +55,22 @@ pub fn run(data_dir: &DataDir, args: ServeArgs) -> Result<()> {
             app.orchestrator.resume_tasks();
             app.orchestrator.start_watchdog();
             app.orchestrator.start_routines();
-            let state = AppState::new(app.engine.clone(), app.orchestrator.clone(), token);
+            let mut state = AppState::new(app.engine.clone(), app.orchestrator.clone(), token);
+            // 外面的连接都是可选的：没设对应的环境变量就不开。
+            let github = &app.config.github;
+            if let Some(secret) = env_value(&github.webhook_secret_env) {
+                let options = sa_adapters::github_events::Options {
+                    issue_labels: github.issue_labels.clone(),
+                };
+                state = state.with_github_hook(&secret, options);
+                println!("接收 GitHub 事件：/hooks/github");
+            }
+            let telegram = &app.config.telegram;
+            if let Some(token) = env_value(&telegram.token_env) {
+                let client = sa_orchestrator::Telegram::new(&telegram.api_base, &token);
+                app.orchestrator.start_telegram(client, Default::default());
+                println!("正在连接 Telegram。");
+            }
             let orchestrator = app.orchestrator.clone();
             sa_server::serve(listener, state, async move {
                 let _ = tokio::signal::ctrl_c().await;
@@ -65,6 +80,14 @@ pub fn run(data_dir: &DataDir, args: ServeArgs) -> Result<()> {
             .await?;
             Ok(())
         })
+}
+
+/// 环境变量的值。没设或者是空的算没有。
+fn env_value(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 /// 访问令牌保存在数据目录里，重启后链接不变。

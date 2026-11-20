@@ -7,11 +7,11 @@ use axum::http::StatusCode;
 use axum::Json;
 use sa_engine::{BotPatch, Engine, EngineError, RoutinePatch};
 use sa_protocol::{
-    ApprovalId, Bot, BotId, CreateBotRequest, CreateRoomRequest, CreateRoutineRequest,
-    CreateTaskRequest, DecideApprovalRequest, Health, Message, MessagePage, ModelTier, Notice,
-    NoticeId, PermissionRule, PostMessageRequest, Room, RoomId, Routine, RoutineId, RuleId,
-    StopResponse, Task, TaskActionRequest, TaskDetail, TaskId, UpdateBotRequest, UpdateRoomRequest,
-    UpdateRoutineRequest, UsageSummary,
+    ApprovalId, Bot, BotId, CreateBotRequest, CreateLinkRequest, CreateRoomRequest,
+    CreateRoutineRequest, CreateTaskRequest, DecideApprovalRequest, Health, Link, LinkId, Message,
+    MessagePage, ModelTier, Notice, NoticeId, Pairing, PermissionRule, PostMessageRequest, Room,
+    RoomId, Routine, RoutineId, RuleId, StopResponse, Task, TaskActionRequest, TaskDetail, TaskId,
+    UpdateBotRequest, UpdateRoomRequest, UpdateRoutineRequest, UsageSummary,
 };
 use serde::Deserialize;
 
@@ -408,6 +408,41 @@ pub async fn run_routine(
 ) -> Result<(StatusCode, Json<Routine>), AppError> {
     let routine = state.orchestrator.run_routine_now(&routine_id).await?;
     Ok((StatusCode::ACCEPTED, Json(routine)))
+}
+
+pub async fn list_links(State(state): State<AppState>) -> Result<Json<Vec<Link>>, AppError> {
+    Ok(Json(blocking(&state, |engine| engine.list_links()).await?))
+}
+
+/// 把一个 GitHub 仓库连到房间。
+pub async fn create_link(
+    State(state): State<AppState>,
+    body: Result<Json<CreateLinkRequest>, JsonRejection>,
+) -> Result<(StatusCode, Json<Link>), AppError> {
+    let Json(body) = body.map_err(|e| AppError::bad_request(e.body_text()))?;
+    let link = blocking(&state, move |engine| {
+        engine.link_repo(&body.room_id, &body.repo)
+    })
+    .await?;
+    Ok((StatusCode::CREATED, Json(link)))
+}
+
+pub async fn delete_link(
+    State(state): State<AppState>,
+    Path(link_id): Path<LinkId>,
+) -> Result<StatusCode, AppError> {
+    blocking(&state, move |engine| engine.delete_link(&link_id)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// 给房间生成一个 Telegram 配对码。码只在这里给一次。
+pub async fn create_pairing(
+    State(state): State<AppState>,
+    Path(room_id): Path<RoomId>,
+) -> Result<(StatusCode, Json<Pairing>), AppError> {
+    let mut pairing = blocking(&state, move |engine| engine.create_pairing(&room_id)).await?;
+    pairing.bot_username = state.orchestrator.telegram_username();
+    Ok((StatusCode::CREATED, Json(pairing)))
 }
 
 pub async fn api_not_found() -> AppError {

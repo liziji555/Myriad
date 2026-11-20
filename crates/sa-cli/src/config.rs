@@ -17,6 +17,9 @@ pub struct Config {
     /// 开 PR 用。老的配置文件里没有这一节，用默认值。
     #[serde(default)]
     pub github: GitHub,
+    /// 连 Telegram 用。老的配置文件里没有这一节，用默认值。
+    #[serde(default)]
+    pub telegram: Telegram,
     /// 各个模型每一百万 token 多少钱，算花费用。`default` 是没有单独写的模型的价格。
     /// 老的配置文件里没有这一节，用内置的偏高的价格。
     #[serde(default)]
@@ -52,6 +55,28 @@ pub struct GitHub {
     pub token_env: String,
     /// `owner/name`。不写就从工作目录的 origin 地址里认。
     pub repo: Option<String>,
+    /// Webhook 的密钥放在哪个环境变量里。
+    pub webhook_secret_env: String,
+    /// 只收带这些标签之一的新 issue。空着就都收。
+    pub issue_labels: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct Telegram {
+    /// 机器人的令牌放在哪个环境变量里。
+    pub token_env: String,
+    /// 接口地址。
+    pub api_base: String,
+}
+
+impl Default for Telegram {
+    fn default() -> Self {
+        Self {
+            token_env: "TELEGRAM_BOT_TOKEN".to_string(),
+            api_base: "https://api.telegram.org".to_string(),
+        }
+    }
 }
 
 impl Default for GitHub {
@@ -60,6 +85,8 @@ impl Default for GitHub {
             api_base: sa_orchestrator::DEFAULT_API_BASE.to_string(),
             token_env: "GITHUB_TOKEN".to_string(),
             repo: None,
+            webhook_secret_env: "GITHUB_WEBHOOK_SECRET".to_string(),
+            issue_labels: vec![],
         }
     }
 }
@@ -156,6 +183,12 @@ impl Config {
             if parts.len() != 2 || parts.iter().any(|part| part.trim().is_empty()) {
                 bail!("[github] 的 repo 要写成 \"owner/name\"，现在是「{repo}」");
             }
+        }
+        if !self.telegram.api_base.starts_with("http") {
+            bail!(
+                "[telegram] 的 api_base 要是一个 http(s) 地址，现在是「{}」",
+                self.telegram.api_base
+            );
         }
         if !self.github.api_base.starts_with("http") {
             bail!(
@@ -363,6 +396,23 @@ mod tests {
         );
         std::fs::write(&path, "not toml [").unwrap();
         assert!(Config::load_or_default(&path).is_err());
+    }
+
+    #[test]
+    fn configs_written_before_outside_links_still_load() {
+        // M5 及以前生成的配置：[github] 里没有 Webhook 的两项，也没有 [telegram]。
+        let cut = DEFAULT_CONFIG_TOML.find("# 接收 GitHub 事件").unwrap();
+        let old = &DEFAULT_CONFIG_TOML[..cut];
+        assert!(old.contains("[github]") && !old.contains("telegram"));
+        let config = Config::parse(old).unwrap();
+        assert_eq!(config.github.webhook_secret_env, "GITHUB_WEBHOOK_SECRET");
+        assert!(config.github.issue_labels.is_empty());
+        assert_eq!(config.telegram, Telegram::default());
+        assert_eq!(config, Config::parse(DEFAULT_CONFIG_TOML).unwrap());
+
+        let bad = DEFAULT_CONFIG_TOML.replace("https://api.telegram.org", "api.telegram.org");
+        let error = Config::parse(&bad).unwrap_err();
+        assert!(format!("{error:#}").contains("[telegram]"), "{error:#}");
     }
 
     #[test]

@@ -207,6 +207,7 @@ mod tests {
             kind: sa_protocol::MessageKind::Chat,
             task_id: None,
             run_id: None,
+            origin: None,
             steps: vec![],
             state: MessageState::Complete,
             error: None,

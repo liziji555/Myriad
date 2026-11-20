@@ -14,6 +14,7 @@ chrono.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 dirs.workspace = true
+sa-adapters.workspace = true
 sa-engine.workspace = true
 sa-llm.workspace = true
 sa-orchestrator.workspace = true

@@ -2,7 +2,7 @@
 
 Rust 多 Bot Agent Harness：房间里的 AI 团队。一个可执行文件，自带内核、本机服务和三栏界面。
 
-## 现在能做什么（M5b）
+## 现在能做什么（M6a）
 
 - 任务：Bot 把要花些功夫的事开成任务，在独立的目录里做，做完交给你验收；验收通过，改动才回到你的工作目录
 - 任务里可以派子代理去查资料（只读），可以把任务分支推到远端、在 GitHub 上开 PR（每次都要你批准）
@@ -23,9 +23,11 @@ Rust 多 Bot Agent Harness：房间里的 AI 团队。一个可执行文件，�
 - 定时任务：到点让一个 Bot 在房间里做一件事，没什么可说时它不出声；界面右侧「定时」页和 `sa routine` 管理
 - 命令面板：`Ctrl K`（Mac 上 `⌘ K`）搜房间、Bot、任务和动作，回车直达
 - 任务图：界面右侧「活动」页里一个任务一行，画出它的每次运行和现在的状态；刚发生的事有一道光飞到节点上
+- GitHub 事件：把仓库连到房间，新的 issue、评论、评审和没通过的 CI 进房间，由 Bot 来看；同一次投递只收一次
+- Telegram：把聊天连到房间，在 Telegram 里对机器人说的话进房间，Bot 的回复送回那个聊天
 - `sa doctor`：检查数据目录、配置、模型密钥、git、GitHub 令牌、数据库、端口和前端页面
 
-还不能做：Telegram、GitHub 事件（评论、CI 结果）、MCP。这些在后面的里程碑里。
+还不能做：技能、MCP。这些在后面的里程碑里。
 
 ## 运行
 
@@ -304,6 +306,49 @@ default = { input = 10.0, cached_input = 10.0, output = 30.0 }      # 没有单�
 接口：`GET /api/routines`、`POST /api/routines`、`PATCH /api/routines/{id}`、`DELETE /api/routines/{id}`、
 `POST /api/routines/{id}/run`（现在就做一次）。
 
+### 和外面连起来
+
+两样都是可选的，没设对应的环境变量就不开。哪个仓库、哪个聊天进哪个房间，在界面右侧的「连接」页里定。
+
+**GitHub 事件**
+
+1. 设环境变量 `GITHUB_WEBHOOK_SECRET`（自己定一串随机的字符），再启动 `sa serve`。
+2. 在「连接」页里填 `owner/name` 把仓库连到房间（或者 `sa link github <房间> <owner/name>`）。
+3. 在仓库的 Settings → Webhooks 里新建一个：地址填 `你的公网地址/hooks/github`，Content type 选
+   `application/json`，Secret 填第 1 步那一串，事件勾 Issues、Issue comments、Pull request reviews、
+   Pull request review comments、Workflow runs。
+
+`sa serve` 只听本机，GitHub 要能访问到它，得自己用反向代理或隧道把 `/hooks/github` 这一个地址放出去；别的地址不要放出去。
+
+| 事件 | 怎么处理 |
+| --- | --- |
+| 新 issue、issue 和 PR 下的评论 | 进房间，交给入口 Bot（`[github] issue_labels` 写了标签就只收带这些标签的 issue） |
+| PR 的评审、行内评论、CI 没通过或超时 | 只管任务开的 PR：进房间，交给那个任务的负责人 |
+| CI 通过、被取消 | 只管任务开的 PR：摆在时间线上，不叫 Bot |
+| 机器人账号做的、SuperAgent 自己发的、没连房间的仓库、别的事件 | 不收 |
+
+签名（`X-Hub-Signature-256`）不对的一律拒绝。GitHub 重试同一次投递（`X-GitHub-Delivery` 相同）不会变成第二条消息。
+标题、正文、评论、文件名、分支名这些外人能随便写的东西：交给 Bot 时都围在 `<untrusted_external_content>` 里并说明只当资料看，里面的要求不照做；
+Bot 觉得没有值得说的就只回 `(pass)`，房间里不留它的话。Bot 要动手还是照常走审批。
+
+**Telegram**
+
+1. 找 [@BotFather](https://t.me/BotFather) 建一个机器人，把它给的令牌放进环境变量 `TELEGRAM_BOT_TOKEN`，再启动 `sa serve`。
+2. 在「连接」页里点「生成配对码」，在 Telegram 里把 `/pair 配对码` 发给机器人。码只能用一次，十分钟内有效。
+   要连群，先把机器人拉进群，再在群里发 `/pair@机器人 配对码`（要带上机器人的名字，否则它收不到）。
+
+连上之后：私聊里说的话都进房间；群里只有 `@机器人` 的和回复机器人的才进，别人之间聊天它不掺和。
+Telegram 的机器人在群里默认开着隐私模式：只收得到带它名字的命令和对它的话的回复，**收不到 `@它` 的普通消息**。
+想在群里直接 `@机器人` 说话，要在 @BotFather 里用 `/setprivacy` 关掉隐私模式（关掉之后把机器人请出群再拉进来），或者把它设成群管理员。
+进来的话和你在界面里说的一样，可以 `@名字` 点名哪个 Bot。Bot 的回复送回那个聊天；
+定时任务和 GitHub 事件引出的话，送到房间连着的每个 Telegram 聊天。你在界面里说的话引出的回复不往 Telegram 送。
+只收发文字；审批卡仍然只能在界面里点。连着这个聊天的人都能让房间里的 Bot 做事，所以配对码不要给别人。
+
+没送出去的话记在数据库里，网络不通或者被限速时过一会儿再送，最多试 8 次；放了一小时以上的不再送。
+
+接口：`GET /api/links`、`POST /api/links`（连仓库）、`DELETE /api/links/{id}`、`POST /api/rooms/{id}/pairing`（生成配对码）、
+`POST /hooks/github`（不用访问令牌，靠签名）。
+
 ### 对话太长怎么办
 
 对话快占满模型的上下文窗口时，Bot 会先把前面的部分总结成一份摘要（时间线上显示「对话太长，压缩前面的内容」），
@@ -323,10 +368,11 @@ default = { input = 10.0, cached_input = 10.0, output = 30.0 }      # 没有单�
 | `sa room list` / `add <名字>` / `invite <房间> <Bot>` / `kick <房间> <Bot>` / `host <房间> <Bot>` | 管理房间、成员和入口 Bot |
 | `sa task list [--room 房间]` / `show <任务>` / `add <标题> --scope 做什么 [--acceptance 验收标准] [--owner Bot]` / `resume <任务> [--note 话] [--owner Bot]` / `accept <任务>` / `reject <任务> --note 意见` / `cancel <任务>` | 任务。`<任务>` 可以只写 ID 的开头几位；`add`、`resume`、`reject` 会等到任务需要你处理为止 |
 | `sa routine list` / `add --room 房间 [--bot Bot] --title 名字 --schedule "0 9 * * *" <到点做什么>` / `enable <定时任务>` / `disable <定时任务>` / `remove <定时任务>` | 定时任务。`<定时任务>` 写 ID 或名字 |
+| `sa link list` / `github <房间> <owner/name>` / `rm <连接>` | 和外面的连接。`<连接>` 写 ID、仓库名或聊天的名字；Telegram 聊天在界面里用配对码来连 |
 | `sa usage` | 今天和最近 7 天花了多少，按模型、Bot、任务分 |
 | `sa doctor` | 体检 |
 
-所有命令都可以加 `--data-dir <目录>` 指定数据目录。`sa serve`、`sa chat`、`sa task`、`sa routine`、`sa usage`、`sa bot`、`sa room` 用同一份数据，同一个数据目录同一时刻只能有一个在运行；
+所有命令都可以加 `--data-dir <目录>` 指定数据目录。`sa serve`、`sa chat`、`sa task`、`sa routine`、`sa link`、`sa usage`、`sa bot`、`sa room` 用同一份数据，同一个数据目录同一时刻只能有一个在运行；
 `sa serve` 开着的时候，Bot 和房间在界面的「成员」面板里管理，定时任务在「定时」面板里管理。
 
 数据目录里：`config.toml` 配置，`state.db` 房间和消息，`sessions/*.jsonl` 每个会话发给模型的完整记录，`spill/` 被截短的工具结果的完整内容，`work/` 任务的独立目录，
@@ -354,6 +400,7 @@ pnpm --dir web dev              # 前端热更新，/api 转发到 127.0.0.1:451
 | `crates/sa-tools` | 工具（读、搜、抓网页、写、改、执行命令、待办）和路径围栏 |
 | `crates/sa-kernel` | 会话记录（JSONL）、「模型—工具」循环、审批关口、自动压缩 |
 | `crates/sa-orchestrator` | 房间里来了消息，决定谁来接、让它跑一轮并把结果写回房间；Bot 之间的点名和次数上限；任务的调度、独立目录和工作会话 |
+| `crates/sa-adapters` | 和外面的接口：GitHub Webhook 的验签和解析、Telegram Bot API |
 | `crates/sa-server` | HTTP 接口、事件流、内嵌前端 |
 | `crates/sa-cli` | 可执行文件 `sa` |
 | `web` | React 前端 |

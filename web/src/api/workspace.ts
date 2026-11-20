@@ -1,4 +1,15 @@
-import type { Bot, BotRef, Event, Notice, Room, RoomId, Routine, RoutineRef } from "./types";
+import type {
+  Bot,
+  BotRef,
+  Event,
+  Link,
+  LinkRef,
+  Notice,
+  Room,
+  RoomId,
+  Routine,
+  RoutineRef,
+} from "./types";
 
 export interface Workspace {
   readonly rooms: readonly Room[];
@@ -7,9 +18,17 @@ export interface Workspace {
   readonly notices: readonly Notice[];
   /** 所有房间的定时任务，按建的先后。 */
   readonly routines: readonly Routine[];
+  /** 所有房间和外面的连接（GitHub 仓库、Telegram 聊天），按建的先后。 */
+  readonly links: readonly Link[];
 }
 
-export const emptyWorkspace: Workspace = { rooms: [], bots: [], notices: [], routines: [] };
+export const emptyWorkspace: Workspace = {
+  rooms: [],
+  bots: [],
+  notices: [],
+  routines: [],
+  links: [],
+};
 
 /** 在这个房间里要显示的提醒：关于这个房间的，和不专属于哪个房间的。 */
 export function noticesFor(notices: readonly Notice[], roomId: RoomId | null): Notice[] {
@@ -64,6 +83,21 @@ export function applyEvent(state: Workspace, event: Event): Workspace {
     case "routine.deleted": {
       const gone = event.payload as RoutineRef;
       return { ...state, routines: state.routines.filter((r) => r.id !== gone.id) };
+    }
+    case "link.created": {
+      const link = event.payload as Link;
+      // 一个仓库、一个聊天只连一个房间：改连到别的房间时，原来那条换掉。
+      if (state.links.some((l) => l.id === link.id)) {
+        return { ...state, links: state.links.map((l) => (l.id === link.id ? link : l)) };
+      }
+      const others = state.links.filter(
+        (l) => !(l.source === link.source && l.external === link.external),
+      );
+      return { ...state, links: [...others, link] };
+    }
+    case "link.deleted": {
+      const gone = event.payload as LinkRef;
+      return { ...state, links: state.links.filter((l) => l.id !== gone.id) };
     }
     case "notice.created":
     case "notice.updated": {

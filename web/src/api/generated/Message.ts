@@ -3,6 +3,7 @@ import type { BotId } from "./BotId";
 import type { MessageId } from "./MessageId";
 import type { MessageKind } from "./MessageKind";
 import type { MessageState } from "./MessageState";
+import type { Origin } from "./Origin";
 import type { RoomId } from "./RoomId";
 import type { RunId } from "./RunId";
 import type { Sender } from "./Sender";
@@ -29,7 +30,11 @@ task_id?: TaskId,
 /**
  * 运行和交付卡是哪一次运行的。
  */
-run_id?: RunId, steps: Array<ToolStep>, state: MessageState, error: string | null, 
+run_id?: RunId, 
+/**
+ * 从外面来的消息是从哪里来的。在界面里直接发的没有。
+ */
+origin?: Origin, steps: Array<ToolStep>, state: MessageState, error: string | null, 
 /**
  * 每变一次加一。客户端只接受比手上更新的版本，重复或乱序的更新不会造成回退。
  */

@@ -12,6 +12,7 @@ fs4.workspace = true
 futures-util.workspace = true
 reqwest.workspace = true
 rustls.workspace = true
+sa-adapters.workspace = true
 sa-engine.workspace = true
 sa-kernel.workspace = true
 sa-llm.workspace = true

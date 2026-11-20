@@ -142,6 +142,7 @@ impl Engine {
                     kind: MessageKind::Chat,
                     task_id: None,
                     run_id: None,
+                    origin: None,
                     steps: vec![],
                     state,
                     error: None,
@@ -149,7 +150,11 @@ impl Engine {
                     created_at: now,
                     updated_at: now,
                 };
-                Ok(Some(add_message(tx, message)?))
+                let added = add_message(tx, message)?;
+                if added.0.state != MessageState::Streaming {
+                    crate::external::relay(tx, &added.0)?;
+                }
+                Ok(Some(added))
             })?
             .ok_or_else(|| EngineError::NotFound("没有这个房间".into()))?;
         self.publish(seq);
@@ -212,6 +217,9 @@ impl Engine {
         next.updated_at = now_ms();
         let seq = self.store.write(|tx| {
             messages::update(tx, &next)?;
+            if done {
+                crate::external::relay(tx, &next)?;
+            }
             events::append(
                 tx,
                 Some(&next.room_id),

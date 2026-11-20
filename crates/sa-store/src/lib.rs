@@ -9,6 +9,7 @@ mod migrate;
 pub mod bots;
 pub mod effects;
 pub mod events;
+pub mod external;
 pub mod messages;
 pub mod notices;
 pub mod rooms;

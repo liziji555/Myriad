@@ -55,6 +55,12 @@ pub enum EventKind {
     /// 定时任务被删掉了。payload 是 [`crate::RoutineRef`]。
     #[serde(rename = "routine.deleted")]
     RoutineDeleted,
+    /// 房间连上了外面一个地方。payload 是完整的 [`crate::Link`]。
+    #[serde(rename = "link.created")]
+    LinkCreated,
+    /// 连接断开了。payload 是 [`crate::LinkRef`]。
+    #[serde(rename = "link.deleted")]
+    LinkDeleted,
 }
 
 impl EventKind {
@@ -77,6 +83,8 @@ impl EventKind {
             Self::RoutineCreated => "routine.created",
             Self::RoutineUpdated => "routine.updated",
             Self::RoutineDeleted => "routine.deleted",
+            Self::LinkCreated => "link.created",
+            Self::LinkDeleted => "link.deleted",
         }
     }
 
@@ -99,6 +107,8 @@ impl EventKind {
             "routine.created" => Some(Self::RoutineCreated),
             "routine.updated" => Some(Self::RoutineUpdated),
             "routine.deleted" => Some(Self::RoutineDeleted),
+            "link.created" => Some(Self::LinkCreated),
+            "link.deleted" => Some(Self::LinkDeleted),
             _ => None,
         }
     }
@@ -149,6 +159,8 @@ mod tests {
             EventKind::RoutineCreated,
             EventKind::RoutineUpdated,
             EventKind::RoutineDeleted,
+            EventKind::LinkCreated,
+            EventKind::LinkDeleted,
             EventKind::RunUpdated,
         ] {
             assert_eq!(EventKind::parse(kind.as_str()), Some(kind));

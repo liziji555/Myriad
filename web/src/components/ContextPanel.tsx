@@ -1,13 +1,14 @@
 import type { TaskBoard } from "../api/tasks";
-import type { RoutineActions, TaskActions, Team } from "../api/useWorkspace";
-import type { Bot, Room, Routine, TaskId } from "../api/types";
+import type { LinkActions, RoutineActions, TaskActions, Team } from "../api/useWorkspace";
+import type { Bot, Link, Room, Routine, TaskId } from "../api/types";
+import { LinksPanel } from "./LinksPanel";
 import { MembersPanel } from "./MembersPanel";
 import { RoutinesPanel } from "./RoutinesPanel";
 import { TaskGraph } from "./TaskGraph";
 import { TasksPanel } from "./TasksPanel";
 import { UsagePanel } from "./UsagePanel";
 
-export type PanelTab = "tasks" | "routines" | "members" | "usage" | "files" | "activity";
+export type PanelTab = "tasks" | "routines" | "members" | "links" | "usage" | "files" | "activity";
 
 export interface ActivityNode {
   id: string;
@@ -19,6 +20,7 @@ const TABS: readonly { id: PanelTab; label: string }[] = [
   { id: "tasks", label: "任务" },
   { id: "routines", label: "定时" },
   { id: "members", label: "成员" },
+  { id: "links", label: "连接" },
   { id: "usage", label: "用量" },
   { id: "files", label: "文件" },
   { id: "activity", label: "活动" },
@@ -40,6 +42,9 @@ interface Props {
   /** 这个房间的定时任务。 */
   routines: readonly Routine[];
   routineActions: RoutineActions;
+  /** 这个房间和外面的连接。 */
+  links: readonly Link[];
+  linkActions: LinkActions;
   activity: readonly ActivityNode[];
   /** 变了就让「用量」页重新拉一次。 */
   usageKey: number;
@@ -59,6 +64,8 @@ export function ContextPanel({
   onFocusTask,
   routines,
   routineActions,
+  links,
+  linkActions,
   activity,
   usageKey,
 }: Props) {
@@ -104,6 +111,7 @@ export function ContextPanel({
             actions={routineActions}
           />
         )}
+        {tab === "links" && <LinksPanel room={room} links={links} actions={linkActions} />}
         {tab === "usage" && <UsagePanel refreshKey={usageKey} />}
         {tab === "files" && <p className="sa-panel-empty">还没有文件。</p>}
         {tab === "members" && <MembersPanel room={room} members={members} bots={bots} team={team} />}

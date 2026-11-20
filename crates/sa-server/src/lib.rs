@@ -7,11 +7,13 @@
 mod assets;
 mod auth;
 mod error;
+mod hooks;
 mod routes;
 mod sse;
 
 use axum::routing::{delete, get, patch, post, put};
 use axum::{middleware, Router};
+use sa_adapters::github_events;
 use sa_engine::Engine;
 use sa_orchestrator::Orchestrator;
 use std::future::Future;
@@ -26,6 +28,8 @@ pub struct AppState {
     pub(crate) engine: Arc<Engine>,
     pub(crate) orchestrator: Arc<Orchestrator>,
     pub(crate) token: Arc<str>,
+    /// GitHub Webhook 的密钥和筛选。没有配密钥时 `/hooks/github` 不收任何东西。
+    pub(crate) github_hook: Option<Arc<GithubHook>>,
     /// 置为 `true` 表示服务正在关闭：长连接（SSE）据此主动结束，否则优雅关闭会一直等它们。
     pub(crate) closing: watch::Sender<bool>,
 }
@@ -40,9 +44,24 @@ impl AppState {
             engine,
             orchestrator,
             token: token.into(),
+            github_hook: None,
             closing: watch::Sender::new(false),
         }
     }
+
+    /// 打开 `/hooks/github`：用 `secret` 验签名。
+    pub fn with_github_hook(mut self, secret: &str, options: github_events::Options) -> Self {
+        self.github_hook = Some(Arc::new(GithubHook {
+            secret: secret.to_string(),
+            options,
+        }));
+        self
+    }
+}
+
+pub(crate) struct GithubHook {
+    pub secret: String,
+    pub options: github_events::Options,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -91,6 +110,9 @@ pub fn router(state: AppState) -> Router {
             patch(routes::update_routine).delete(routes::delete_routine),
         )
         .route("/routines/{routine_id}/run", post(routes::run_routine))
+        .route("/links", get(routes::list_links).post(routes::create_link))
+        .route("/links/{link_id}", delete(routes::delete_link))
+        .route("/rooms/{room_id}/pairing", post(routes::create_pairing))
         .route("/events", get(sse::events))
         .fallback(routes::api_not_found)
         .layer(middleware::from_fn_with_state(
@@ -102,6 +124,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/health", get(routes::health))
         .nest("/api", protected)
         .route("/auth", get(auth::exchange_token))
+        // 外面的服务调的地址：不用访问令牌，靠各自的签名认人。
+        .route("/hooks/github", post(hooks::github))
         .fallback(assets::serve)
         .with_state(state)
 }

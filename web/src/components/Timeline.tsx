@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { RoomChat } from "../api/chat";
+import { safeUrl, sourceName, splitEvent } from "../api/links";
 import { shownTriggers, triggerTitle } from "../api/routines";
 import { isLatestDelivery, type TaskBoard } from "../api/tasks";
 import type { TaskActions } from "../api/useWorkspace";
@@ -77,7 +78,7 @@ export function Timeline({
 
   // 自己刚发的消息总要看得到。
   useEffect(() => {
-    if (last?.sender.kind === "user" && last.kind !== "routine") {
+    if (last?.sender.kind === "user" && last.kind === "chat" && !last.origin) {
       stick.current = true;
       scroller.current?.scrollTo({ top: scroller.current.scrollHeight });
     }
@@ -145,6 +146,7 @@ export function Timeline({
               </li>
             ) : null;
           }
+          if (message.kind === "event") return <EventItem key={message.id} message={message} />;
           const task = tasks.find((t) => t.id === message.task_id);
           if (message.kind === "task" || message.kind === "delivery") {
             return (
@@ -199,6 +201,41 @@ export function Timeline({
   );
 }
 
+/** 外面来的一件事（GitHub 上的 issue、评论、CI 结果）。原文是外人写的，默认收着。 */
+function EventItem({ message }: { message: Message }) {
+  const { summary, title, body } = splitEvent(message.content);
+  const origin = message.origin;
+  const url = safeUrl(origin?.url);
+  return (
+    <li className="sa-msg-event" data-message-id={message.id} data-kind="event">
+      <div className="sa-event-head">
+        {origin && <span className="sa-tag">{sourceName(origin.source)}</span>}
+        {origin &&
+          (url ? (
+            <a href={url} target="_blank" rel="noreferrer">
+              {origin.label}
+            </a>
+          ) : (
+            <span>{origin.label}</span>
+          ))}
+        <time className="sa-msg-time" dateTime={new Date(message.created_at).toISOString()}>
+          {formatTime(message.created_at)}
+        </time>
+      </div>
+      <p className="sa-event-summary">
+        {summary}
+        {title !== "" && `：${title}`}
+      </p>
+      {body !== "" && (
+        <details className="sa-event-body">
+          <summary>原文</summary>
+          <pre>{body}</pre>
+        </details>
+      )}
+    </li>
+  );
+}
+
 /** 任务的运行过程那条消息多出来的东西：是哪个任务的、能停。 */
 interface Work {
   title: string | undefined;
@@ -226,8 +263,12 @@ function TaskMessage({
   onShowTask(taskId: TaskId): void;
 }) {
   const { sender } = message;
+  // 从 Telegram 进来的话是别人在那边说的：写上是谁、从哪来的。
+  const origin = sender.kind === "user" ? message.origin : undefined;
   const name =
-    sender.kind === "user" ? "你" : (bots.find((bot) => bot.id === sender.bot_id)?.name ?? "Bot");
+    sender.kind === "user"
+      ? (origin?.label ?? "你")
+      : (bots.find((bot) => bot.id === sender.bot_id)?.name ?? "Bot");
   const owner = bots.find((bot) => bot.id === task?.owner_bot_id)?.name;
   const delivery = message.kind === "delivery";
   // 这张卡上要不要放操作：最新的交付卡，而且任务正等着人（验收、回答、卡住）。
@@ -236,6 +277,7 @@ function TaskMessage({
     <li className="sa-msg" data-sender={sender.kind} data-kind={message.kind}>
       <div className="sa-msg-head">
         <span className="sa-msg-name">{name}</span>
+        {origin && <span className="sa-tag">{sourceName(origin.source)}</span>}
         <time className="sa-msg-time" dateTime={new Date(message.created_at).toISOString()}>
           {formatTime(message.created_at)}
         </time>
