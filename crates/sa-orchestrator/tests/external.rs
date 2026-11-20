@@ -238,6 +238,39 @@ async fn events_that_pile_up_for_different_bots_each_reach_their_bot() {
 }
 
 #[tokio::test]
+async fn an_event_that_arrives_while_a_bot_is_talking_does_not_push_out_the_one_waiting() {
+    let dir = tempfile::tempdir().unwrap();
+    let replies = vec![
+        MockReply::text("第一件我看了，说得慢一点，好让别的事在这期间进来。"),
+        MockReply::text("第二件我看了。"),
+    ];
+    let mock = MockProvider::scripted(replies).with_chunk_delay(Duration::from_millis(15));
+    let rig = start_with(dir.path(), mock, Budget::default(), Routines::default());
+    rig.engine.link_repo(&rig.room, "me/app").unwrap();
+    let second = rig.engine.create_bot("Coder", ModelTier::Mid, "").unwrap();
+    rig.engine.add_room_member(&rig.room, &second.id).unwrap();
+
+    rig.engine.receive(issue("d-1", true)).unwrap();
+    rig.engine
+        .update_room(&rig.room, None, Some(&second.id))
+        .unwrap();
+    rig.orchestrator.receive(issue("d-2", true)).await.unwrap();
+    // 第一个 Bot 正在说的时候，来了一件只摆出来的事（CI 通过了）。
+    for _ in 0..400 {
+        if !rig.mock.requests().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    rig.orchestrator.receive(issue("d-3", false)).await.unwrap();
+    rig.settled(2).await;
+
+    assert_eq!(rig.bot_said().len(), 2, "{:?}", rig.bot_said());
+    assert!(rig.bot_said().contains(&"第二件我看了。".to_string()));
+    rig.orchestrator.shutdown().await;
+}
+
+#[tokio::test]
 async fn what_is_said_in_a_paired_telegram_chat_is_answered_back_there() {
     let dir = tempfile::tempdir().unwrap();
     let rig = start(
