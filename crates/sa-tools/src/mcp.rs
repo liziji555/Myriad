@@ -32,6 +32,8 @@ pub const MAX_TOOLS_PER_SERVER: usize = 100;
 /// 工具清单最多翻这么多页。
 const MAX_PAGES: usize = 20;
 const MAX_DESCRIPTION_CHARS: usize = 1024;
+/// 告诉服务「不用做了」最多等这么久：它不读输入的时候不能一直卡着。
+const CANCEL_NOTICE_TIMEOUT: Duration = Duration::from_secs(5);
 /// 审批卡上最多显示这么多字的参数。
 const MAX_SHOWN_ARGUMENT_CHARS: usize = 600;
 /// 模型服务对工具名的限制。
@@ -177,7 +179,8 @@ impl Connection {
 
     async fn notify(&self, method: &str, params: Value) {
         let message = json!({ "jsonrpc": "2.0", "method": method, "params": params });
-        let _ = self.send(&message).await;
+        // 服务不读输入的时候不能一直卡在这里。
+        let _ = tokio::time::timeout(CANCEL_NOTICE_TIMEOUT, self.send(&message)).await;
     }
 
     async fn request(
@@ -193,31 +196,74 @@ impl Connection {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = oneshot::channel();
         self.waiting.lock().unwrap().insert(id, tx);
-        let message = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
-        if let Err(error) = self.send(&message).await {
-            self.waiting.lock().unwrap().remove(&id);
-            return Err(error);
-        }
-        let give_up = |reason: &'static str| async move {
-            self.waiting.lock().unwrap().remove(&id);
-            let params = json!({ "requestId": id, "reason": reason });
-            self.notify("notifications/cancelled", params).await;
+        // 没等到回应就不等了的（超时、人点了停止、整个调用被上层丢弃），都要告诉服务不用做了。
+        let mut abandon = Abandon {
+            id,
+            waiting: self.waiting.clone(),
+            writer: self.writer.clone(),
+            closed: self.closed.clone(),
+            sent: false,
+            tell: true,
         };
-        tokio::select! {
-            answer = rx => match answer {
+        let message = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
+        // 发出去也算在时限里：服务不读输入的时候，写会一直卡着。
+        let sent = &mut abandon.sent;
+        let exchange = async {
+            self.send(&message).await?;
+            *sent = true;
+            match rx.await {
                 Ok(Ok(value)) => Ok(value),
                 Ok(Err(message)) => Err(McpError(message)),
                 Err(_) => Err(self.gone()),
-            },
-            _ = tokio::time::sleep(timeout) => {
-                give_up("timeout").await;
-                Err(McpError(format!("MCP 服务等了 {} 秒没有回应。", timeout.as_secs_f32().ceil())))
             }
-            _ = cancel.cancelled() => {
-                give_up("cancelled").await;
-                Err(McpError("已停止。".into()))
+        };
+        tokio::select! {
+            outcome = exchange => {
+                // 有结果了，或者线断了：没有什么要取消的。
+                abandon.tell = false;
+                outcome
             }
+            _ = tokio::time::sleep(timeout) => Err(McpError(format!(
+                "MCP 服务等了 {} 秒没有回应。",
+                timeout.as_secs_f32().ceil()
+            ))),
+            _ = cancel.cancelled() => Err(McpError("已停止。".into())),
         }
+    }
+}
+
+/// 一次请求不再等了。丢弃时把等回应的位置收掉；需要的话告诉服务取消（另起任务去发，最多等几秒）。
+struct Abandon {
+    id: u64,
+    waiting: Waiting,
+    writer: Arc<tokio::sync::Mutex<Writer>>,
+    closed: Arc<AtomicBool>,
+    /// 请求整条发出去了没有。
+    sent: bool,
+    tell: bool,
+}
+
+impl Drop for Abandon {
+    fn drop(&mut self) {
+        self.waiting.lock().unwrap().remove(&self.id);
+        if !self.tell {
+            return;
+        }
+        if !self.sent {
+            // 请求可能只写了半行：这条线上后面的话服务都会读错，下一次调用重新连。
+            self.closed.store(true, Ordering::SeqCst);
+            return;
+        }
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let writer = self.writer.clone();
+        let params = json!({ "requestId": self.id, "reason": "cancelled" });
+        let message =
+            json!({ "jsonrpc": "2.0", "method": "notifications/cancelled", "params": params });
+        runtime.spawn(async move {
+            let _ = tokio::time::timeout(CANCEL_NOTICE_TIMEOUT, send_line(&writer, &message)).await;
+        });
     }
 }
 
@@ -987,6 +1033,87 @@ mod tests {
         assert_eq!(answers[0]["id"], "p1");
         assert_eq!(answers[0]["result"], json!({}));
         assert_eq!(answers[1]["error"]["code"], -32601);
+    }
+
+    /// 握手照常、收到工具调用不回答的服务。收到的每条消息都记下来。
+    fn silent(seen: Arc<Mutex<Vec<Value>>>) -> Dialer {
+        Box::new(move || {
+            let seen = seen.clone();
+            Box::pin(async move {
+                let (ours, theirs) = tokio::io::duplex(64 * 1024);
+                tokio::spawn(async move {
+                    let (reader, mut writer) = tokio::io::split(theirs);
+                    let mut reader = BufReader::new(reader);
+                    let mut line = vec![];
+                    while let Ok(true) = read_line(&mut reader, &mut line).await {
+                        let message: Value = serde_json::from_slice(&line).unwrap();
+                        let result = match message["method"].as_str() {
+                            Some("initialize") => json!({ "capabilities": { "tools": {} } }),
+                            Some("tools/list") => json!({ "tools": [] }),
+                            _ => {
+                                seen.lock().unwrap().push(message);
+                                continue;
+                            }
+                        };
+                        let reply =
+                            json!({ "jsonrpc": "2.0", "id": message["id"], "result": result });
+                        writer
+                            .write_all(format!("{reply}\n").as_bytes())
+                            .await
+                            .unwrap();
+                    }
+                });
+                let (reader, writer) = tokio::io::split(ours);
+                Ok(Pipe::new(reader, writer))
+            })
+        })
+    }
+
+    #[tokio::test]
+    async fn a_call_dropped_by_its_caller_still_tells_the_server_to_stop() {
+        let seen = Arc::new(Mutex::new(vec![]));
+        let server = McpServer::with_dialer("quiet", vec![], silent(seen.clone()));
+        server.connect().await.unwrap();
+        // 人点了停止：上层不再等这个工具，整个调用被丢弃，轮不到它自己去发取消。
+        let never = CancellationToken::new();
+        let call = server.call("slow", json!({}), &never);
+        assert!(tokio::time::timeout(Duration::from_millis(50), call)
+            .await
+            .is_err());
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let seen = seen.lock().unwrap().clone();
+        let methods: Vec<&str> = seen.iter().filter_map(|m| m["method"].as_str()).collect();
+        assert_eq!(
+            methods,
+            [
+                "notifications/initialized",
+                "tools/call",
+                "notifications/cancelled"
+            ]
+        );
+        assert_eq!(seen[2]["params"]["requestId"], seen[1]["id"]);
+    }
+
+    #[tokio::test]
+    async fn a_server_that_stops_reading_cannot_hold_a_call_past_its_limit() {
+        // 管道只有几个字节，那一头从来不读：写会卡住。
+        let dialer: Dialer = Box::new(|| {
+            Box::pin(async {
+                let (ours, theirs) = tokio::io::duplex(8);
+                std::mem::forget(theirs);
+                let (reader, writer) = tokio::io::split(ours);
+                Ok(Pipe::new(reader, writer))
+            })
+        });
+        let quick = McpTimeouts {
+            start: Duration::from_millis(100),
+            call: Duration::from_millis(100),
+        };
+        let server = McpServer::with_dialer("deaf", vec![], dialer).timeouts(quick);
+        let started = std::time::Instant::now();
+        let error = server.connect().await.unwrap_err();
+        assert!(error.0.contains("没有回应"), "{error}");
+        assert!(started.elapsed() < Duration::from_secs(3));
     }
 
     #[tokio::test]
