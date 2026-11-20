@@ -1,5 +1,7 @@
 import type {
   ApiError,
+  ApprovalDecision,
+  ApprovalId,
   Bot,
   CreateRoomRequest,
   Health,
@@ -35,6 +37,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       body.message ?? `请求失败（${response.status}）`,
     );
   }
+  // 204 没有内容可读。
+  if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
 }
 
@@ -60,4 +64,7 @@ export const api = {
     postJson<Message>(`/api/rooms/${encodeURIComponent(roomId)}/messages`, { content }),
   stopReply: (roomId: RoomId) =>
     postJson<StopResponse>(`/api/rooms/${encodeURIComponent(roomId)}/stop`, {}),
+  /** 答复一张审批卡。卡片已经处理过或过期时抛出 `approval_closed`。 */
+  decideApproval: (id: ApprovalId, decision: ApprovalDecision) =>
+    postJson<void>(`/api/approvals/${encodeURIComponent(id)}/decide`, { decision }),
 };

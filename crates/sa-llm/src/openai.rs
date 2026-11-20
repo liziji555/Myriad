@@ -123,7 +123,7 @@ impl Provider for OpenAiCompat {
     }
 
     fn capabilities(&self, _model: &str) -> ModelCaps {
-        // DeepSeek 当前两个模型都是 1M 上下文。其他网关的模型可能更小，M2 做压缩时改成可配置。
+        // DeepSeek 当前两个模型都是 1M 上下文。其他网关的模型可能更小，在档位里用 context_window 改。
         ModelCaps {
             context_window: 1_000_000,
             supports_tools: true,

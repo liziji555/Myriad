@@ -5,8 +5,11 @@
 //!
 //! 这一层不知道房间、Bot、数据库：输入从 [`Inbox`] 来，过程通过 [`Observer`] 报出去。
 
+mod compact;
 mod transcript;
 mod turn;
 
 pub use transcript::{Entry, EntryBody, Transcript, TranscriptError};
-pub use turn::{run_turn, Inbox, Observer, TurnConfig, TurnEnd, TurnOutcome, UserInput};
+pub use turn::{
+    run_turn, ApprovalRequest, Inbox, Observer, TurnConfig, TurnEnd, TurnOutcome, UserInput,
+};

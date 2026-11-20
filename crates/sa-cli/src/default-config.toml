@@ -21,6 +21,8 @@ api_key_env = "DEEPSEEK_API_KEY"
 
 # 模型档位。Bot 只引用档位（cheap / mid / strong），换模型只改这里。
 # thinking 控制思考模式：true 开、false 关，不写就用模型服务的默认值。
+# context_window 是模型的上下文窗口（token）。对话快占满时会自动把前面的部分压缩成摘要；
+# 不写就按 1,000,000 算。模型的窗口更小，或者想早点压缩省钱，就写上，例如 context_window = 128000。
 [tiers]
 cheap = { provider = "deepseek", model = "deepseek-flash", thinking = false }
 mid = { provider = "deepseek", model = "deepseek-flash" }

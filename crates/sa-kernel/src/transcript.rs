@@ -64,7 +64,18 @@ pub enum EntryBody {
         #[serde(default)]
         is_error: bool,
     },
+    /// 压缩边界：这之前的对话用一段摘要代替。记录本身不删，只是不再发给模型。
+    Summary {
+        content: String,
+        /// 紧挨在这条之前、仍然原样发给模型的条数（最近的几条不压缩）。
+        #[serde(default)]
+        kept: usize,
+    },
 }
+
+/// 摘要发给模型时前面加的说明。
+pub const SUMMARY_PREFIX: &str =
+    "（之前的对话太长，下面是它的摘要。摘要之后是最近的原始对话。）\n\n";
 
 pub struct Transcript {
     path: PathBuf,
@@ -223,7 +234,7 @@ impl Transcript {
                         open.remove(index);
                     }
                 }
-                EntryBody::User { .. } => {}
+                EntryBody::User { .. } | EntryBody::Summary { .. } => {}
             }
         }
         for tool_call_id in &open {
@@ -248,11 +259,43 @@ impl Transcript {
             .unwrap_or(0)
     }
 
-    /// 换成发给模型的消息列表（不含系统提示词）。
-    pub fn to_chat_messages(&self) -> Vec<ChatMessage> {
+    /// 最后一个压缩边界的位置。
+    fn boundary(&self) -> Option<usize> {
         self.entries
             .iter()
-            .map(|entry| match &entry.body {
+            .rposition(|entry| matches!(entry.body, EntryBody::Summary { .. }))
+    }
+
+    /// 仍然原样发给模型的第一条的位置。没压缩过就是 0。
+    pub fn live_start(&self) -> usize {
+        match self
+            .boundary()
+            .map(|index| (index, &self.entries[index].body))
+        {
+            Some((index, EntryBody::Summary { kept, .. })) => index.saturating_sub(*kept),
+            _ => 0,
+        }
+    }
+
+    /// 最近一次压缩写下的摘要。
+    pub fn last_summary(&self) -> Option<&str> {
+        match &self.entries[self.boundary()?].body {
+            EntryBody::Summary { content, .. } => Some(content),
+            _ => None,
+        }
+    }
+
+    /// 换成发给模型的消息列表（不含系统提示词）。
+    ///
+    /// 有压缩边界时，从最后一个边界开始：先是摘要，再是边界之前保留的那几条，然后是边界之后的。
+    pub fn to_chat_messages(&self) -> Vec<ChatMessage> {
+        let start = self.live_start();
+        let summary = self
+            .last_summary()
+            .map(|content| ChatMessage::user(format!("{SUMMARY_PREFIX}{content}")));
+        let rest = self.entries[start..].iter().filter_map(|entry| {
+            Some(match &entry.body {
+                EntryBody::Summary { .. } => return None,
                 EntryBody::User { content, .. } => ChatMessage::user(content.clone()),
                 EntryBody::Assistant {
                     content,
@@ -269,7 +312,8 @@ impl Transcript {
                     ..
                 } => ChatMessage::tool_result(tool_call_id.clone(), content.clone()),
             })
-            .collect()
+        });
+        summary.into_iter().chain(rest).collect()
     }
 }
 

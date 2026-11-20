@@ -3,7 +3,7 @@
 use crate::{now_ms, to_json, Engine, EngineError, Result, MAX_MESSAGE_CHARS};
 use sa_protocol::{
     BotId, EventKind, Message, MessageDelta, MessageId, MessagePage, MessageState, RoomId, Sender,
-    SessionId, ToolStep,
+    SessionId, StepState, ToolStep,
 };
 use sa_store::{events, messages, rooms, sessions, usage};
 use tokio::sync::broadcast;
@@ -180,6 +180,12 @@ impl Engine {
             let stuck = messages::list_in_state(tx, MessageState::Streaming)?;
             for mut message in stuck.iter().cloned() {
                 message.state = MessageState::Interrupted;
+                // 没跑完的步骤和没人答复的审批都作废。
+                for step in &mut message.steps {
+                    if matches!(step.state, StepState::Running | StepState::Waiting) {
+                        step.state = StepState::Cancelled;
+                    }
+                }
                 message.rev += 1;
                 message.updated_at = now;
                 messages::update(tx, &message)?;
@@ -339,6 +345,7 @@ mod tests {
             tool: "read".into(),
             title: "读取 a.txt".into(),
             state: StepState::Running,
+            approval: None,
         };
         let updated = engine.set_steps(&draft.id, vec![step.clone()]).unwrap();
         assert_eq!(updated.rev, 3);
@@ -400,7 +407,19 @@ mod tests {
                 .begin_bot_message(&room.id, room.host_bot_id.as_ref().unwrap())
                 .unwrap();
             engine.append_delta(&draft.id, "写到一半");
-            engine.set_steps(&draft.id, vec![]).unwrap();
+            let step = |id: &str, state| ToolStep {
+                id: id.into(),
+                tool: "shell".into(),
+                title: "执行 ls".into(),
+                state,
+                approval: None,
+            };
+            let steps = vec![
+                step("a", StepState::Ok),
+                step("b", StepState::Running),
+                step("c", StepState::Waiting),
+            ];
+            engine.set_steps(&draft.id, steps).unwrap();
             engine.append_delta(&draft.id, "，没来得及落库");
             (room.id, draft.id)
         };
@@ -411,6 +430,12 @@ mod tests {
         assert_eq!(page.messages[0].id, id);
         assert_eq!(page.messages[0].state, MessageState::Interrupted);
         assert_eq!(page.messages[0].content, "写到一半");
+        // 没跑完的步骤和没人答复的审批不再显示成进行中。
+        let states: Vec<_> = page.messages[0].steps.iter().map(|s| s.state).collect();
+        assert_eq!(
+            states,
+            [StepState::Ok, StepState::Cancelled, StepState::Cancelled]
+        );
     }
 
     #[test]

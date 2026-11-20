@@ -1,8 +1,11 @@
 // 类型由 Rust 侧生成（`cargo test` 时导出到 ./generated），这里只做汇总。
 export type { ApiError } from "./generated/ApiError";
+export type { ApprovalDecision } from "./generated/ApprovalDecision";
+export type { ApprovalId } from "./generated/ApprovalId";
 export type { Bot } from "./generated/Bot";
 export type { BotId } from "./generated/BotId";
 export type { CreateRoomRequest } from "./generated/CreateRoomRequest";
+export type { DecideApprovalRequest } from "./generated/DecideApprovalRequest";
 export type { Event } from "./generated/Event";
 export type { Health } from "./generated/Health";
 export type { Message } from "./generated/Message";
@@ -10,10 +13,12 @@ export type { MessageDelta } from "./generated/MessageDelta";
 export type { MessageId } from "./generated/MessageId";
 export type { MessagePage } from "./generated/MessagePage";
 export type { MessageState } from "./generated/MessageState";
+export type { PermissionRule } from "./generated/PermissionRule";
 export type { PostMessageRequest } from "./generated/PostMessageRequest";
 export type { Room } from "./generated/Room";
 export type { RoomId } from "./generated/RoomId";
 export type { Sender } from "./generated/Sender";
+export type { StepApproval } from "./generated/StepApproval";
 export type { StepState } from "./generated/StepState";
 export type { StopResponse } from "./generated/StopResponse";
 export type { StreamReady } from "./generated/StreamReady";

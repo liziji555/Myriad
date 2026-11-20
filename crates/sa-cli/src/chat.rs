@@ -4,7 +4,8 @@ use crate::app::{init_logging, App, RunArgs, BUDGET_NOTICE};
 use crate::paths::DataDir;
 use anyhow::{bail, Context, Result};
 use sa_protocol::{
-    Event, EventKind, Message, MessageId, MessageState, Room, Sender, StepState, ToolStep,
+    ApprovalDecision, Event, EventKind, Message, MessageId, MessageState, Room, Sender, StepState,
+    ToolStep,
 };
 use std::future::Future;
 use std::io::Write;
@@ -35,7 +36,9 @@ pub fn run(data_dir: &DataDir, args: ChatArgs) -> Result<ExitCode> {
             let mut out = std::io::stdout();
             let result = match args.message {
                 Some(text) => {
-                    let state = converse(&app, &room, &text, &mut out, ctrl_c()).await?;
+                    let state =
+                        converse(&app, &room, &text, &mut out, &mut stdin_lines(), ctrl_c())
+                            .await?;
                     Ok(if state == MessageState::Complete {
                         ExitCode::SUCCESS
                     } else {
@@ -93,16 +96,7 @@ async fn interactive(app: &App, room: &Room, out: &mut impl Write) -> Result<()>
         "输入内容后回车发送；回复过程中按 Ctrl+C 停止；输入 /exit 或按 Ctrl+D 退出。"
     )?;
 
-    // 读终端会阻塞，放到单独的线程里。
-    let (lines, mut next_line) = tokio::sync::mpsc::channel::<String>(1);
-    std::thread::spawn(move || {
-        for line in std::io::stdin().lines() {
-            let Ok(line) = line else { break };
-            if lines.blocking_send(line).is_err() {
-                break;
-            }
-        }
-    });
+    let mut next_line = stdin_lines();
 
     loop {
         write!(out, "\n你> ")?;
@@ -121,19 +115,46 @@ async fn interactive(app: &App, room: &Room, out: &mut impl Write) -> Result<()>
             "/exit" | "/quit" => return Ok(()),
             _ => {}
         }
-        if let Err(error) = converse(app, room, text, out, ctrl_c()).await {
+        if let Err(error) = converse(app, room, text, out, &mut next_line, ctrl_c()).await {
             writeln!(out, "没发出去：{error:#}")?;
         }
     }
 }
 
+/// 一行一行读终端输入。读终端会阻塞，所以放在单独的线程里。
+fn stdin_lines() -> Lines {
+    let (lines, next_line) = tokio::sync::mpsc::channel::<String>(1);
+    std::thread::spawn(move || {
+        for line in std::io::stdin().lines() {
+            let Ok(line) = line else { break };
+            if lines.blocking_send(line).is_err() {
+                break;
+            }
+        }
+    });
+    next_line
+}
+
+type Lines = tokio::sync::mpsc::Receiver<String>;
+
+/// 人对审批卡的回答：y 允许一次，a 总是允许，其他（包括没有输入）都算拒绝。
+fn parse_decision(answer: Option<&str>) -> ApprovalDecision {
+    match answer.map(|a| a.trim().to_lowercase()).as_deref() {
+        Some("y" | "yes") => ApprovalDecision::Once,
+        Some("a" | "always") => ApprovalDecision::Always,
+        _ => ApprovalDecision::Deny,
+    }
+}
+
 /// 发一条消息，把回复边写边打印出来，直到写完。`interrupt` 完成时停下回复。
+/// Bot 要做需要批准的事时，从 `answers` 读一行作为答复。
 /// 返回回复最后的状态。
 pub async fn converse(
     app: &App,
     room: &Room,
     text: &str,
     out: &mut impl Write,
+    answers: &mut Lines,
     interrupt: impl Future<Output = ()>,
 ) -> Result<MessageState> {
     // 先订阅再发：不会漏掉回复的开头。
@@ -149,6 +170,7 @@ pub async fn converse(
     let mut printer = Printer::default();
     tokio::pin!(interrupt);
     let mut interrupted = false;
+    let mut asked = std::collections::HashSet::new();
     loop {
         tokio::select! {
             // 片段优先：同一时刻既有文字又有步骤更新时，文字是先产生的。
@@ -179,6 +201,42 @@ pub async fn converse(
                             continue;
                         }
                         printer.steps(out, &message.steps)?;
+                        for step in &message.steps {
+                            let (StepState::Waiting, Some(approval)) = (step.state, &step.approval)
+                            else {
+                                continue;
+                            };
+                            if interrupted || !asked.insert(approval.id.clone()) {
+                                continue;
+                            }
+                            // 提示出现之前敲的回车不算数：那不是对这张卡的回答，不能拿它来批准。
+                            while answers.try_recv().is_ok() {}
+                            printer.line(out, &format!("  需要你批准：{}", approval.reason), true)?;
+                            write!(out, "  [y] 允许一次  [a] 总是允许  [n] 拒绝 > ")?;
+                            out.flush()?;
+                            printer.at_line_start = false;
+                            let left = (approval.expires_at - sa_engine::now_ms()).max(0) as u64;
+                            let decision = tokio::select! {
+                                answer = answers.recv() => {
+                                    // 人按了回车，光标已经在新的一行。
+                                    printer.at_line_start = answer.is_some();
+                                    parse_decision(answer.as_deref())
+                                }
+                                _ = &mut interrupt => {
+                                    interrupted = true;
+                                    app.orchestrator.stop(&room.id);
+                                    continue;
+                                }
+                                // 卡片过期了：不再等输入，接着显示后面的回复。
+                                _ = tokio::time::sleep(std::time::Duration::from_millis(left)) => {
+                                    printer.line(out, "  太久没有处理，按拒绝算。", true)?;
+                                    continue;
+                                }
+                            };
+                            if !app.orchestrator.decide(&approval.id, decision) {
+                                printer.line(out, "  这张审批卡已经过期或者处理过了。", true)?;
+                            }
+                        }
                         if message.state != MessageState::Streaming {
                             printer.finish(out, &message)?;
                             return Ok(message.state);
@@ -268,7 +326,9 @@ impl Printer {
                 continue;
             }
             let line = match step.state {
+                StepState::Waiting => format!("  ? {}（等你批准）", step.title),
                 StepState::Running => format!("  · {} …", step.title),
+                StepState::Denied => format!("  ✗ {}（没有批准，未执行）", step.title),
                 StepState::Ok => format!("  ✓ {}", step.title),
                 StepState::Error => format!("  ✗ {}（失败，原因已交给 Bot）", step.title),
                 StepState::Cancelled => format!("  - {}（已停止）", step.title),
@@ -329,6 +389,10 @@ mod tests {
     use std::time::Duration;
 
     fn open(dir: &std::path::Path) -> App {
+        open_tuned(dir, |_| {})
+    }
+
+    fn open_tuned(dir: &std::path::Path, tune: impl FnOnce(&mut sa_orchestrator::Settings)) -> App {
         let work = dir.join("work");
         std::fs::create_dir_all(&work).unwrap();
         std::fs::write(work.join("说明.md"), "项目代号：海豚\n").unwrap();
@@ -338,23 +402,149 @@ mod tests {
             mock: true,
         };
         // 和 --mock 用的是同一个假模型，只是出字更快。
-        App::open_with(&data_dir, &args, |_| {
+        let models = |_: &crate::config::Config| -> Arc<dyn sa_orchestrator::ModelRouter> {
             Arc::new(SingleModel(ResolvedModel {
                 provider: Arc::new(MockProvider::demo().with_chunk_delay(Duration::from_millis(4))),
                 model: "mock".into(),
                 thinking: None,
+                context_window: None,
             }))
-        })
-        .unwrap()
+        };
+        App::open_tuned(&data_dir, &args, models, tune).unwrap()
     }
 
     async fn say(app: &App, text: &str) -> (MessageState, String) {
+        say_and_answer(app, text, &[]).await
+    }
+
+    /// 终端的输出，测试里另一头可以边跑边看。
+    #[derive(Clone, Default)]
+    struct Screen(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl Screen {
+        fn text(&self) -> String {
+            String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+        }
+    }
+
+    impl Write for Screen {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// 发一条消息；每出现一次审批提示，就「敲」一行 `answers` 里的回答。
+    /// 回答用完之后输入就关了，再问就是没有输入。
+    async fn say_and_answer(app: &App, text: &str, answers: &[&str]) -> (MessageState, String) {
+        let (typed, lines) = tokio::sync::mpsc::channel(8);
+        let answers: Vec<String> = answers.iter().map(|a| a.to_string()).collect();
+        let screen = Screen::default();
+        let watching = screen.clone();
+        let typist = tokio::spawn(async move {
+            for (index, answer) in answers.into_iter().enumerate() {
+                while watching.text().matches("拒绝 > ").count() <= index {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                typed.send(answer).await.unwrap();
+            }
+        });
+        let result = chat(app, text, screen, lines).await;
+        typist.abort();
+        result
+    }
+
+    async fn chat(
+        app: &App,
+        text: &str,
+        mut screen: Screen,
+        mut lines: Lines,
+    ) -> (MessageState, String) {
         let room = pick_room(app, None).unwrap();
-        let mut out = Vec::new();
-        let state = converse(app, &room, text, &mut out, std::future::pending())
-            .await
-            .unwrap();
-        (state, String::from_utf8(out).unwrap())
+        let state = converse(
+            app,
+            &room,
+            text,
+            &mut screen,
+            &mut lines,
+            std::future::pending(),
+        )
+        .await
+        .unwrap();
+        (state, screen.text())
+    }
+
+    /// 审批卡过期：不再等人敲回车，回复照常显示完。之前敲的回车不会被当成对后面卡片的回答。
+    #[tokio::test]
+    async fn expired_or_stale_input_never_approves() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = open_tuned(dir.path(), |settings| {
+            settings.approval_timeout = Duration::from_millis(200);
+        });
+        // 输入一直开着，但没有人敲。
+        let (typed, lines) = tokio::sync::mpsc::channel(8);
+        let (state, out) = tokio::time::timeout(
+            Duration::from_secs(20),
+            chat(&app, "运行 `echo ok`", Screen::default(), lines),
+        )
+        .await
+        .expect("过期之后不应该还在等输入");
+        assert_eq!(state, MessageState::Complete, "{out}");
+        assert!(out.contains("太久没有处理，按拒绝算。"), "{out}");
+        assert!(
+            out.contains("没有批准，未执行") && !out.contains("退出码"),
+            "{out}"
+        );
+
+        // 提示出现之前敲的 y：不算数。
+        let (early, lines) = tokio::sync::mpsc::channel(8);
+        early.send("y".to_string()).await.unwrap();
+        let (state, out) = chat(&app, "运行 `echo ok`", Screen::default(), lines).await;
+        drop((typed, early));
+        assert_eq!(state, MessageState::Complete, "{out}");
+        assert!(
+            out.contains("没有批准，未执行") && !out.contains("退出码"),
+            "{out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn commands_ask_in_the_terminal_and_follow_the_answer() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = open(dir.path());
+
+        let (state, out) = say_and_answer(&app, "运行 `echo ok`", &["y"]).await;
+        assert_eq!(state, MessageState::Complete, "{out}");
+        assert!(out.contains("需要你批准：要执行命令：echo ok"), "{out}");
+        assert!(
+            out.contains("[y] 允许一次  [a] 总是允许  [n] 拒绝"),
+            "{out}"
+        );
+        assert!(
+            out.contains("✓ 执行 echo ok") && out.contains("退出码 0"),
+            "{out}"
+        );
+
+        // 拒绝：不执行。没有输入（比如输入已经关闭）也按拒绝算。
+        for answers in [&["n"][..], &[]] {
+            let (state, out) = say_and_answer(&app, "运行 `echo ok`", answers).await;
+            assert_eq!(state, MessageState::Complete, "{out}");
+            assert!(out.contains("没有批准，未执行"), "{out}");
+            assert!(!out.contains("退出码"), "{out}");
+        }
+
+        // 总是允许：这次执行，下次同样的命令不再问。
+        let (_, out) = say_and_answer(&app, "运行 `echo ok`", &["a"]).await;
+        assert!(out.contains("退出码 0"), "{out}");
+        let (state, out) = say_and_answer(&app, "运行 `echo ok`", &[]).await;
+        assert_eq!(state, MessageState::Complete, "{out}");
+        assert!(
+            !out.contains("需要你批准") && out.contains("退出码 0"),
+            "{out}"
+        );
     }
 
     #[tokio::test]
@@ -406,6 +596,7 @@ mod tests {
             &room,
             "你好",
             &mut out,
+            &mut tokio::sync::mpsc::channel(1).1,
             tokio::time::sleep(Duration::from_millis(120)),
         )
         .await

@@ -9,7 +9,15 @@ import {
   type ChatState,
 } from "./chat";
 import { ApiRequestError, api } from "./client";
-import type { Event, Message, MessageDelta, Room, RoomId } from "./types";
+import type {
+  ApprovalDecision,
+  ApprovalId,
+  Event,
+  Message,
+  MessageDelta,
+  Room,
+  RoomId,
+} from "./types";
 import { applyEvent, emptyWorkspace, type Workspace } from "./workspace";
 
 export type Phase = "loading" | "ready" | "unauthorized";
@@ -28,6 +36,7 @@ export interface WorkspaceView extends Workspace {
   loadOlder(roomId: RoomId): Promise<void>;
   sendMessage(roomId: RoomId, content: string): Promise<void>;
   stopReply(roomId: RoomId): Promise<void>;
+  decideApproval(id: ApprovalId, decision: ApprovalDecision): Promise<void>;
 }
 
 const SNAPSHOT_RETRY_MS = 2000;
@@ -171,6 +180,11 @@ export function useWorkspace(): WorkspaceView {
     await api.stopReply(roomId);
   }, []);
 
+  const decideApproval = useCallback(async (id: ApprovalId, decision: ApprovalDecision) => {
+    // 结果（步骤变成进行中或没有批准）由事件流送来，这里不用改状态。
+    await api.decideApproval(id, decision);
+  }, []);
+
   return {
     ...workspace,
     phase,
@@ -182,5 +196,6 @@ export function useWorkspace(): WorkspaceView {
     loadOlder,
     sendMessage,
     stopReply,
+    decideApproval,
   };
 }

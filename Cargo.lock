@@ -1603,6 +1603,7 @@ dependencies = [
  "sa-protocol",
  "sa-store",
  "sa-tools",
+ "serde_json",
  "tempfile",
  "thiserror",
  "tokio",
@@ -1675,6 +1676,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-util",
+ "uuid",
 ]
 
 [[package]]

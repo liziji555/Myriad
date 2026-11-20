@@ -122,6 +122,7 @@ function Shell() {
               loadError={loadError}
               onRetry={() => setRetry((n) => n + 1)}
               onLoadOlder={() => workspace.loadOlder(room.id)}
+              onDecide={workspace.decideApproval}
               onLightDemo={runLightDemo}
             />
             <Composer

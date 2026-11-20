@@ -40,7 +40,8 @@ impl App {
     pub fn open(data_dir: &DataDir, args: &RunArgs) -> Result<Self> {
         Self::open_with(data_dir, args, |config| {
             if args.mock {
-                Arc::new(models::mock())
+                // 假模型也看 mid 档位的窗口大小：调小它就能演示自动压缩。
+                Arc::new(models::mock(config.tiers.mid.context_window))
             } else {
                 Arc::new(ConfigModels::new(config.clone()))
             }
@@ -52,6 +53,16 @@ impl App {
         data_dir: &DataDir,
         args: &RunArgs,
         models: impl FnOnce(&Config) -> Arc<dyn ModelRouter>,
+    ) -> Result<Self> {
+        Self::open_tuned(data_dir, args, models, |_| {})
+    }
+
+    /// 和 [`App::open_with`] 一样，另外可以在启动前调整设置。测试用它把等待时间调短。
+    pub fn open_tuned(
+        data_dir: &DataDir,
+        args: &RunArgs,
+        models: impl FnOnce(&Config) -> Arc<dyn ModelRouter>,
+        tune: impl FnOnce(&mut Settings),
     ) -> Result<Self> {
         create_private_dir(data_dir.root())
             .with_context(|| format!("无法创建数据目录 {}", data_dir.root().display()))?;
@@ -89,13 +100,15 @@ impl App {
         }
 
         let models = models(&config);
-        let settings = Settings {
+        let mut settings = Settings {
             sessions_dir: data_dir.sessions(),
             fence,
             prompt,
             max_steps: MAX_STEPS,
             allow_private_network: false,
+            approval_timeout: sa_orchestrator::DEFAULT_APPROVAL_TIMEOUT,
         };
+        tune(&mut settings);
         let orchestrator = Arc::new(Orchestrator::new(engine.clone(), models, settings));
         Ok(Self {
             config,

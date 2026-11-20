@@ -7,12 +7,13 @@ mod room;
 
 use sa_engine::{Engine, EngineError};
 use sa_llm::Provider;
-use sa_protocol::{Message, ModelTier, RoomId};
+use sa_protocol::{ApprovalDecision, ApprovalId, Message, ModelTier, RoomId};
 use sa_tools::{Fence, ToolRegistry};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use tokio::sync::Notify;
+use std::time::Duration;
+use tokio::sync::{oneshot, Notify};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -24,6 +25,8 @@ pub struct ResolvedModel {
     pub provider: Arc<dyn Provider>,
     pub model: String,
     pub thinking: Option<bool>,
+    /// 这个模型的上下文窗口（token）。不填就用模型服务报的大小。
+    pub context_window: Option<usize>,
 }
 
 /// 把模型档位换成能调用的模型。失败时返回给人看的原因（比如没有配置密钥）。
@@ -43,7 +46,12 @@ pub struct Settings {
     pub max_steps: usize,
     /// 允许 `web_fetch` 访问本机和内网。只在测试里打开。
     pub allow_private_network: bool,
+    /// 审批卡等多久没人处理就按拒绝算。
+    pub approval_timeout: Duration,
 }
+
+/// 审批卡默认等 10 分钟。
+pub const DEFAULT_APPROVAL_TIMEOUT: Duration = Duration::from_secs(600);
 
 #[derive(Debug, thiserror::Error)]
 pub enum OrchestratorError {
@@ -65,6 +73,8 @@ pub(crate) struct Shared {
     pub settings: Settings,
     /// 触发后所有房间停下手里的事并退出。
     pub shutdown: CancellationToken,
+    /// 正在等人答复的审批。
+    pub approvals: Mutex<HashMap<ApprovalId, oneshot::Sender<ApprovalDecision>>>,
 }
 
 struct RoomHandle {
@@ -80,9 +90,10 @@ impl Orchestrator {
             shared: Arc::new(Shared {
                 engine,
                 models,
-                tools: ToolRegistry::read_only(),
+                tools: ToolRegistry::standard(),
                 settings,
                 shutdown: CancellationToken::new(),
+                approvals: Mutex::new(HashMap::new()),
             }),
             rooms: Mutex::new(HashMap::new()),
         }
@@ -125,6 +136,15 @@ impl Orchestrator {
                 cancel.cancel();
                 true
             }
+            None => false,
+        }
+    }
+
+    /// 人答复一张审批卡。返回 `false` 表示这张卡已经不在等了（答过了、过期了，或者那一轮已经停了）。
+    pub fn decide(&self, id: &ApprovalId, decision: ApprovalDecision) -> bool {
+        let waiting = self.shared.approvals.lock().unwrap().remove(id);
+        match waiting {
+            Some(reply) => reply.send(decision).is_ok(),
             None => false,
         }
     }

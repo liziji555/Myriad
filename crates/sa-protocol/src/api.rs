@@ -1,4 +1,4 @@
-use crate::Message;
+use crate::{ApprovalDecision, Message};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
@@ -42,4 +42,10 @@ pub struct MessagePage {
 pub struct StopResponse {
     /// 是否真的有一条正在写的回复被停下。
     pub stopped: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct DecideApprovalRequest {
+    pub decision: ApprovalDecision,
 }

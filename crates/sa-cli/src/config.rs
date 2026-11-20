@@ -57,7 +57,13 @@ pub struct TierModel {
     /// 是否开启思考模式。不写就用模型服务自己的默认值。
     #[serde(default)]
     pub thinking: Option<bool>,
+    /// 这个模型的上下文窗口（token）。对话快占满时自动压缩。不写就用模型服务报的大小。
+    #[serde(default)]
+    pub context_window: Option<usize>,
 }
+
+/// 窗口再小，系统提示词和工具说明就放不下了。
+pub const MIN_CONTEXT_WINDOW: usize = 16_000;
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -103,6 +109,9 @@ impl Config {
             }
             if model.model.trim().is_empty() {
                 bail!("[tiers] 的 {tier} 没有填 model");
+            }
+            if model.context_window.is_some_and(|n| n < MIN_CONTEXT_WINDOW) {
+                bail!("[tiers] 的 {tier} 的 context_window 太小，至少要 {MIN_CONTEXT_WINDOW}");
             }
         }
         for (name, provider) in &self.providers {
@@ -160,6 +169,23 @@ mod tests {
         let config = Config::parse(DEFAULT_CONFIG_TOML).unwrap();
         assert_eq!(config.tiers.cheap.thinking, Some(false));
         assert_eq!(config.tiers.strong.thinking, None);
+    }
+
+    #[test]
+    fn tier_context_window_is_optional_and_checked() {
+        let config = Config::parse(DEFAULT_CONFIG_TOML).unwrap();
+        assert_eq!(config.tiers.mid.context_window, None);
+        let with_window = DEFAULT_CONFIG_TOML.replace(
+            r#"mid = { provider = "deepseek", model = "deepseek-flash" }"#,
+            r#"mid = { provider = "deepseek", model = "deepseek-flash", context_window = 128000 }"#,
+        );
+        let config = Config::parse(&with_window).unwrap();
+        assert_eq!(config.tiers.mid.context_window, Some(128_000));
+        let error = Config::parse(&with_window.replace("128000", "4000")).unwrap_err();
+        assert!(
+            error.to_string().contains("context_window 太小"),
+            "{error:#}"
+        );
     }
 
     #[test]

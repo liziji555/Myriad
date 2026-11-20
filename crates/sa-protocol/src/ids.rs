@@ -46,6 +46,8 @@ id_type!(RoomId, "room");
 id_type!(BotId, "bot");
 id_type!(MessageId, "msg");
 id_type!(SessionId, "ses");
+id_type!(ApprovalId, "apr");
+id_type!(RuleId, "rule");
 
 #[cfg(test)]
 mod tests {
