@@ -177,8 +177,13 @@ async fn run_task(shared: &Arc<Shared>, task: Task, cancel: &CancellationToken) 
     let (run, draft, session_id) = match db(move || engine.start_run(&id, &bot_id)).await {
         Ok(started) => started,
         Err(error) => {
-            // 多半是开工前被人取消了。
+            // 多半是开工前被人取消了：刚准备好的目录不留。
             tracing::info!(task = %task.id, "任务没有开工：{error}");
+            let (engine, id) = (shared.engine.clone(), task.id.clone());
+            let ended = db(move || engine.get_task(&id)).await;
+            if ended.is_ok_and(|task| task.state.is_terminal()) {
+                cleanup(shared, &task.id).await;
+            }
             return;
         }
     };

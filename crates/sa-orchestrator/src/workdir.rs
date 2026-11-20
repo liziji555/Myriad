@@ -16,9 +16,22 @@ const MAX_COPY_BYTES: u64 = 200 * 1024 * 1024;
 
 /// 跑一条 git 命令，返回标准输出。失败时返回 git 自己说的原因。
 pub async fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(plain(dir))
+    run_git(dir, false, args).await
+}
+
+/// 在复制出来的任务目录里跑 git：文件内容原样进出，不做换行符转换。
+/// 这样算出来的补丁和人的工作目录里的文件逐字节对得上（Windows 上 git 默认会把 CRLF 换成 LF）。
+async fn git_exact(dir: &Path, args: &[&str]) -> Result<String, String> {
+    run_git(dir, true, args).await
+}
+
+async fn run_git(dir: &Path, exact: bool, args: &[&str]) -> Result<String, String> {
+    let mut command = Command::new("git");
+    command.arg("-C").arg(plain(dir));
+    if exact {
+        command.args(EXACT);
+    }
+    let output = command
         .args([
             "-c",
             "user.name=SuperAgent",
@@ -50,6 +63,9 @@ pub async fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
         })
     }
 }
+
+/// 不做换行符转换，也不因为换行符报警。
+const EXACT: [&str; 4] = ["-c", "core.autocrlf=false", "-c", "core.safecrlf=false"];
 
 /// Windows 上规范化的路径带 `\\?\` 前缀，git 不认，去掉它。
 fn plain(path: &Path) -> PathBuf {
@@ -98,9 +114,9 @@ pub async fn provision(
     tokio::task::spawn_blocking(move || copy_tree(&from, &to))
         .await
         .map_err(|e| format!("复制工作目录时出错：{e}"))??;
-    git(&target, &["init", "-q"]).await?;
-    git(&target, &["add", "-A"]).await?;
-    git(
+    git_exact(&target, &["init", "-q"]).await?;
+    git_exact(&target, &["add", "-A"]).await?;
+    git_exact(
         &target,
         &[
             "commit",
@@ -112,7 +128,7 @@ pub async fn provision(
         ],
     )
     .await?;
-    let head = git(&target, &["rev-parse", "HEAD"]).await?;
+    let head = git_exact(&target, &["rev-parse", "HEAD"]).await?;
     Ok(Workdir {
         path: target.display().to_string(),
         kind: KIND_COPY.into(),
@@ -170,13 +186,15 @@ pub async fn commit_and_diff(
     message: &str,
 ) -> Result<Vec<(String, String)>, String> {
     let dir = Path::new(&workdir.path);
-    git(dir, &["add", "-A", "."]).await?;
-    let staged = git(dir, &["status", "--porcelain"]).await?;
+    let exact = workdir.kind == KIND_COPY;
+    run_git(dir, exact, &["add", "-A", "."]).await?;
+    let staged = run_git(dir, exact, &["status", "--porcelain"]).await?;
     if !staged.trim().is_empty() {
-        git(dir, &["commit", "-q", "--no-verify", "-m", message]).await?;
+        run_git(dir, exact, &["commit", "-q", "--no-verify", "-m", message]).await?;
     }
-    let listed = git(
+    let listed = run_git(
         dir,
+        exact,
         &[
             "diff",
             "--name-status",
@@ -220,7 +238,7 @@ pub async fn apply_to_workspace(workspace: &Path, workdir: &Workdir) -> Result<(
         };
     }
     let dir = Path::new(&workdir.path);
-    let patch = git(dir, &["diff", "--binary", &workdir.base_ref, "HEAD"]).await?;
+    let patch = git_exact(dir, &["diff", "--binary", &workdir.base_ref, "HEAD"]).await?;
     if patch.trim().is_empty() {
         return Ok(());
     }
@@ -230,6 +248,7 @@ pub async fn apply_to_workspace(workspace: &Path, workdir: &Workdir) -> Result<(
     // 工作目录可能在别人的 git 仓库里的某一层：补丁里的路径从工作目录算起。
     let applied = Command::new("git")
         .current_dir(plain(workspace))
+        .args(EXACT)
         .args(["apply", "--whitespace=nowarn", &file_text])
         .stdin(std::process::Stdio::null())
         .output()
@@ -255,11 +274,33 @@ pub async fn remove(workspace: &Path, work_root: &Path, task_id: &TaskId, workdi
         }
     }
     if root.exists() {
-        let gone = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(root)).await;
+        let gone = tokio::task::spawn_blocking(move || force_remove(&root)).await;
         if let Ok(Err(error)) = gone {
             tracing::warn!(task = %task_id, "任务目录没删掉：{error}");
         }
     }
+}
+
+/// 删掉整个目录。git 的对象文件是只读的，Windows 上只读文件删不掉，所以删不动时先去掉只读再试一次。
+fn force_remove(root: &Path) -> std::io::Result<()> {
+    if std::fs::remove_dir_all(root).is_ok() {
+        return Ok(());
+    }
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir)?.flatten() {
+            let Ok(meta) = entry.metadata() else { continue };
+            if meta.is_dir() {
+                pending.push(entry.path());
+            } else if meta.permissions().readonly() {
+                let mut permissions = meta.permissions();
+                #[allow(clippy::permissions_set_readonly_false)]
+                permissions.set_readonly(false);
+                let _ = std::fs::set_permissions(entry.path(), permissions);
+            }
+        }
+    }
+    std::fs::remove_dir_all(root)
 }
 
 #[cfg(test)]
@@ -350,6 +391,7 @@ mod tests {
         std::fs::create_dir_all(workspace.join("sub")).unwrap();
         std::fs::write(workspace.join("a.txt"), "一\n").unwrap();
         std::fs::write(workspace.join("sub/old.txt"), "旧的\n").unwrap();
+        std::fs::write(workspace.join("crlf.txt"), "one\r\ntwo\r\n").unwrap();
         let task_id = TaskId::new();
 
         let workdir = provision(&workspace, &work_root, &task_id).await.unwrap();
@@ -359,8 +401,9 @@ mod tests {
         std::fs::write(dir.join("a.txt"), "二\n").unwrap();
         std::fs::remove_file(dir.join("sub/old.txt")).unwrap();
         std::fs::write(dir.join("sub/new.txt"), "新的\n").unwrap();
+        std::fs::write(dir.join("crlf.txt"), "one\r\nTWO\r\n").unwrap();
         let changed = commit_and_diff(&workdir, "整理").await.unwrap();
-        assert_eq!(changed.len(), 3, "{changed:?}");
+        assert_eq!(changed.len(), 4, "{changed:?}");
         assert!(changed.contains(&("sub/old.txt".to_string(), "删除".to_string())));
 
         apply_to_workspace(&workspace, &workdir).await.unwrap();
@@ -372,6 +415,12 @@ mod tests {
         assert!(workspace.join("sub/new.txt").exists());
         // 人的工作目录不会因此变成 git 仓库。
         assert!(!workspace.join(".git").exists());
+
+        // 换行符原样带回来（Windows 上的文件多半是 CRLF）。
+        assert_eq!(
+            std::fs::read(workspace.join("crlf.txt")).unwrap(),
+            b"one\r\nTWO\r\n"
+        );
 
         // 同一份改动再打一次打不上：不会悄悄改坏文件。
         assert!(apply_to_workspace(&workspace, &workdir).await.is_err());
