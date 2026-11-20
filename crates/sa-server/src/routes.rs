@@ -1,15 +1,16 @@
 use crate::error::AppError;
 use crate::AppState;
+use axum::body::Bytes;
 use axum::extract::rejection::{JsonRejection, QueryRejection};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
 use sa_engine::{BotPatch, Engine, EngineError};
-use sa_orchestrator::OrchestratorError;
 use sa_protocol::{
-    ApprovalId, Bot, BotId, CreateBotRequest, CreateRoomRequest, DecideApprovalRequest, Health,
-    Message, MessagePage, ModelTier, PermissionRule, PostMessageRequest, Room, RoomId, RuleId,
-    StopResponse, UpdateBotRequest, UpdateRoomRequest,
+    ApprovalId, Bot, BotId, CreateBotRequest, CreateRoomRequest, CreateTaskRequest,
+    DecideApprovalRequest, Health, Message, MessagePage, ModelTier, PermissionRule,
+    PostMessageRequest, Room, RoomId, RuleId, StopResponse, Task, TaskActionRequest, TaskDetail,
+    TaskId, UpdateBotRequest, UpdateRoomRequest,
 };
 use serde::Deserialize;
 
@@ -82,15 +83,7 @@ pub async fn post_message(
     let message = state
         .orchestrator
         .post_message(&room_id, body.content)
-        .await
-        .map_err(|error| match error {
-            OrchestratorError::Engine(e) => AppError::from(e),
-            OrchestratorError::ShuttingDown => AppError::new(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "shutting_down",
-                "服务正在关闭，消息没有发出去",
-            ),
-        })?;
+        .await?;
     Ok((StatusCode::CREATED, Json(message)))
 }
 
@@ -232,6 +225,106 @@ pub async fn remove_member(
         })
         .await?,
     ))
+}
+
+/// 房间里的全部任务，按创建时间升序。
+pub async fn list_tasks(
+    State(state): State<AppState>,
+    Path(room_id): Path<RoomId>,
+) -> Result<Json<Vec<Task>>, AppError> {
+    Ok(Json(
+        blocking(&state, move |engine| engine.list_tasks(&room_id)).await?,
+    ))
+}
+
+/// 人开一个任务。指定了负责人就排队开工，没指定就是草稿。
+pub async fn create_task(
+    State(state): State<AppState>,
+    Path(room_id): Path<RoomId>,
+    body: Result<Json<CreateTaskRequest>, JsonRejection>,
+) -> Result<(StatusCode, Json<Task>), AppError> {
+    let Json(body) = body.map_err(|e| AppError::bad_request(e.body_text()))?;
+    let task = state.orchestrator.create_task(&room_id, body).await?;
+    Ok((StatusCode::CREATED, Json(task)))
+}
+
+/// 一个任务和它的执行历史。
+pub async fn get_task(
+    State(state): State<AppState>,
+    Path(task_id): Path<TaskId>,
+) -> Result<Json<TaskDetail>, AppError> {
+    let detail = blocking(&state, move |engine| {
+        Ok(TaskDetail {
+            task: engine.get_task(&task_id)?,
+            runs: engine.task_runs(&task_id)?,
+        })
+    })
+    .await?;
+    Ok(Json(detail))
+}
+
+/// 任务操作的请求体可以不带；带了就必须是合法的 JSON。
+fn action_body(body: &Bytes) -> Result<TaskActionRequest, AppError> {
+    if body.iter().all(u8::is_ascii_whitespace) {
+        return Ok(TaskActionRequest::default());
+    }
+    serde_json::from_slice(body).map_err(|e| AppError::bad_request(format!("请求体不对：{e}")))
+}
+
+/// 让任务继续：草稿、等回答、卡住的任务重新排队。`note` 是给负责的 Bot 的话，任务正在做时只把话带到。
+pub async fn resume_task(
+    State(state): State<AppState>,
+    Path(task_id): Path<TaskId>,
+    body: Bytes,
+) -> Result<Json<Task>, AppError> {
+    let body = action_body(&body)?;
+    let note = body.note.unwrap_or_default();
+    Ok(Json(
+        state
+            .orchestrator
+            .resume_task(&task_id, note, body.owner_bot_id)
+            .await?,
+    ))
+}
+
+/// 验收通过：任务的改动带回工作目录。带不回去时返回 409，任务留在「等验收」。
+pub async fn accept_task(
+    State(state): State<AppState>,
+    Path(task_id): Path<TaskId>,
+) -> Result<Json<Task>, AppError> {
+    Ok(Json(state.orchestrator.accept_task(&task_id).await?))
+}
+
+/// 验收不通过：带着 `note` 里的意见打回重做。
+pub async fn reject_task(
+    State(state): State<AppState>,
+    Path(task_id): Path<TaskId>,
+    body: Bytes,
+) -> Result<Json<Task>, AppError> {
+    let note = action_body(&body)?.note.unwrap_or_default();
+    Ok(Json(state.orchestrator.reject_task(&task_id, note).await?))
+}
+
+/// 停下任务正在进行的运行。没有运行在进行时也算成功，`stopped` 为 `false`。
+pub async fn stop_task(
+    State(state): State<AppState>,
+    Path(task_id): Path<TaskId>,
+) -> Result<Json<StopResponse>, AppError> {
+    let id = task_id.clone();
+    blocking(&state, move |engine| engine.get_task(&id)).await?;
+    Ok(Json(StopResponse {
+        stopped: state.orchestrator.stop_task(&task_id),
+    }))
+}
+
+/// 取消任务。
+pub async fn cancel_task(
+    State(state): State<AppState>,
+    Path(task_id): Path<TaskId>,
+    body: Bytes,
+) -> Result<Json<Task>, AppError> {
+    let note = action_body(&body)?.note.unwrap_or_default();
+    Ok(Json(state.orchestrator.cancel_task(&task_id, note).await?))
 }
 
 pub async fn api_not_found() -> AppError {

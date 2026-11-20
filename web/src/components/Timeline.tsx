@@ -1,6 +1,9 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { RoomChat } from "../api/chat";
-import type { ApprovalDecision, ApprovalId, Bot, Message, ToolStep } from "../api/types";
+import { isLatestDelivery, type TaskBoard } from "../api/tasks";
+import type { TaskActions } from "../api/useWorkspace";
+import type { ApprovalDecision, ApprovalId, Bot, Message, Task, TaskId, ToolStep } from "../api/types";
+import { Artifacts, StateBadge, TaskActionBar, deliveryHeading } from "./TaskCards";
 import { splitMentions } from "./mentions";
 
 type Decide = (id: ApprovalId, decision: ApprovalDecision) => Promise<void>;
@@ -8,6 +11,14 @@ type Decide = (id: ApprovalId, decision: ApprovalDecision) => Promise<void>;
 interface Props {
   chat: RoomChat | undefined;
   bots: readonly Bot[];
+  /** 这个房间的任务。任务卡、交付卡上的状态和操作跟着它变。 */
+  tasks: readonly Task[];
+  runs: TaskBoard["runs"];
+  taskActions: TaskActions;
+  /** 房间里启用着的 Bot。 */
+  members: readonly Bot[];
+  /** 在右栏的任务页里打开一个任务。 */
+  onShowTask(taskId: TaskId): void;
   /** 最新一页没拉到时的原因。 */
   loadError: string | null;
   onRetry(): void;
@@ -20,7 +31,20 @@ interface Props {
 /** 离底部这么近就算「在看最新的」，新内容来了自动跟着滚。 */
 const STICK_PX = 80;
 
-export function Timeline({ chat, bots, loadError, onRetry, onLoadOlder, onDecide, onLightDemo }: Props) {
+export function Timeline({
+  chat,
+  bots,
+  tasks,
+  runs,
+  taskActions,
+  members,
+  onShowTask,
+  loadError,
+  onRetry,
+  onLoadOlder,
+  onDecide,
+  onLightDemo,
+}: Props) {
   const scroller = useRef<HTMLElement>(null);
   const stick = useRef(true);
   /** 往前翻页之前的内容高度，用来在新内容插到上面之后保持视线位置。 */
@@ -109,9 +133,42 @@ export function Timeline({ chat, bots, loadError, onRetry, onLoadOlder, onDecide
             {olderError && <span className="sa-msg-error">{olderError}</span>}
           </li>
         )}
-        {messages.map((message) => (
-          <MessageItem key={message.id} message={message} bots={bots} onDecide={onDecide} />
-        ))}
+        {messages.map((message) => {
+          const task = tasks.find((t) => t.id === message.task_id);
+          if (message.kind === "task" || message.kind === "delivery") {
+            return (
+              <TaskMessage
+                key={message.id}
+                message={message}
+                task={task}
+                latest={message.kind === "delivery" && isLatestDelivery(messages, message)}
+                bots={bots}
+                members={members}
+                actions={taskActions}
+                onShowTask={onShowTask}
+              />
+            );
+          }
+          const run = message.run_id ? runs[message.run_id] : undefined;
+          return (
+            <MessageItem
+              key={message.id}
+              message={message}
+              bots={bots}
+              onDecide={onDecide}
+              work={
+                message.kind === "run"
+                  ? {
+                      title: task?.title,
+                      attempt: run?.attempt,
+                      onShow: () => message.task_id && onShowTask(message.task_id),
+                      onStop: () => (message.task_id ? taskActions.stop(message.task_id) : Promise.resolve()),
+                    }
+                  : undefined
+              }
+            />
+          );
+        })}
       </ol>
     );
   }
@@ -131,28 +188,121 @@ export function Timeline({ chat, bots, loadError, onRetry, onLoadOlder, onDecide
   );
 }
 
-function MessageItem({
+/** 任务的运行过程那条消息多出来的东西：是哪个任务的、能停。 */
+interface Work {
+  title: string | undefined;
+  attempt: number | undefined;
+  onShow(): void;
+  onStop(): Promise<void>;
+}
+
+/** 时间线上的任务卡（开了一个任务）和交付卡（任务交了结果）。 */
+function TaskMessage({
   message,
+  task,
+  latest,
   bots,
-  onDecide,
+  members,
+  actions,
+  onShowTask,
 }: {
   message: Message;
+  task: Task | undefined;
+  latest: boolean;
   bots: readonly Bot[];
-  onDecide: Decide;
+  members: readonly Bot[];
+  actions: TaskActions;
+  onShowTask(taskId: TaskId): void;
 }) {
-  const { sender, state } = message;
+  const { sender } = message;
   const name =
     sender.kind === "user" ? "你" : (bots.find((bot) => bot.id === sender.bot_id)?.name ?? "Bot");
-  const waiting = state === "streaming" && message.content === "" && message.steps.length === 0;
-  const mentioned = message.mentions.flatMap((id) => bots.find((bot) => bot.id === id)?.name ?? []);
+  const owner = bots.find((bot) => bot.id === task?.owner_bot_id)?.name;
+  const delivery = message.kind === "delivery";
+  // 这张卡上要不要放操作：最新的交付卡，而且任务正等着人（验收、回答、卡住）。
+  const actionable = delivery && latest && task && ["review", "waiting", "blocked"].includes(task.state);
   return (
-    <li className="sa-msg" data-sender={sender.kind} data-state={state}>
+    <li className="sa-msg" data-sender={sender.kind} data-kind={message.kind}>
       <div className="sa-msg-head">
         <span className="sa-msg-name">{name}</span>
         <time className="sa-msg-time" dateTime={new Date(message.created_at).toISOString()}>
           {formatTime(message.created_at)}
         </time>
       </div>
+      <div className="sa-card" data-kind={message.kind} data-latest={latest}>
+        <div className="sa-card-head">
+          <span className="sa-card-kicker">{delivery ? deliveryHeading(task, latest) : "开了一个任务"}</span>
+          {task && (!delivery || latest) && <StateBadge state={task.state} />}
+        </div>
+        <p className="sa-card-title">{task?.title ?? "任务"}</p>
+        {delivery ? (
+          <div className="sa-msg-body">{message.content}</div>
+        ) : (
+          <p className="sa-card-scope">{task?.scope ?? message.content}</p>
+        )}
+        {delivery && latest && task && <Artifacts artifacts={task.artifacts} />}
+        {actionable && <TaskActionBar key={task.state} task={task} actions={actions} members={members} />}
+        <div className="sa-card-foot">
+          {!delivery && <span className="sa-row-meta">负责：{owner ?? "还没有负责人"}</span>}
+          {message.task_id && (
+            <button type="button" className="sa-link" onClick={() => message.task_id && onShowTask(message.task_id)}>
+              查看任务
+            </button>
+          )}
+        </div>
+      </div>
+    </li>
+  );
+}
+
+function MessageItem({
+  message,
+  bots,
+  onDecide,
+  work,
+}: {
+  message: Message;
+  bots: readonly Bot[];
+  onDecide: Decide;
+  work?: Work;
+}) {
+  const [stopping, setStopping] = useState(false);
+  const { sender, state } = message;
+  const name =
+    sender.kind === "user" ? "你" : (bots.find((bot) => bot.id === sender.bot_id)?.name ?? "Bot");
+  const waiting = state === "streaming" && message.content === "" && message.steps.length === 0;
+  const mentioned = message.mentions.flatMap((id) => bots.find((bot) => bot.id === id)?.name ?? []);
+  return (
+    <li className="sa-msg" data-sender={sender.kind} data-state={state} data-kind={message.kind}>
+      <div className="sa-msg-head">
+        <span className="sa-msg-name">{name}</span>
+        <time className="sa-msg-time" dateTime={new Date(message.created_at).toISOString()}>
+          {formatTime(message.created_at)}
+        </time>
+      </div>
+      {work && (
+        <div className="sa-work-head">
+          <button type="button" className="sa-link" onClick={work.onShow}>
+            {work.title ? `任务「${work.title}」` : "任务"}
+          </button>
+          <span className="sa-row-meta">
+            {work.attempt ? `第 ${work.attempt} 次运行` : "运行过程"}
+          </span>
+          {state === "streaming" && (
+            <button
+              type="button"
+              className="sa-chip"
+              disabled={stopping}
+              onClick={() => {
+                setStopping(true);
+                void work.onStop().finally(() => setStopping(false));
+              }}
+            >
+              {stopping ? "正在停…" : "停止"}
+            </button>
+          )}
+        </div>
+      )}
       {message.steps.length > 0 && <Steps steps={message.steps} onDecide={onDecide} />}
       {message.content !== "" && (
         <div className="sa-msg-body">
@@ -168,9 +318,15 @@ function MessageItem({
           {state === "streaming" && <span className="sa-caret" aria-hidden="true" />}
         </div>
       )}
-      {waiting && <p className="sa-msg-note">正在回复…</p>}
+      {waiting && <p className="sa-msg-note">{work ? "正在开工…" : "正在回复…"}</p>}
       {state === "cancelled" && <p className="sa-msg-note">已停止</p>}
-      {state === "interrupted" && <p className="sa-msg-note">回复被中断（服务重启或关闭），可以再发一条让它继续。</p>}
+      {state === "interrupted" && (
+        <p className="sa-msg-note">
+          {work
+            ? "这次运行被中断（服务重启或关闭），服务再启动时会接着做。"
+            : "回复被中断（服务重启或关闭），可以再发一条让它继续。"}
+        </p>
+      )}
       {state === "failed" && (
         <p className="sa-msg-error" role="alert">
           出错了：{message.error ?? "原因不明"}

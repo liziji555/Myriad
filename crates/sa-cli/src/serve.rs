@@ -51,6 +51,8 @@ pub fn run(data_dir: &DataDir, args: ServeArgs) -> Result<()> {
                     tracing::warn!("无法自动打开浏览器：{e}");
                 }
             }
+            // 上次退出时没做完的任务接着排队。
+            app.orchestrator.resume_tasks();
             let state = AppState::new(app.engine.clone(), app.orchestrator.clone(), token);
             let orchestrator = app.orchestrator.clone();
             sa_server::serve(listener, state, async move {

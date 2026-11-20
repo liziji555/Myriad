@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "./api/client";
-import type { RoomId } from "./api/types";
+import type { RoomId, TaskId } from "./api/types";
 import { useWorkspace } from "./api/useWorkspace";
 import { Composer } from "./components/Composer";
 import { ContextPanel, type ActivityNode, type PanelTab } from "./components/ContextPanel";
@@ -23,6 +23,7 @@ function Shell() {
   const [selected, setSelected] = useState<RoomId | null>(null);
   const [tab, setTab] = useState<PanelTab>("tasks");
   const [panelOpen, setPanelOpen] = useState(true);
+  const [focusTask, setFocusTask] = useState<TaskId | null>(null);
   const [demoNodes, setDemoNodes] = useState<ActivityNode[]>([]);
   const [version, setVersion] = useState("");
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -68,8 +69,10 @@ function Shell() {
   const room = workspace.rooms.find((r) => r.id === selected) ?? workspace.rooms[0];
   const roomChat = room ? workspace.chat.rooms[room.id] : undefined;
   // 有 Bot 在写、在挑人接话之前的空档里有人排着队，都算「正在回复」，可以点停止。
+  // 任务的运行过程不算：它有自己的停止按钮，不占着输入框。
   const replying =
-    (roomChat?.messages.some((message) => message.state === "streaming") ?? false) ||
+    (roomChat?.messages.some((message) => message.state === "streaming" && message.kind === "chat") ??
+      false) ||
     Boolean(roomChat?.activity?.speaking) ||
     Boolean(roomChat?.activity?.routing) ||
     (roomChat?.activity?.queued.length ?? 0) > 0;
@@ -130,6 +133,14 @@ function Shell() {
               key={room.id}
               chat={roomChat}
               bots={workspace.bots}
+              tasks={workspace.board.rooms[room.id] ?? []}
+              runs={workspace.board.runs}
+              taskActions={workspace.tasks}
+              members={members.filter((bot) => bot.enabled)}
+              onShowTask={(taskId) => {
+                setFocusTask(taskId);
+                showPanel("tasks");
+              }}
               loadError={loadError}
               onRetry={() => setRetry((n) => n + 1)}
               onLoadOlder={() => workspace.loadOlder(room.id)}
@@ -172,6 +183,10 @@ function Shell() {
           members={members}
           bots={workspace.bots}
           team={workspace.team}
+          board={workspace.board}
+          taskActions={workspace.tasks}
+          focusTask={focusTask}
+          onFocusTask={setFocusTask}
           activity={demoNodes}
         />
       )}

@@ -2,6 +2,7 @@
 
 use crate::ask::AskBotTool;
 use crate::episode::Job;
+use crate::work::CreateTaskTool;
 use crate::{render_prompt, router, RoomLink, Shared};
 use async_trait::async_trait;
 use sa_engine::{EngineError, UsageRecord};
@@ -10,8 +11,8 @@ use sa_kernel::{
 };
 use sa_llm::{RetryPolicy, Usage};
 use sa_protocol::{
-    ApprovalDecision, ApprovalId, Bot, BotId, Message, MessageId, MessageState, Room, RoomActivity,
-    RoomId, Sender, SessionId, StepApproval, StepState, ToolStep,
+    ApprovalDecision, ApprovalId, Bot, BotId, Message, MessageId, MessageKind, MessageState, Room,
+    RoomActivity, RoomId, Sender, SessionId, StepApproval, StepState, ToolStep,
 };
 use sa_tools::{Fence, ToolCtx};
 use serde_json::Value;
@@ -160,6 +161,11 @@ async fn dispatch(
         .await
         .map(|page| page.messages)
         .unwrap_or_default();
+    // 路由只看对话，不看任务的运行过程。
+    let recent: Vec<Message> = recent
+        .into_iter()
+        .filter(|message| message.kind == MessageKind::Chat)
+        .collect();
     let cancel = shared.shutdown.child_token();
     *link.current.lock().unwrap() = Some((None, cancel.clone()));
     if members.len() > 1 {
@@ -287,6 +293,8 @@ async fn turn(
         bot: bot.clone(),
         session_id: session_id.clone(),
         message_id: draft.id.clone(),
+        fence: shared.settings.fence.clone(),
+        rule_scope: None,
         steps: Mutex::new(vec![]),
         held: Mutex::new(Some(String::new())),
     };
@@ -316,8 +324,13 @@ async fn turn(
             };
             let mut ctx = ToolCtx::new(shared.settings.fence.clone());
             ctx.allow_private_network = shared.settings.allow_private_network;
-            // 房间里有别的 Bot 时才给它「找别的 Bot」这个工具。
             let mut tools = shared.tools.clone();
+            tools.register(CreateTaskTool {
+                shared: shared.clone(),
+                room_id: room_id.clone(),
+                from: bot.clone(),
+            });
+            // 房间里有别的 Bot 时才给它「找别的 Bot」这个工具。
             if !others.is_empty() {
                 tools.register(AskBotTool {
                     shared: shared.clone(),
@@ -456,6 +469,39 @@ impl Inbox for RoomInbox {
         };
         let mut inputs = vec![];
         for message in messages {
+            let mine = matches!(&message.sender, Sender::Bot { bot_id } if bot_id == &self.bot_id);
+            match message.kind {
+                MessageKind::Chat => {}
+                // 任务的运行过程不进对话：结果会以交付卡的形式出现。它没写完也不挡着后面的消息。
+                MessageKind::Run => continue,
+                // 自己开的任务自己知道（工具结果里有）。别人开的任务、所有的交付结果都要看到：
+                // 交付是在任务的工作会话里写的，负责人自己的对话里也没有。
+                MessageKind::Task if mine => {
+                    self.last_seq = message.seq;
+                    continue;
+                }
+                MessageKind::Task | MessageKind::Delivery => {
+                    self.last_seq = message.seq;
+                    let who = match &message.sender {
+                        Sender::User => "用户",
+                        Sender::Bot { .. } if mine => "你",
+                        Sender::Bot { bot_id } => {
+                            self.names.get(bot_id).map_or("另一个 Bot", String::as_str)
+                        }
+                    };
+                    let content = if message.kind == MessageKind::Task {
+                        format!("【任务】{who}{}", message.content)
+                    } else {
+                        format!("【任务交付】{who}在任务里报告：{}", message.content)
+                    };
+                    inputs.push(UserInput {
+                        content,
+                        message_id: Some(message.id.to_string()),
+                        message_seq: Some(message.seq),
+                    });
+                    continue;
+                }
+            }
             let speaker = match &message.sender {
                 Sender::User => None,
                 // 自己说过的话已经在自己的会话记录里了。
@@ -526,22 +572,27 @@ impl Inbox for Primed {
 }
 
 /// 把这一轮的过程写回房间里那条正在写的消息。
-struct RoomObserver {
-    shared: Arc<Shared>,
-    room_id: RoomId,
-    bot: Bot,
-    session_id: SessionId,
-    message_id: MessageId,
-    steps: Mutex<Vec<ToolStep>>,
+pub(crate) struct RoomObserver {
+    pub shared: Arc<Shared>,
+    pub room_id: RoomId,
+    pub bot: Bot,
+    pub session_id: SessionId,
+    pub message_id: MessageId,
+    /// 这一轮的文件类工具在哪个目录里干活。「总是允许」记的路径按它来算。
+    pub fence: Fence,
+    /// 「总是允许」的命令记在谁的名下（任务的 id）。任务里批准的命令是在任务目录里跑的，
+    /// 不能让同一条命令在对话里（在人的工作目录里跑）也跟着免问，反过来也一样。
+    pub rule_scope: Option<String>,
+    pub steps: Mutex<Vec<ToolStep>>,
     /// 回复开头还分不清是不是 `(pass)` 的那几个字，先扣着不显示，免得界面上闪一下。
     /// 一旦确定不是，就变成 `None`，之后的字直接显示。
-    held: Mutex<Option<String>>,
+    pub held: Mutex<Option<String>>,
 }
 
 impl RoomObserver {
     /// 一轮结束时处理扣着的字。返回这一轮是不是「不说话」：正常结束，而且说的只有 `(pass)` 或者什么都没说。
     /// 不是的话，把扣着的字补显示出来。
-    fn release_held(&self, completed: bool) -> bool {
+    pub(crate) fn release_held(&self, completed: bool) -> bool {
         let Some(held) = self.held.lock().unwrap().take() else {
             return false;
         };
@@ -571,7 +622,7 @@ impl RoomObserver {
     }
 
     /// 一轮结束时还显示「进行中」或「等批准」的步骤（被取消的）改成「已取消」。
-    async fn settle_steps(&self) {
+    pub(crate) async fn settle_steps(&self) {
         let changed = {
             let mut steps = self.steps.lock().unwrap();
             let mut changed = false;
@@ -638,13 +689,14 @@ impl Observer for RoomObserver {
 
     async fn request_approval(&self, request: ApprovalRequest<'_>) -> bool {
         let engine = &self.shared.engine;
-        let key = rule_key(request.tool, request.input, &self.shared.settings.fence);
+        let key = rule_key(request.tool, request.input, &self.fence);
+        // 任务里的命令记在任务自己的名下，和对话里的命令是两本账，互相碰不到。
+        let rule_tool = match &self.rule_scope {
+            Some(scope) if request.tool == "shell" => format!("shell@{scope}"),
+            _ => request.tool.to_string(),
+        };
         if let Some(key) = key.clone() {
-            let (engine, room, tool) = (
-                engine.clone(),
-                self.room_id.clone(),
-                request.tool.to_string(),
-            );
+            let (engine, room, tool) = (engine.clone(), self.room_id.clone(), rule_tool.clone());
             match db(move || engine.is_always_allowed(&room, &tool, &key)).await {
                 Ok(true) => return true,
                 Ok(false) => {}
@@ -682,11 +734,7 @@ impl Observer for RoomObserver {
         };
         let allowed = decision != ApprovalDecision::Deny;
         if let (ApprovalDecision::Always, Some(key)) = (decision, key) {
-            let (engine, room, tool) = (
-                engine.clone(),
-                self.room_id.clone(),
-                request.tool.to_string(),
-            );
+            let (engine, room, tool) = (engine.clone(), self.room_id.clone(), rule_tool.clone());
             if let Err(error) = db(move || engine.allow_always(&room, &tool, &key).map(drop)).await
             {
                 tracing::error!(room = %self.room_id, "「总是允许」没记上：{error}");

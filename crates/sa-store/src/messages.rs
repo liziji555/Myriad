@@ -1,19 +1,22 @@
 use crate::{Result, StoreError};
 use rusqlite::{params, Connection, OptionalExtension, Row};
-use sa_protocol::{BotId, Message, MessageId, MessageState, RoomId, Sender, ToolStep};
+use sa_protocol::{
+    BotId, Message, MessageId, MessageKind, MessageState, RoomId, RunId, Sender, TaskId, ToolStep,
+};
 
 const COLUMNS: &str =
-    "seq, id, room_id, sender_kind, sender_bot_id, content, steps_json, state, error, rev, created_at, updated_at, mentions_json, hop";
+    "seq, id, room_id, sender_kind, sender_bot_id, content, steps_json, state, error, rev, created_at, updated_at, mentions_json, hop, kind, task_id, run_id";
 
 /// 写入一条新消息，返回数据库分配的 `seq`。传入的 `message.seq` 被忽略。
 pub fn insert(conn: &Connection, message: &Message) -> Result<i64> {
     let (kind, bot_id) = match &message.sender {
         Sender::User => ("user", None),
-        Sender::Bot { bot_id } => ("bot", Some(bot_id.as_str())),
+        // 空 id 表示这个 Bot 已经被删了：和删 Bot 之后留下的消息一样，不指向任何 Bot。
+        Sender::Bot { bot_id } => ("bot", Some(bot_id.as_str()).filter(|id| !id.is_empty())),
     };
     conn.execute(
-        "INSERT INTO messages (id, room_id, sender_kind, sender_bot_id, content, steps_json, state, error, rev, created_at, updated_at, mentions_json, hop)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+        "INSERT INTO messages (id, room_id, sender_kind, sender_bot_id, content, steps_json, state, error, rev, created_at, updated_at, mentions_json, hop, kind, task_id, run_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
         params![
             message.id.as_str(),
             message.room_id.as_str(),
@@ -27,7 +30,10 @@ pub fn insert(conn: &Connection, message: &Message) -> Result<i64> {
             message.created_at,
             message.updated_at,
             serde_json::to_string(&message.mentions).expect("Bot id 列表总能序列化成 JSON"),
-            message.hop
+            message.hop,
+            message.kind.as_str(),
+            message.task_id.as_ref().map(TaskId::as_str),
+            message.run_id.as_ref().map(RunId::as_str)
         ],
     )?;
     Ok(conn.last_insert_rowid())
@@ -83,10 +89,10 @@ pub fn list_before(
     Ok(messages)
 }
 
-/// 房间里 `seq` 大于 `after` 的、人发的消息，按 `seq` 升序。
+/// 房间里 `seq` 大于 `after` 的、人说的话（不算人开的任务卡），按 `seq` 升序。
 pub fn list_user_after(conn: &Connection, room_id: &RoomId, after: i64) -> Result<Vec<Message>> {
     let mut stmt = conn.prepare(&format!(
-        "SELECT {COLUMNS} FROM messages WHERE room_id = ?1 AND seq > ?2 AND sender_kind = 'user' ORDER BY seq"
+        "SELECT {COLUMNS} FROM messages WHERE room_id = ?1 AND seq > ?2 AND sender_kind = 'user' AND kind = 'chat' ORDER BY seq"
     ))?;
     let rows = stmt.query_map(params![room_id.as_str(), after], read_row)?;
     rows.map(|row| row?).collect()
@@ -127,6 +133,7 @@ fn read_row(row: &Row<'_>) -> rusqlite::Result<Result<Message>> {
     let steps_json: String = row.get(6)?;
     let state: String = row.get(7)?;
     let mentions_json: String = row.get(12)?;
+    let kind: String = row.get(14)?;
     let message = (|| {
         let sender = match (sender_kind.as_str(), sender_bot_id) {
             ("user", _) => Sender::User,
@@ -146,9 +153,11 @@ fn read_row(row: &Row<'_>) -> rusqlite::Result<Result<Message>> {
             .ok_or_else(|| StoreError::Corrupt(format!("消息 {id} 的状态未知：{state}")))?;
         let mentions = serde_json::from_str(&mentions_json)
             .map_err(|e| StoreError::Corrupt(format!("消息 {id} 的点名不是合法 JSON：{e}")))?;
-        Ok((sender, steps, state, mentions))
+        let kind = MessageKind::parse(&kind)
+            .ok_or_else(|| StoreError::Corrupt(format!("消息 {id} 的种类未知：{kind}")))?;
+        Ok((sender, steps, state, mentions, kind))
     })();
-    let (sender, steps, state, mentions) = match message {
+    let (sender, steps, state, mentions, kind) = match message {
         Ok(parts) => parts,
         Err(e) => return Ok(Err(e)),
     };
@@ -160,6 +169,9 @@ fn read_row(row: &Row<'_>) -> rusqlite::Result<Result<Message>> {
         content: row.get(5)?,
         mentions,
         hop: row.get(13)?,
+        kind,
+        task_id: row.get::<_, Option<String>>(15)?.map(TaskId::from),
+        run_id: row.get::<_, Option<String>>(16)?.map(RunId::from),
         steps,
         state,
         error: row.get(8)?,
@@ -211,6 +223,9 @@ mod tests {
             content: content.into(),
             mentions: vec![],
             hop: 0,
+            kind: MessageKind::Chat,
+            task_id: None,
+            run_id: None,
             steps: vec![],
             state: MessageState::Complete,
             error: None,

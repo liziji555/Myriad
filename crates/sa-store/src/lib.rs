@@ -12,6 +12,7 @@ pub mod messages;
 pub mod rooms;
 pub mod rules;
 pub mod sessions;
+pub mod tasks;
 pub mod usage;
 
 pub use error::StoreError;

@@ -39,6 +39,7 @@ fn app() -> (Router, Arc<Engine>) {
         max_steps: 6,
         allow_private_network: false,
         approval_timeout: std::time::Duration::from_secs(600),
+        work_dir: dir.join("tasks"),
     };
     let orchestrator = Arc::new(Orchestrator::new(
         engine.clone(),
@@ -752,4 +753,175 @@ async fn bots_and_room_members_are_managed_over_http() {
     );
     let bots: Vec<Bot> = json(call(get("/api/bots")).await).await;
     assert_eq!(bots.len(), 1);
+}
+
+/// 等任务走到某个状态。
+async fn task_in(
+    app: &Router,
+    id: &sa_protocol::TaskId,
+    state: sa_protocol::TaskState,
+) -> sa_protocol::TaskDetail {
+    for _ in 0..1000 {
+        let response = app
+            .clone()
+            .oneshot(get(&format!("/api/tasks/{id}")))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let detail: sa_protocol::TaskDetail = json(response).await;
+        let running = detail
+            .runs
+            .iter()
+            .any(|run| run.state == sa_protocol::RunState::Running);
+        if detail.task.state == state && !running {
+            return detail;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("任务没有变成 {state:?}");
+}
+
+#[tokio::test]
+async fn a_task_runs_is_rejected_then_accepted_over_http() {
+    use sa_protocol::{EventKind, Task, TaskState};
+    let (app, engine) = app();
+    let room = engine.list_rooms().unwrap().remove(0);
+    let bot = room.host_bot_id.clone().unwrap();
+    let tasks_path = format!("/api/rooms/{}/tasks", room.id);
+
+    // 没写做什么：400。没有负责人：草稿，不会开工。
+    let response = app
+        .clone()
+        .oneshot(post(&tasks_path, r#"{"title":"空的","scope":" "}"#))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let response = app
+        .clone()
+        .oneshot(post(
+            &tasks_path,
+            r#"{"title":"先放着","scope":"以后再说"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let draft: Task = json(response).await;
+    assert_eq!(draft.state, TaskState::Draft);
+
+    let body = serde_json::json!({
+        "title": "写笔记",
+        "scope": "写入 `笔记.md`：第一版",
+        "owner_bot_id": bot,
+    });
+    let response = app
+        .clone()
+        .oneshot(post(&tasks_path, &body.to_string()))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let task: Task = json(response).await;
+    assert_eq!(task.state, TaskState::Open);
+
+    let detail = task_in(&app, &task.id, TaskState::Review).await;
+    assert_eq!(detail.runs.len(), 1);
+    assert_eq!(detail.task.artifacts[0].reference, "笔记.md");
+
+    // 等验收的任务：不能「继续」，打回要写意见，可以不带请求体的不带。
+    let action = |name: &str| format!("/api/tasks/{}/{name}", task.id);
+    let response = app
+        .clone()
+        .oneshot(post(&action("resume"), ""))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let response = app
+        .clone()
+        .oneshot(post(&action("reject"), ""))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let response = app
+        .clone()
+        .oneshot(post(&action("reject"), "{oops"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let response = app
+        .clone()
+        .oneshot(post(
+            &action("reject"),
+            r#"{"note":"写入 `笔记.md`：第二版"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let detail = task_in(&app, &task.id, TaskState::Review).await;
+    assert_eq!(detail.runs.len(), 2);
+
+    // 没有运行在进行时点停止：成功，但什么都没停。
+    let response = app
+        .clone()
+        .oneshot(post(&action("stop"), ""))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let stopped: sa_protocol::StopResponse = json(response).await;
+    assert!(!stopped.stopped);
+
+    let response = app
+        .clone()
+        .oneshot(post(&action("accept"), ""))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let done: Task = json(response).await;
+    assert_eq!(done.state, TaskState::Done);
+    // 验收过的不能再验收、也不能取消。
+    let response = app
+        .clone()
+        .oneshot(post(&action("accept"), ""))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let response = app
+        .clone()
+        .oneshot(post(&action("cancel"), ""))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    // 草稿可以取消；列表里两个任务都在。
+    let response = app
+        .clone()
+        .oneshot(post(
+            &format!("/api/tasks/{}/cancel", draft.id),
+            r#"{"note":"不做了"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let listed: Vec<Task> = json(app.clone().oneshot(get(&tasks_path)).await.unwrap()).await;
+    let states: Vec<_> = listed.iter().map(|t| t.state).collect();
+    assert_eq!(states, [TaskState::Cancelled, TaskState::Done]);
+    let response = app
+        .clone()
+        .oneshot(get("/api/tasks/task_nope"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    // 任务和运行的变化都走事件流。
+    let kinds: Vec<_> = engine
+        .events_after(0, 10_000)
+        .unwrap()
+        .into_iter()
+        .map(|e| e.kind)
+        .collect();
+    for kind in [
+        EventKind::TaskCreated,
+        EventKind::TaskUpdated,
+        EventKind::RunUpdated,
+    ] {
+        assert!(kinds.contains(&kind), "{kind:?}");
+    }
 }

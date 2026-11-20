@@ -41,6 +41,11 @@ impl DataDir {
         self.root.join("sessions")
     }
 
+    /// 任务的独立工作目录，一个任务一个子目录。
+    pub fn work(&self) -> PathBuf {
+        self.root.join("work")
+    }
+
     /// 可选的系统提示词。有这个文件就用它，没有就用内置的。
     pub fn chat_prompt(&self) -> PathBuf {
         self.root.join("prompts").join("chat.md")

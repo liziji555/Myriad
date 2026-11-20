@@ -81,12 +81,23 @@ impl Tool for WriteTool {
 /// 写文件类工具共用的判断：工作目录里面直接写，外面先问人，数据目录不让写。
 pub(crate) fn write_permission(path: &str, ctx: &ToolCtx) -> Permission {
     match ctx.fence.resolve_for_write(path) {
+        // git 的配置里可以写要执行的命令，改它等于换一种方式执行命令，所以和执行命令一样先问人。
+        Ok((real, true)) if in_git_dir(&real) => Permission::Ask(format!(
+            "要写的是 git 的内部文件（里面的配置能让 git 执行命令）：{}",
+            ctx.fence.display(&real)
+        )),
         Ok((_, true)) => Permission::Allow,
         Ok((real, false)) => {
             Permission::Ask(format!("要写的文件在工作目录之外：{}", real.display()))
         }
         Err(error) => Permission::Deny(error.0),
     }
+}
+
+/// 路径里有没有一段是 `.git`。
+fn in_git_dir(real: &std::path::Path) -> bool {
+    real.components()
+        .any(|part| part.as_os_str().eq_ignore_ascii_case(".git"))
 }
 
 pub(crate) const STOPPED: &str = "已停止，文件没有改动。";
@@ -288,6 +299,25 @@ mod tests {
             fs::read_to_string(dir.path().join("note.md")).unwrap(),
             "new"
         );
+    }
+
+    /// git 的内部文件即使在工作目录里也要先问：改它的配置等于换一种方式执行命令。
+    #[test]
+    fn writing_git_internals_asks_first() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join(".git")).unwrap();
+        fs::create_dir_all(dir.path().join("sub")).unwrap();
+        let ctx = ToolCtx::new(Fence::new(dir.path(), &[]).unwrap());
+        for path in [".git/config", "sub/.git", "sub/.GIT/hooks/pre-commit"] {
+            let permission = write_permission(path, &ctx);
+            assert!(
+                matches!(permission, Permission::Ask(_)),
+                "{path}: {permission:?}"
+            );
+        }
+        for path in ["a.txt", ".gitignore", "sub/.github/x.yml"] {
+            assert_eq!(write_permission(path, &ctx), Permission::Allow, "{path}");
+        }
     }
 
     /// 文件名已经到了常见文件系统的上限（255 字节）也能写。

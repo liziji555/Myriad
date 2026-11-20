@@ -4,8 +4,8 @@ use crate::app::{init_logging, App, RunArgs, BUDGET_NOTICE};
 use crate::paths::DataDir;
 use anyhow::{bail, Context, Result};
 use sa_protocol::{
-    ApprovalDecision, Event, EventKind, Message, MessageId, MessageRef, MessageState, Room,
-    RoomActivity, Sender, StepState, ToolStep,
+    ApprovalDecision, Event, EventKind, Message, MessageId, MessageKind, MessageRef, MessageState,
+    Room, RoomActivity, Sender, StepState, TaskState, ToolStep,
 };
 use std::collections::HashMap;
 use std::future::Future;
@@ -34,6 +34,8 @@ pub fn run(data_dir: &DataDir, args: ChatArgs) -> Result<ExitCode> {
         .enable_all()
         .build()?
         .block_on(async move {
+            // 上次退出时没做完的任务接着排队。
+            app.orchestrator.resume_tasks();
             let mut out = std::io::stdout();
             let result = match args.message {
                 Some(text) => {
@@ -55,11 +57,11 @@ pub fn run(data_dir: &DataDir, args: ChatArgs) -> Result<ExitCode> {
         })
 }
 
-async fn ctrl_c() {
+pub(crate) async fn ctrl_c() {
     let _ = tokio::signal::ctrl_c().await;
 }
 
-fn pick_room(app: &App, wanted: Option<&str>) -> Result<Room> {
+pub(crate) fn pick_room(app: &App, wanted: Option<&str>) -> Result<Room> {
     let mut rooms = app.engine.list_rooms()?;
     // 按创建时间排，第一个是默认房间。
     rooms.sort_by_key(|room| (room.created_at, room.id.to_string()));
@@ -137,7 +139,7 @@ async fn interactive(app: &App, room: &Room, out: &mut impl Write) -> Result<()>
 }
 
 /// 一行一行读终端输入。读终端会阻塞，所以放在单独的线程里。
-fn stdin_lines() -> Lines {
+pub(crate) fn stdin_lines() -> Lines {
     let (lines, next_line) = tokio::sync::mpsc::channel::<String>(1);
     std::thread::spawn(move || {
         for line in std::io::stdin().lines() {
@@ -150,10 +152,10 @@ fn stdin_lines() -> Lines {
     next_line
 }
 
-type Lines = tokio::sync::mpsc::Receiver<String>;
+pub(crate) type Lines = tokio::sync::mpsc::Receiver<String>;
 
 /// 人对审批卡的回答：y 允许一次，a 总是允许，其他（包括没有输入）都算拒绝。
-fn parse_decision(answer: Option<&str>) -> ApprovalDecision {
+pub(crate) fn parse_decision(answer: Option<&str>) -> ApprovalDecision {
     match answer.map(|a| a.trim().to_lowercase()).as_deref() {
         Some("y" | "yes") => ApprovalDecision::Once,
         Some("a" | "always") => ApprovalDecision::Always,
@@ -165,6 +167,8 @@ fn parse_decision(answer: Option<&str>) -> ApprovalDecision {
 /// Bot 要做需要批准的事时，从 `answers` 读一行作为答复。
 /// 一条消息可能引出好几个 Bot 接连说话；等房间里没有人在说、也没有人排队了才返回。
 /// 返回回复最后的状态：有哪条没正常结束就是它的状态，否则是「完成」。
+///
+/// 对话里开了任务的话，接着等任务做到需要人处理的地方（等验收、等回答、卡住），把结果打印出来。
 pub async fn converse(
     app: &App,
     room: &Room,
@@ -173,6 +177,50 @@ pub async fn converse(
     answers: &mut Lines,
     interrupt: impl Future<Output = ()>,
 ) -> Result<MessageState> {
+    tokio::pin!(interrupt);
+    let known: std::collections::HashSet<_> = app
+        .engine
+        .list_tasks(&room.id)?
+        .into_iter()
+        .map(|task| task.id)
+        .collect();
+    let (mut outcome, interrupted) =
+        exchange(app, room, text, out, answers, interrupt.as_mut()).await?;
+    if interrupted {
+        return Ok(outcome);
+    }
+    for task in app.engine.list_tasks(&room.id)? {
+        // 这次对话里新开的任务，和还在做的任务，都跟到有结果为止。
+        let active = matches!(task.state, TaskState::Open | TaskState::Working);
+        if known.contains(&task.id) && !active {
+            continue;
+        }
+        writeln!(
+            out,
+            "\n任务「{}」（按 Ctrl+C 停下它）：",
+            printable(&task.title)
+        )?;
+        let task = crate::task::wait(app, task, out, answers, interrupt.as_mut()).await?;
+        crate::task::show(app, &task, out)?;
+        match task.state {
+            TaskState::Blocked => outcome = MessageState::Failed,
+            // 被 Ctrl+C 停下之后任务还没开工：后面的也不等了。
+            TaskState::Open | TaskState::Working => break,
+            _ => {}
+        }
+    }
+    Ok(outcome)
+}
+
+/// 发一条消息并打印回复，直到房间闲下来。返回回复最后的状态，以及中途是不是被 `interrupt` 停下了。
+async fn exchange<F: Future<Output = ()>>(
+    app: &App,
+    room: &Room,
+    text: &str,
+    out: &mut impl Write,
+    answers: &mut Lines,
+    mut interrupt: std::pin::Pin<&mut F>,
+) -> Result<(MessageState, bool)> {
     // 先订阅再发：不会漏掉回复的开头。
     let mut live = app.engine.subscribe_live();
     let mut wake = app.engine.subscribe();
@@ -193,7 +241,6 @@ pub async fn converse(
     let mut printer = Printer::default();
     let mut outcome = MessageState::Complete;
     let mut replies = 0;
-    tokio::pin!(interrupt);
     let mut interrupted = false;
     let mut asked = std::collections::HashSet::new();
     loop {
@@ -223,7 +270,7 @@ pub async fn converse(
                             if replies == 0 {
                                 writeln!(out, "\n（没有 Bot 回应）")?;
                             }
-                            return Ok(outcome);
+                            return Ok((outcome, interrupted));
                         }
                         if withdrawn(&event, reply.as_ref()) {
                             // 它决定不说话，这条回复撤掉了。扣着没显示的字本来就没打印出来。
@@ -314,8 +361,9 @@ fn bot_message(event: &Event, room: &Room, after_seq: i64) -> Option<Message> {
         return None;
     }
     let message: Message = serde_json::from_value(event.payload.clone()).ok()?;
-    let from_bot = matches!(message.sender, Sender::Bot { .. });
-    (message.room_id == room.id && from_bot && message.seq > after_seq).then_some(message)
+    // 任务卡、任务的运行过程、交付卡不是对话里的回复，另外打印。
+    let reply = matches!(message.sender, Sender::Bot { .. }) && message.kind == MessageKind::Chat;
+    (message.room_id == room.id && reply && message.seq > after_seq).then_some(message)
 }
 
 /// 事件是不是「这个房间闲下来了，而且 `sent_seq` 这条人类消息已经处理过」。
@@ -454,7 +502,7 @@ impl Printer {
 
 /// 去掉会被终端当成指令的字符。回复和工具标题里可能带着模型或文件里来的转义序列，
 /// 原样输出能改屏幕内容、窗口标题，有的终端还能写剪贴板。换行和制表符保留。
-fn printable(text: &str) -> std::borrow::Cow<'_, str> {
+pub(crate) fn printable(text: &str) -> std::borrow::Cow<'_, str> {
     let unsafe_char = |c: char| c.is_control() && c != '\n' && c != '\t';
     if !text.contains(unsafe_char) {
         return text.into();
@@ -560,6 +608,37 @@ mod tests {
         .await
         .unwrap();
         (state, screen.text())
+    }
+
+    /// 对话里开了任务：接着等它交结果，任务里要执行命令时也在终端里问；验收之后改动才回到工作目录。
+    #[tokio::test]
+    async fn a_task_opened_in_chat_is_followed_to_review_and_can_be_accepted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = open(tmp.path());
+        let (state, screen) = say(&app, "任务：写入 `笔记.md`：第一版").await;
+        assert_eq!(state, MessageState::Complete);
+        assert!(screen.contains("开任务：写入 笔记.md：第一版"), "{screen}");
+        assert!(screen.contains("任务「写入 笔记.md：第一版」"), "{screen}");
+        assert!(screen.contains("· 写入 笔记.md"), "{screen}");
+        assert!(screen.contains("[等验收]"), "{screen}");
+        assert!(screen.contains("文件：笔记.md（新增）"), "{screen}");
+        assert!(screen.contains("sa task accept"), "{screen}");
+        let work = tmp.path().join("work");
+        assert!(!work.join("笔记.md").exists());
+
+        let room = pick_room(&app, None).unwrap();
+        let task = app.engine.list_tasks(&room.id).unwrap().remove(0);
+        app.orchestrator.accept_task(&task.id).await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(work.join("笔记.md")).unwrap(),
+            "第一版\n"
+        );
+
+        // 任务里执行命令：终端里问一次，拒绝之后任务照样交结果。
+        let (_, screen) = say_and_answer(&app, "任务：运行 `echo hi`", &["n"]).await;
+        assert!(screen.contains("需要你批准"), "{screen}");
+        assert!(screen.contains("[等验收]"), "{screen}");
+        app.orchestrator.shutdown().await;
     }
 
     /// 审批卡过期：不再等人敲回车，回复照常显示完。之前敲的回车不会被当成对后面卡片的回答。

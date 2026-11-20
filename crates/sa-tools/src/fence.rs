@@ -10,6 +10,8 @@ pub struct Fence {
     root: PathBuf,
     /// 工作目录里也不许碰的目录，已解析成真实路径。
     denied: Vec<PathBuf>,
+    /// 根是从禁区里划出来的一块。
+    carved: bool,
 }
 
 impl Fence {
@@ -26,7 +28,29 @@ impl Fence {
             .iter()
             .filter_map(|path| path.canonicalize().ok())
             .collect();
-        Ok(Self { root, denied })
+        Ok(Self {
+            root,
+            denied,
+            carved: false,
+        })
+    }
+
+    /// 同一套禁区、换一个根的围栏。`root` 可以在禁区里面：它自己能进，禁区里别的地方照样进不去。
+    ///
+    /// 任务的独立目录就放在数据目录里：任务能随便写自己的目录，数据目录的其余部分
+    /// （令牌、数据库、别的任务）和原来一样，连问都不问就拒绝。
+    pub fn within(&self, root: &Path) -> std::io::Result<Self> {
+        let mut fence = Self::new(root, &[])?;
+        fence.denied = self.denied.clone();
+        fence.carved = true;
+        Ok(fence)
+    }
+
+    /// `real` 是不是在禁区里。
+    fn denies(&self, real: &Path) -> bool {
+        // 根在禁区里面时（见 [`Fence::within`]），根下面的不算。
+        let exempt = self.carved && real.starts_with(&self.root);
+        !exempt && self.denied.iter().any(|d| real.starts_with(d))
     }
 
     /// 给人看的根目录。Windows 上去掉规范化路径带的 `\\?\` 前缀。
@@ -119,7 +143,7 @@ impl Fence {
         if real.file_name().is_none() {
             return Err(ToolError(format!("路径 {input} 没法解析。")));
         }
-        if self.denied.iter().any(|d| real.starts_with(d)) {
+        if self.denies(&real) {
             return Err(ToolError(format!(
                 "路径 {input} 在 SuperAgent 自己的数据目录里，不能写。"
             )));
@@ -130,7 +154,7 @@ impl Fence {
 
     /// 真实路径 `real` 是否在围栏里。
     pub fn allows(&self, real: &Path) -> bool {
-        real.starts_with(&self.root) && !self.denied.iter().any(|d| real.starts_with(d))
+        real.starts_with(&self.root) && !self.denies(real)
     }
 
     /// 给模型和人看的写法：相对工作目录、用 `/` 分隔；工作目录本身是 `.`。
@@ -168,6 +192,37 @@ fn lexically_normalized(path: &Path) -> PathBuf {
 mod tests {
     use super::*;
     use std::fs;
+
+    /// 从禁区里划出来的一块：自己能读能写，禁区里别的地方照样不让碰。
+    #[test]
+    fn a_fence_carved_out_of_a_denied_directory_keeps_the_rest_off_limits() {
+        let outer = tempfile::tempdir().unwrap();
+        let (work, data) = (outer.path().join("work"), outer.path().join("data"));
+        let task = data.join("tasks/t1");
+        fs::create_dir_all(&work).unwrap();
+        fs::create_dir_all(&task).unwrap();
+        fs::write(task.join("a.txt"), "x").unwrap();
+        fs::write(data.join("token"), "secret").unwrap();
+        let room = Fence::new(&work, std::slice::from_ref(&data)).unwrap();
+        let fence = room.within(&task).unwrap();
+
+        assert!(fence.resolve("a.txt").is_ok());
+        let (_, inside) = fence.resolve_for_write("new/b.txt").unwrap();
+        assert!(inside);
+        // 数据目录里别的东西：读不到，写也不是「问一下」，是直接拒绝。
+        assert!(fence.resolve("../../token").is_err());
+        for target in ["../../token", "../t2/x.txt", "../../state.db"] {
+            let error = fence.resolve_for_write(target).unwrap_err();
+            assert!(error.0.contains("数据目录"), "{target}: {error}");
+        }
+        // 数据目录之外的地方和平常一样：算出路径，由上层去问人。
+        let (_, inside) = fence.resolve_for_write("../../../work/x.txt").unwrap();
+        assert!(!inside);
+        // 原来的围栏不受影响：它的根不在禁区里，禁区里的一律不行。
+        assert!(room
+            .resolve_for_write(task.join("a.txt").to_str().unwrap())
+            .is_err());
+    }
 
     #[test]
     fn resolves_inside_and_rejects_outside() {
