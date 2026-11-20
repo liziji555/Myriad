@@ -110,9 +110,9 @@ pub(crate) struct Plan {
 /// 决定哪些留下、哪些写成摘要。没有东西可压缩时返回 `None`。
 ///
 /// 从最新的一条往回数，在 `keep_budget` 以内的留下；切口不会落在工具调用和它的结果中间。
-/// 人刚说的、模型还没回应的话，只要不超过 `verbatim_budget` 就原样留下（哪怕超过 `keep_budget`）：
-/// 模型要回答的是原话，不是它的摘要。超过了就和别的条目一样处理，
-/// 否则一条放不下的消息会永远留在那里，这个会话再也发不出去。
+/// 人刚说的、模型还没回应的话，从最新的一条往回，在 `verbatim_budget` 以内的都原样留下
+/// （哪怕超过 `keep_budget`）：模型要回答的是原话，不是它的摘要。
+/// 放不下的那条和它之前的照常处理，否则一条放不下的消息会永远留在那里，这个会话再也发不出去。
 pub(crate) fn plan(
     transcript: &Transcript,
     keep_budget: usize,
@@ -124,11 +124,12 @@ pub(crate) fn plan(
     let mut cut = entries.len();
     let mut total = 0;
     while cut > start && matches!(entries[cut - 1].body, EntryBody::User { .. }) {
-        total += estimate_entry(&entries[cut - 1].body);
+        let size = estimate_entry(&entries[cut - 1].body);
+        if total + size > verbatim_budget {
+            break;
+        }
+        total += size;
         cut -= 1;
-    }
-    if total > verbatim_budget {
-        (cut, total) = (entries.len(), 0);
     }
     while cut > start {
         total += estimate_entry(&entries[cut - 1].body);
@@ -356,10 +357,15 @@ mod tests {
             made.text,
             "【对话记录】\n用户：以前的问题\n助手：以前的回答\n"
         );
-        // 放不下：和别的条目一样，只留预算以内的。
+        // 前一条放不下：只压缩它，后面那句照样原样留下。
         let made = plan(&log, 10, 1_000, 100_000).unwrap();
         assert_eq!(made.kept, 1);
         assert!(made.text.ends_with("刚贴的一大段\n"), "{}", made.text);
+        // 后一条比留存预算大、但放得下：也原样留下，不受前面那条放不下的连累。
+        let (_dir, log) = transcript(vec![user(&"大".repeat(5_000)), user(&"中".repeat(500))]);
+        let made = plan(&log, 10, 1_000, 100_000).unwrap();
+        assert_eq!(made.kept, 1);
+        assert!(!made.text.contains('中'));
 
         // 只有刚说的话：放得下就没有可以压缩的；放不下就连它一起压缩，不能卡死在那里。
         let (_dir, only) = transcript(vec![user(&"长".repeat(5_000))]);
