@@ -7,8 +7,8 @@ use axum::Json;
 use sa_engine::{Engine, EngineError};
 use sa_orchestrator::OrchestratorError;
 use sa_protocol::{
-    Bot, CreateRoomRequest, Health, Message, MessagePage, PostMessageRequest, Room, RoomId,
-    StopResponse,
+    ApprovalId, Bot, CreateRoomRequest, DecideApprovalRequest, Health, Message, MessagePage,
+    PermissionRule, PostMessageRequest, Room, RoomId, RuleId, StopResponse,
 };
 use serde::Deserialize;
 
@@ -103,6 +103,50 @@ pub async fn stop(
     Ok(Json(StopResponse {
         stopped: state.orchestrator.stop(&room_id),
     }))
+}
+
+/// 答复一张审批卡。卡片已经不在等了（答过、过期、那一轮停了）时返回 409。
+pub async fn decide_approval(
+    State(state): State<AppState>,
+    Path(approval_id): Path<ApprovalId>,
+    body: Result<Json<DecideApprovalRequest>, JsonRejection>,
+) -> Result<StatusCode, AppError> {
+    let Json(body) = body.map_err(|e| AppError::bad_request(e.body_text()))?;
+    if state.orchestrator.decide(&approval_id, body.decision) {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(AppError::new(
+            StatusCode::CONFLICT,
+            "approval_closed",
+            "这张审批卡已经处理过或者过期了",
+        ))
+    }
+}
+
+/// 房间里已经保存的「总是允许」。
+pub async fn list_rules(
+    State(state): State<AppState>,
+    Path(room_id): Path<RoomId>,
+) -> Result<Json<Vec<PermissionRule>>, AppError> {
+    Ok(Json(
+        blocking(&state, move |engine| engine.list_rules(&room_id)).await?,
+    ))
+}
+
+/// 撤销一条「总是允许」。
+pub async fn delete_rule(
+    State(state): State<AppState>,
+    Path(rule_id): Path<RuleId>,
+) -> Result<StatusCode, AppError> {
+    if blocking(&state, move |engine| engine.delete_rule(&rule_id)).await? {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(AppError::new(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "没有这条许可",
+        ))
+    }
 }
 
 pub async fn api_not_found() -> AppError {

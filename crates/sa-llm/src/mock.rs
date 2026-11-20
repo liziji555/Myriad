@@ -209,13 +209,13 @@ fn demo_reply(request: &ChatRequest) -> MockReply {
             lines.join("\n")
         ));
     }
-    let can_read = request.tools.iter().any(|t| t.name == "read");
-    if let (true, Some(path)) = (can_read, backticked(&last.content)) {
-        let arguments = serde_json::json!({ "path": path }).to_string();
-        return MockReply::tool_calls(
-            &format!("（Mock 模型）我先读一下 {path}。"),
-            &[("mock_call_1", "read", &arguments)],
-        );
+    if let Some((tool, arguments, saying)) = demo_tool_call(&last.content) {
+        if request.tools.iter().any(|t| t.name == tool) {
+            return MockReply::tool_calls(
+                &format!("（Mock 模型）{saying}"),
+                &[("mock_call_1", tool, &arguments.to_string())],
+            );
+        }
     }
     let quoted: String = last.content.chars().take(80).collect();
     // 报出上下文里有几条用户消息：重启之后数字接着涨，说明历史带上了。
@@ -225,15 +225,54 @@ fn demo_reply(request: &ChatRequest) -> MockReply {
         .filter(|m| m.role == Role::User)
         .count();
     MockReply::text(&format!(
-        "你好！我是 Mock 模型，只会按固定规则回话，用来在没有密钥时把流程跑通。\n\n你刚才说的是：「{quoted}」（这是这个会话里你的第 {turn} 条消息）\n\n想看工具调用的话，发一条带反引号路径的消息，例如：读一下 `README.md`。"
+        "你好！我是 Mock 模型，只会按固定规则回话，用来在没有密钥时把流程跑通。\n\n你刚才说的是：「{quoted}」（这是这个会话里你的第 {turn} 条消息）\n\n想看工具调用的话，发一条带反引号的消息，例如：读一下 `README.md`、写入 `笔记.md`：内容、修改 `笔记.md`：旧 => 新、运行 `git status`。"
     ))
 }
 
-fn backticked(text: &str) -> Option<&str> {
-    let start = text.find('`')? + 1;
-    let len = text[start..].find('`')?;
-    let inner = text[start..start + len].trim();
-    (!inner.is_empty()).then_some(inner)
+/// 按消息的写法决定调哪个工具：反引号前面的动词决定工具，反引号里面是路径或命令，
+/// 反引号后面（去掉冒号）是要写的内容。
+fn demo_tool_call(text: &str) -> Option<(&'static str, serde_json::Value, String)> {
+    let start = text.find('`')?;
+    let len = text[start + 1..].find('`')?;
+    let inner = text[start + 1..start + 1 + len].trim();
+    if inner.is_empty() {
+        return None;
+    }
+    let verb = &text[..start];
+    let rest = text[start + len + 2..]
+        .trim_start_matches(|c: char| c.is_whitespace() || c == '：' || c == ':')
+        .trim_end();
+    use serde_json::json;
+    Some(if verb.contains("运行") || verb.contains("执行") {
+        (
+            "shell",
+            json!({ "command": inner }),
+            format!("我来执行 {inner}。"),
+        )
+    } else if verb.contains("写入") {
+        let content = if rest.is_empty() {
+            "这是 Mock 模型写的一行。".to_string()
+        } else {
+            rest.to_string()
+        };
+        (
+            "write",
+            json!({ "path": inner, "content": format!("{content}\n") }),
+            format!("我来写 {inner}。"),
+        )
+    } else if let (true, Some((old, new))) = (verb.contains("修改"), rest.split_once("=>")) {
+        (
+            "edit",
+            json!({ "path": inner, "old_string": old.trim(), "new_string": new.trim() }),
+            format!("我来改 {inner}。"),
+        )
+    } else {
+        (
+            "read",
+            json!({ "path": inner }),
+            format!("我先读一下 {inner}。"),
+        )
+    })
 }
 
 #[cfg(test)]
@@ -339,6 +378,46 @@ mod tests {
         .await;
         assert!(second.tool_calls.is_empty());
         assert!(second.text.contains("第一行"));
+
+        // 其他工具：动词决定调哪个；请求里没有这个工具时退回普通回复。
+        let tools = ["read", "write", "edit", "shell"];
+        let call = |text: &str| {
+            let mut req = request(vec![ChatMessage::user(text)]);
+            req.tools = tools
+                .iter()
+                .map(|name| ToolSpec {
+                    name: name.to_string(),
+                    description: String::new(),
+                    parameters: serde_json::json!({}),
+                })
+                .collect();
+            let provider = &provider;
+            async move {
+                let acc = collect(provider, req).await;
+                let call = &acc.tool_calls[0];
+                (call.name.clone(), call.arguments.clone())
+            }
+        };
+        assert_eq!(
+            call("运行 `cargo test -q`").await,
+            ("shell".into(), r#"{"command":"cargo test -q"}"#.into())
+        );
+        assert_eq!(
+            call("写入 `笔记.md`：第一行").await,
+            (
+                "write".into(),
+                r#"{"content":"第一行\n","path":"笔记.md"}"#.into()
+            )
+        );
+        assert_eq!(
+            call("修改 `笔记.md`：第一行 => 改过了").await,
+            (
+                "edit".into(),
+                r#"{"new_string":"改过了","old_string":"第一行","path":"笔记.md"}"#.into()
+            )
+        );
+        let no_shell = collect(&provider, request(vec![ChatMessage::user("运行 `ls`")])).await;
+        assert!(no_shell.tool_calls.is_empty());
 
         let plain = collect(&provider, request(vec![ChatMessage::user("你好")])).await;
         assert!(plain.text.contains("你好"));

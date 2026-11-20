@@ -8,7 +8,7 @@ use sa_llm::MockProvider;
 use sa_orchestrator::{Orchestrator, ResolvedModel, Settings, SingleModel};
 use sa_protocol::{
     ApiError, Bot, Event, EventKind, Health, Message, MessageDelta, MessagePage, MessageState,
-    Room, Sender, StepState, StopResponse, StreamReady,
+    PermissionRule, Room, Sender, StepState, StopResponse, StreamReady,
 };
 use sa_server::{router, AppState};
 use sa_store::Store;
@@ -519,4 +519,124 @@ async fn slow_stream_readers_are_told_to_resync() {
     let page = messages(&app, &room, "").await;
     assert_eq!(page.messages[0].content.chars().count(), 5000);
     assert_eq!(page.messages[0].rev, 5000);
+}
+
+fn delete(path: &str) -> Request<Body> {
+    Request::delete(path)
+        .header(AUTHORIZATION, format!("Bearer {TOKEN}"))
+        .body(Body::empty())
+        .unwrap()
+}
+
+/// 等到最后一条消息里有一步在等批准，返回审批卡的 id。
+async fn waiting_approval(app: &Router, room: &Room) -> String {
+    for _ in 0..500 {
+        let page = messages(app, room, "").await;
+        let waiting = page.messages.last().and_then(|m| {
+            m.steps
+                .iter()
+                .find(|s| s.state == StepState::Waiting)
+                .and_then(|s| s.approval.clone())
+        });
+        if let Some(approval) = waiting {
+            return approval.id.to_string();
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("等不到审批卡");
+}
+
+/// 命令先出审批卡；「总是允许」之后同样的命令直接跑；许可可以查、可以撤销。
+#[tokio::test]
+async fn approval_card_is_decided_over_http_and_rules_can_be_revoked() {
+    let (app, engine) = app();
+    let room = engine.list_rooms().unwrap().pop().unwrap();
+    let path = format!("/api/rooms/{}/messages", room.id);
+    let rules_path = format!("/api/rooms/{}/rules", room.id);
+    let say = |text: &str| post(&path, &serde_json::json!({ "content": text }).to_string());
+    let status = |request: Request<Body>| {
+        let app = app.clone();
+        async move { app.oneshot(request).await.unwrap().status() }
+    };
+
+    assert_eq!(status(say("运行 `echo ok`")).await, StatusCode::CREATED);
+    let id = waiting_approval(&app, &room).await;
+    let decide = format!("/api/approvals/{id}/decide");
+    // 答复的格式不对：400，卡片还在等。
+    let response = app
+        .clone()
+        .oneshot(post(&decide, r#"{"decision":"maybe"}"#))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    // 没带令牌：401。
+    let anonymous = Request::post(&decide)
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(r#"{"decision":"once"}"#))
+        .unwrap();
+    assert_eq!(status(anonymous).await, StatusCode::UNAUTHORIZED);
+
+    assert_eq!(
+        status(post(&decide, r#"{"decision":"always"}"#)).await,
+        StatusCode::NO_CONTENT
+    );
+    // 同一张卡再答一次：409。
+    let again = app
+        .clone()
+        .oneshot(post(&decide, r#"{"decision":"deny"}"#))
+        .await
+        .unwrap();
+    assert_eq!(again.status(), StatusCode::CONFLICT);
+    assert_eq!(json::<ApiError>(again).await.code, "approval_closed");
+    assert_eq!(
+        status(post(
+            "/api/approvals/apr_none/decide",
+            r#"{"decision":"once"}"#
+        ))
+        .await,
+        StatusCode::CONFLICT
+    );
+
+    let all = settled(&app, &room, 2).await;
+    assert_eq!(all[1].state, MessageState::Complete, "{:?}", all[1]);
+    assert_eq!(all[1].steps[0].state, StepState::Ok);
+    assert!(all[1].content.contains("退出码 0"), "{}", all[1].content);
+
+    // 许可记下来了，同样的命令不再问。
+    let rules: Vec<PermissionRule> =
+        json(app.clone().oneshot(get(&rules_path)).await.unwrap()).await;
+    assert_eq!(rules.len(), 1);
+    assert_eq!(
+        (rules[0].tool.as_str(), rules[0].pattern.as_str()),
+        ("shell", "echo ok")
+    );
+    assert_eq!(status(say("运行 `echo ok`")).await, StatusCode::CREATED);
+    let all = settled(&app, &room, 4).await;
+    assert_eq!(all[3].steps[0].state, StepState::Ok);
+    assert_eq!(all[3].steps[0].approval, None);
+
+    // 撤销之后又要问了。
+    let rule_path = format!("/api/rules/{}", rules[0].id);
+    assert_eq!(status(delete(&rule_path)).await, StatusCode::NO_CONTENT);
+    assert_eq!(status(delete(&rule_path)).await, StatusCode::NOT_FOUND);
+    let rules: Vec<PermissionRule> =
+        json(app.clone().oneshot(get(&rules_path)).await.unwrap()).await;
+    assert!(rules.is_empty());
+    assert_eq!(status(say("运行 `echo ok`")).await, StatusCode::CREATED);
+    let id = waiting_approval(&app, &room).await;
+    assert_eq!(
+        status(post(
+            &format!("/api/approvals/{id}/decide"),
+            r#"{"decision":"deny"}"#
+        ))
+        .await,
+        StatusCode::NO_CONTENT
+    );
+    let all = settled(&app, &room, 6).await;
+    assert_eq!(all[5].steps[0].state, StepState::Denied);
+
+    assert_eq!(
+        status(get("/api/rooms/room_none/rules")).await,
+        StatusCode::NOT_FOUND
+    );
 }
