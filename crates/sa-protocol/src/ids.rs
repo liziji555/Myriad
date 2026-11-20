@@ -51,6 +51,7 @@ id_type!(RuleId, "rule");
 id_type!(TaskId, "task");
 id_type!(RunId, "run");
 id_type!(ArtifactId, "art");
+id_type!(NoticeId, "ntc");
 
 #[cfg(test)]
 mod tests {

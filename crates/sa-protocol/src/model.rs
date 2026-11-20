@@ -1,4 +1,6 @@
-use crate::{ApprovalId, ArtifactId, BotId, MessageId, Millis, RoomId, RuleId, RunId, TaskId};
+use crate::{
+    ApprovalId, ArtifactId, BotId, MessageId, Millis, NoticeId, RoomId, RuleId, RunId, TaskId,
+};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
@@ -567,4 +569,114 @@ mod tests {
             );
         }
     }
+}
+
+/// 提醒是关于什么的。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum NoticeKind {
+    /// 花费快到或者已经到上限。
+    Budget,
+    /// 一次运行跑得太久。
+    StuckRun,
+    /// 任务很久没有动静。
+    StuckTask,
+    /// Bot 在重复说一样的话。
+    Loop,
+    /// 一个任务花得比平常多得多。
+    Spend,
+    /// 排队的任务太多或者等太久。
+    Backlog,
+    /// 最近失败的运行太多。
+    Failures,
+    /// 磁盘快满了或者数据库太大。
+    Storage,
+}
+
+str_enum!(NoticeKind {
+    Budget => "budget",
+    StuckRun => "stuck_run",
+    StuckTask => "stuck_task",
+    Loop => "loop",
+    Spend => "spend",
+    Backlog => "backlog",
+    Failures => "failures",
+    Storage => "storage",
+});
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum NoticeLevel {
+    Info,
+    Warning,
+}
+
+str_enum!(NoticeLevel {
+    Info => "info",
+    Warning => "warning",
+});
+
+/// 给人看的一条提醒。不是谁说的话：它出现在时间线上方，可以收起来。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct Notice {
+    pub id: NoticeId,
+    pub kind: NoticeKind,
+    pub level: NoticeLevel,
+    /// 关于哪个房间。`None` 表示和所有房间都有关。
+    pub room_id: Option<RoomId>,
+    pub task_id: Option<TaskId>,
+    pub text: String,
+    #[ts(type = "number")]
+    pub created_at: Millis,
+    #[ts(type = "number | null")]
+    pub dismissed_at: Option<Millis>,
+}
+
+/// 一段时间里的模型用量。`cost` 的单位是配置里 `[budget]` 的货币。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct Spend {
+    pub cost: f64,
+    #[ts(type = "number")]
+    pub input_tokens: i64,
+    #[ts(type = "number")]
+    pub output_tokens: i64,
+    #[ts(type = "number")]
+    pub cached_tokens: i64,
+    #[ts(type = "number")]
+    pub calls: i64,
+}
+
+/// 用量里的一行：某一天、某个模型、某个 Bot 或某个任务。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SpendRow {
+    /// 这一行是谁：日期（`2026-11-20`）、模型名、Bot 或任务的 id。
+    pub key: String,
+    /// 给人看的名字。
+    pub label: String,
+    pub spend: Spend,
+}
+
+/// 「用量」面板的全部内容。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct UsageSummary {
+    pub currency: String,
+    /// 每天的花费上限。0 表示不限。
+    pub daily_limit: f64,
+    /// 每个任务的花费上限。0 表示不限。
+    pub task_limit: f64,
+    pub today: Spend,
+    /// 最近 7 天，从早到晚，最后一行是今天。
+    pub days: Vec<SpendRow>,
+    /// 今天按模型分。
+    pub models: Vec<SpendRow>,
+    /// 今天按 Bot 分。
+    pub bots: Vec<SpendRow>,
+    /// 今天花得最多的任务。
+    pub tasks: Vec<SpendRow>,
 }

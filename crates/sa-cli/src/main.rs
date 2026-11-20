@@ -7,6 +7,7 @@ mod paths;
 mod serve;
 mod task;
 mod team;
+mod usage;
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -41,6 +42,8 @@ enum Command {
     },
     /// 任务：列出、开任务、继续、验收、打回、取消（不能和 sa serve 同时运行）
     Task(task::TaskArgs),
+    /// 看今天和最近几天花了多少（不能和 sa serve 同时运行）
+    Usage,
     /// 检查配置、密钥、数据库、端口是否正常
     Doctor,
 }
@@ -53,6 +56,7 @@ fn main() -> ExitCode {
         Command::Bot { command } => team::run(&data_dir, team::Command::Bot(command)),
         Command::Room { command } => team::run(&data_dir, team::Command::Room(command)),
         Command::Task(args) => task::run(&data_dir, args),
+        Command::Usage => usage::run(&data_dir),
         Command::Doctor => Ok(doctor::run(&data_dir)),
     });
     match result {

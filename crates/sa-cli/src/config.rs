@@ -17,7 +17,31 @@ pub struct Config {
     /// 开 PR 用。老的配置文件里没有这一节，用默认值。
     #[serde(default)]
     pub github: GitHub,
+    /// 各个模型每一百万 token 多少钱，算花费用。`default` 是没有单独写的模型的价格。
+    /// 老的配置文件里没有这一节，用内置的偏高的价格。
+    #[serde(default)]
+    pub prices: BTreeMap<String, Price>,
 }
+
+/// 一个模型的价格：每一百万 token 多少钱，单位是 `[budget]` 的货币。
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Price {
+    pub input: f64,
+    /// 命中缓存的输入。不写就和 `input` 一样。
+    pub cached_input: Option<f64>,
+    pub output: f64,
+}
+
+/// 配置里没有写价格时用的：故意偏高，宁可早一点停下。
+pub const FALLBACK_PRICE: Price = Price {
+    input: 10.0,
+    cached_input: None,
+    output: 30.0,
+};
+
+/// 一个任务默认最多花多少。
+pub const DEFAULT_TASK_LIMIT: f64 = 10.0;
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -92,8 +116,16 @@ pub const MIN_CONTEXT_WINDOW: usize = 16_000;
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Budget {
+    /// 所有房间加起来每天最多花多少。0 表示不限。
     pub daily_limit: f64,
+    /// 一个任务最多花多少。0 表示不限。老的配置文件里没有这一项。
+    #[serde(default = "default_task_limit")]
+    pub task_limit: f64,
     pub currency: String,
+}
+
+fn default_task_limit() -> f64 {
+    DEFAULT_TASK_LIMIT
 }
 
 impl Config {
@@ -165,11 +197,61 @@ impl Config {
                 }
             }
         }
-        let limit = self.budget.daily_limit;
-        if !limit.is_finite() || limit < 0.0 {
-            bail!("[budget] 的 daily_limit 必须是不小于 0 的数字");
+        for (name, limit) in [
+            ("daily_limit", self.budget.daily_limit),
+            ("task_limit", self.budget.task_limit),
+        ] {
+            if !limit.is_finite() || limit < 0.0 {
+                bail!("[budget] 的 {name} 必须是不小于 0 的数字");
+            }
+        }
+        for (model, price) in &self.prices {
+            let amounts = [price.input, price.cached_input.unwrap_or(0.0), price.output];
+            if amounts.iter().any(|n| !n.is_finite() || *n < 0.0) {
+                bail!("[prices] 里 {model} 的价格必须是不小于 0 的数字");
+            }
         }
         Ok(())
+    }
+}
+
+impl Config {
+    /// 花费的上限和价格，交给编排层用。
+    pub fn budget(&self) -> sa_orchestrator::Budget {
+        let price = |price: &Price| sa_orchestrator::Price {
+            input: price.input,
+            cached_input: price.cached_input.unwrap_or(price.input),
+            output: price.output,
+        };
+        sa_orchestrator::Budget {
+            currency: self.budget.currency.clone(),
+            daily_limit: self.budget.daily_limit,
+            task_limit: self.budget.task_limit,
+            default_price: price(self.prices.get("default").unwrap_or(&FALLBACK_PRICE)),
+            prices: self
+                .prices
+                .iter()
+                .filter(|(model, _)| model.as_str() != "default")
+                .map(|(model, value)| (model.clone(), price(value)))
+                .collect(),
+        }
+    }
+
+    /// 启动时告诉人现在的上限是多少。
+    pub fn budget_notice(&self) -> String {
+        let currency = &self.budget.currency;
+        let show = |limit: f64| {
+            if limit > 0.0 {
+                format!("{limit} {currency}")
+            } else {
+                "不限".to_string()
+            }
+        };
+        format!(
+            "花费上限：每天 {}，每个任务 {}。花费按 config.toml 里 [prices] 的价格估算，和模型服务实际扣的钱可能有出入。",
+            show(self.budget.daily_limit),
+            show(self.budget.task_limit)
+        )
     }
 }
 

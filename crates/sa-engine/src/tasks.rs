@@ -160,6 +160,16 @@ impl Engine {
         Ok(self.store.read(|c| tasks::list_runs(c, id))?)
     }
 
+    /// 所有还在进行的运行。
+    pub fn running_runs(&self) -> Result<Vec<Run>> {
+        Ok(self.store.read(tasks::list_running)?)
+    }
+
+    /// `since` 之后结束的运行里，`(失败的, 成功和失败加起来的)` 各有几次。
+    pub fn run_counts_since(&self, since: sa_protocol::Millis) -> Result<(i64, i64)> {
+        Ok(self.store.read(|c| tasks::run_counts_since(c, since))?)
+    }
+
     /// 把任务挪到另一个状态。`note` 是对新状态的一句说明。不允许的走法会被拒绝。
     pub fn move_task(&self, id: &TaskId, to: TaskState, note: &str) -> Result<Task> {
         self.change_task(id, |_, task| {
@@ -205,6 +215,9 @@ impl Engine {
                 }
                 task.state = TaskState::Open;
                 task.note = note.to_string();
+                // 人让它继续，就是同意它再花一份任务的额度。
+                let spent = sa_store::usage::task_cost(tx, &task.id)?;
+                tasks::set_spend_floor(tx, &task.id, spent)?;
             }
             if !note.is_empty() {
                 tasks::push_input(tx, &task.id, note)?;

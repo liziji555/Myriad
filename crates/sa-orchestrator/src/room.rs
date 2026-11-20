@@ -5,7 +5,7 @@ use crate::episode::Job;
 use crate::work::CreateTaskTool;
 use crate::{render_prompt, router, RoomLink, Shared};
 use async_trait::async_trait;
-use sa_engine::{EngineError, UsageRecord};
+use sa_engine::EngineError;
 use sa_kernel::{
     run_turn, ApprovalRequest, Inbox, Observer, Transcript, TurnConfig, TurnEnd, UserInput,
 };
@@ -17,7 +17,7 @@ use sa_protocol::{
 use sa_tools::{Fence, ToolCtx};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::Notify;
 
@@ -297,6 +297,7 @@ async fn turn(
         rule_scope: None,
         steps: Mutex::new(vec![]),
         held: Mutex::new(Some(String::new())),
+        pulse: None,
     };
     let outcome = match shared.models.resolve(bot.tier) {
         Err(reason) => {
@@ -340,9 +341,10 @@ async fn turn(
                     hop: live_hop,
                 });
             }
+            let provider = crate::budget::guard(shared, model.provider.clone(), None);
             let outcome = run_turn(
                 transcript,
-                model.provider.as_ref(),
+                provider.as_ref(),
                 &tools,
                 &ctx,
                 &config,
@@ -587,9 +589,17 @@ pub(crate) struct RoomObserver {
     /// 回复开头还分不清是不是 `(pass)` 的那几个字，先扣着不显示，免得界面上闪一下。
     /// 一旦确定不是，就变成 `None`，之后的字直接显示。
     pub held: Mutex<Option<String>>,
+    /// 任务的运行每有一点动静就在这里记下时间，看门狗靠它判断是不是卡住了。对话里没有。
+    pub pulse: Option<Arc<AtomicI64>>,
 }
 
 impl RoomObserver {
+    fn beat(&self) {
+        if let Some(pulse) = &self.pulse {
+            pulse.store(sa_engine::now_ms(), Ordering::Relaxed);
+        }
+    }
+
     /// 一轮结束时处理扣着的字。返回这一轮是不是「不说话」：正常结束，而且说的只有 `(pass)` 或者什么都没说。
     /// 不是的话，把扣着的字补显示出来。
     pub(crate) fn release_held(&self, completed: bool) -> bool {
@@ -644,6 +654,7 @@ impl RoomObserver {
 #[async_trait]
 impl Observer for RoomObserver {
     async fn text_delta(&self, text: &str) {
+        self.beat();
         let mut held = self.held.lock().unwrap();
         let Some(buffer) = held.as_mut() else {
             drop(held);
@@ -662,6 +673,7 @@ impl Observer for RoomObserver {
     }
 
     async fn tool_started(&self, call_id: &str, tool: &str, title: &str) {
+        self.beat();
         self.steps.lock().unwrap().push(ToolStep {
             id: call_id.to_string(),
             tool: tool.to_string(),
@@ -673,6 +685,7 @@ impl Observer for RoomObserver {
     }
 
     async fn tool_finished(&self, call_id: &str, ok: bool) {
+        self.beat();
         {
             let mut steps = self.steps.lock().unwrap();
             // 从后往前找：同一个 id 出现两次时（模型偶尔会这样）改最近的那个。
@@ -732,6 +745,7 @@ impl Observer for RoomObserver {
             answer = answer => answer.unwrap_or(ApprovalDecision::Deny),
             _ = tokio::time::sleep(timeout) => ApprovalDecision::Deny,
         };
+        self.beat();
         let allowed = decision != ApprovalDecision::Deny;
         if let (ApprovalDecision::Always, Some(key)) = (decision, key) {
             let (engine, room, tool) = (engine.clone(), self.room_id.clone(), rule_tool.clone());
@@ -752,19 +766,16 @@ impl Observer for RoomObserver {
     }
 
     async fn usage(&self, model: &str, usage: Usage) {
-        let record = UsageRecord {
-            room_id: self.room_id.clone(),
-            bot_id: Some(self.bot.id.clone()),
-            session_id: Some(self.session_id.clone()),
-            model: model.to_string(),
-            in_tokens: usage.input_tokens as i64,
-            out_tokens: usage.output_tokens as i64,
-            cached_tokens: usage.cached_tokens as i64,
-        };
-        let engine = self.shared.engine.clone();
-        if let Err(error) = db(move || engine.record_usage(record)).await {
-            tracing::error!(room = %self.room_id, "用量没记上：{error}");
-        }
+        self.beat();
+        crate::budget::record(
+            &self.shared,
+            &self.room_id,
+            Some(&self.bot.id),
+            Some(&self.session_id),
+            model,
+            usage,
+        )
+        .await;
     }
 }
 

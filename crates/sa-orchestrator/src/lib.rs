@@ -8,16 +8,20 @@
 
 mod agent;
 mod ask;
+mod budget;
 mod deliver;
 mod episode;
 mod github;
 mod room;
 mod router;
+mod watchdog;
 mod work;
 mod workdir;
 
+pub use budget::{Budget, Price};
 pub use episode::{MAX_BOT_TURNS, MAX_HOP, MAX_PAIR_ASKS};
 pub use github::{GitHub, DEFAULT_API_BASE};
+pub use watchdog::Watchdog;
 pub use work::MAX_PARALLEL_RUNS;
 
 use episode::Episode;
@@ -71,6 +75,10 @@ pub struct Settings {
     pub work_dir: PathBuf,
     /// 怎么连 GitHub（开 PR 用）。`None` 表示不提供开 PR 的工具。
     pub github: Option<GitHub>,
+    /// 花费的上限和价格。
+    pub budget: Budget,
+    /// 看门狗看什么、多严。
+    pub watchdog: Watchdog,
 }
 
 /// 审批卡默认等 10 分钟。
@@ -217,6 +225,11 @@ impl Orchestrator {
             Some(reply) => reply.send(decision).is_ok(),
             None => false,
         }
+    }
+
+    /// 「用量」面板的内容：今天和最近几天花了多少，按模型、Bot、任务分。
+    pub async fn usage_summary(&self) -> Result<sa_protocol::UsageSummary, OrchestratorError> {
+        Ok(budget::summary(&self.shared).await?)
     }
 
     /// 停下所有房间并等它们收尾。正在写的回复会标成「中断」。

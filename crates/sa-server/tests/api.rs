@@ -41,6 +41,8 @@ fn app() -> (Router, Arc<Engine>) {
         approval_timeout: std::time::Duration::from_secs(600),
         work_dir: dir.join("tasks"),
         github: None,
+        budget: Default::default(),
+        watchdog: Default::default(),
     };
     let orchestrator = Arc::new(Orchestrator::new(
         engine.clone(),

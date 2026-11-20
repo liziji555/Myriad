@@ -79,6 +79,9 @@ pub fn router(state: AppState) -> Router {
             "/bots/{bot_id}",
             patch(routes::update_bot).delete(routes::delete_bot),
         )
+        .route("/usage", get(routes::usage))
+        .route("/notices", get(routes::list_notices))
+        .route("/notices/{notice_id}/dismiss", post(routes::dismiss_notice))
         .route("/events", get(sse::events))
         .fallback(routes::api_not_found)
         .layer(middleware::from_fn_with_state(

@@ -104,6 +104,11 @@ impl App {
                     .filter(|token| !token.trim().is_empty()),
                 repo: config.github.repo.clone(),
             }),
+            budget: config.budget(),
+            watchdog: sa_orchestrator::Watchdog {
+                db_path: Some(data_dir.database()),
+                ..Default::default()
+            },
         };
         tune(&mut settings);
         let orchestrator = Arc::new(Orchestrator::new(engine.clone(), models, settings));
@@ -137,10 +142,6 @@ pub fn open_state(data_dir: &DataDir) -> Result<(Arc<Engine>, std::fs::File)> {
     }
     Ok((engine, lock))
 }
-
-/// 用真实模型时要让人知道的事：配置里的花费上限现在还拦不住调用。
-pub const BUDGET_NOTICE: &str =
-    "注意：config.toml 里的每日花费上限这个版本还没有生效，模型调用不会被它拦住，花费请在模型服务的控制台里看。";
 
 pub fn init_logging(default: tracing::Level) {
     let level = std::env::var("SA_LOG")

@@ -1,4 +1,4 @@
-use crate::app::{init_logging, write_if_missing, App, RunArgs, BUDGET_NOTICE};
+use crate::app::{init_logging, write_if_missing, App, RunArgs};
 use crate::paths::DataDir;
 use anyhow::{Context, Result};
 use sa_server::AppState;
@@ -42,7 +42,7 @@ pub fn run(data_dir: &DataDir, args: ServeArgs) -> Result<()> {
             if app.mock {
                 println!("当前用的是不联网的假模型（--mock），回复是固定规则生成的。");
             } else {
-                println!("{BUDGET_NOTICE}");
+                println!("{}", app.config.budget_notice());
             }
             println!("在浏览器里打开：{url}");
             println!("按 Ctrl+C 停止。");
@@ -53,6 +53,7 @@ pub fn run(data_dir: &DataDir, args: ServeArgs) -> Result<()> {
             }
             // 上次退出时没做完的任务接着排队。
             app.orchestrator.resume_tasks();
+            app.orchestrator.start_watchdog();
             let state = AppState::new(app.engine.clone(), app.orchestrator.clone(), token);
             let orchestrator = app.orchestrator.clone();
             sa_server::serve(listener, state, async move {

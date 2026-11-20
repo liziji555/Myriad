@@ -76,6 +76,8 @@ fn build(
         approval_timeout,
         work_dir: data.join("work"),
         github: None,
+        budget: Default::default(),
+        watchdog: Default::default(),
     };
     Rig {
         orchestrator: Orchestrator::new(engine.clone(), models, settings),
@@ -970,6 +972,8 @@ fn team(dir: &Path, router: Vec<MockReply>, bots: Vec<MockReply>) -> Team {
         approval_timeout: Duration::from_secs(600),
         work_dir: data.join("work"),
         github: None,
+        budget: Default::default(),
+        watchdog: Default::default(),
     };
     let models = Arc::new(Tiered {
         router: router.clone(),

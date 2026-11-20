@@ -99,6 +99,8 @@ fn start_full(
         approval_timeout: Duration::from_secs(600),
         work_dir: data.join("work"),
         github,
+        budget: Default::default(),
+        watchdog: Default::default(),
     };
     let models = Arc::new(Models {
         front: front.clone(),

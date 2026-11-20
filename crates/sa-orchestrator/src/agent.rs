@@ -2,16 +2,14 @@
 //!
 //! 子代理只有只读工具，没有 `agent`（不能再往下派），也不能交任务结果。
 
-use crate::room::db;
 use crate::Shared;
 use async_trait::async_trait;
-use sa_engine::UsageRecord;
 use sa_kernel::{run_turn, EntryBody, Inbox, Observer, Transcript, TurnConfig, TurnEnd, UserInput};
 use sa_llm::{RetryPolicy, Usage};
-use sa_protocol::{BotId, ModelTier, RoomId, SessionId};
+use sa_protocol::{BotId, ModelTier, RoomId, SessionId, TaskId};
 use sa_tools::{Tool, ToolCtx, ToolError, ToolRegistry, ToolResult};
 use serde_json::{json, Value};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
 
 /// 子代理最多调这么多次模型。
@@ -26,6 +24,10 @@ pub(crate) struct AgentTool {
     pub bot_id: BotId,
     /// 用量记在哪个会话名下（派它的那个工作会话）。
     pub session_id: SessionId,
+    /// 花费算在哪个任务头上。
+    pub task_id: TaskId,
+    /// 子代理每有一点动静就记下时间：它在查资料时，派它的任务不算卡住。
+    pub pulse: Arc<AtomicI64>,
 }
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -123,9 +125,11 @@ impl Tool for AgentTool {
         sub_ctx.allow_private_network = ctx.allow_private_network;
         let mut inbox = Once(Some(prompt.to_string()));
         let observer = Quiet(self);
+        let provider =
+            crate::budget::guard(shared, model.provider.clone(), Some(self.task_id.clone()));
         let outcome = run_turn(
             &mut transcript,
-            model.provider.as_ref(),
+            provider.as_ref(),
             &ToolRegistry::read_only(),
             &sub_ctx,
             &config,
@@ -173,6 +177,12 @@ impl Drop for RemoveOnDrop {
     }
 }
 
+impl Quiet<'_> {
+    fn beat(&self) {
+        self.0.pulse.store(sa_engine::now_ms(), Ordering::Relaxed);
+    }
+}
+
 /// 只有一条输入。
 struct Once(Option<String>);
 
@@ -196,24 +206,27 @@ struct Quiet<'a>(&'a AgentTool);
 
 #[async_trait]
 impl Observer for Quiet<'_> {
-    async fn text_delta(&self, _text: &str) {}
-    async fn tool_started(&self, _call_id: &str, _tool: &str, _title: &str) {}
-    async fn tool_finished(&self, _call_id: &str, _ok: bool) {}
+    async fn text_delta(&self, _text: &str) {
+        self.beat();
+    }
+    async fn tool_started(&self, _call_id: &str, _tool: &str, _title: &str) {
+        self.beat();
+    }
+    async fn tool_finished(&self, _call_id: &str, _ok: bool) {
+        self.beat();
+    }
 
     async fn usage(&self, model: &str, usage: Usage) {
+        self.beat();
         let tool = self.0;
-        let record = UsageRecord {
-            room_id: tool.room_id.clone(),
-            bot_id: Some(tool.bot_id.clone()),
-            session_id: Some(tool.session_id.clone()),
-            model: model.to_string(),
-            in_tokens: usage.input_tokens as i64,
-            out_tokens: usage.output_tokens as i64,
-            cached_tokens: usage.cached_tokens as i64,
-        };
-        let engine = tool.shared.engine.clone();
-        if let Err(error) = db(move || engine.record_usage(record)).await {
-            tracing::error!(room = %tool.room_id, "子代理的用量没记上：{error}");
-        }
+        crate::budget::record(
+            &tool.shared,
+            &tool.room_id,
+            Some(&tool.bot_id),
+            Some(&tool.session_id),
+            model,
+            usage,
+        )
+        .await;
     }
 }

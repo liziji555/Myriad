@@ -139,6 +139,9 @@ pub enum LlmError {
     Protocol(String),
     #[error("已取消")]
     Cancelled,
+    /// 花费到上限了，这次调用没有发出去。内容是给人看的整句话。
+    #[error("{0}")]
+    Budget(String),
 }
 
 impl LlmError {
@@ -246,5 +249,6 @@ mod tests {
         assert!(!LlmError::BadRequest("x".into()).is_retryable());
         assert!(!LlmError::Protocol("x".into()).is_retryable());
         assert!(!LlmError::Cancelled.is_retryable());
+        assert!(!LlmError::Budget("x".into()).is_retryable());
     }
 }

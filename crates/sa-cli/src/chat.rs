@@ -1,6 +1,6 @@
 //! `sa chat`：在终端里和房间里的 Bot 对话，用 `@名字` 点名。和 `sa serve` 用同一份数据，所以两边看到的历史一样。
 
-use crate::app::{init_logging, App, RunArgs, BUDGET_NOTICE};
+use crate::app::{init_logging, App, RunArgs};
 use crate::paths::DataDir;
 use anyhow::{bail, Context, Result};
 use sa_protocol::{
@@ -103,7 +103,7 @@ async fn interactive(app: &App, room: &Room, out: &mut impl Write) -> Result<()>
             "当前用的是不联网的假模型（--mock），回复是固定规则生成的。"
         )?;
     } else {
-        writeln!(out, "{BUDGET_NOTICE}")?;
+        writeln!(out, "{}", app.config.budget_notice())?;
     }
     if !earlier.messages.is_empty() {
         writeln!(out, "这个房间之前聊过，Bot 记得前面的内容。")?;
