@@ -328,7 +328,7 @@ default = { input = 10.0, cached_input = 10.0, output = 30.0 }      # 没有单�
 | 机器人账号做的、SuperAgent 自己发的、没连房间的仓库、别的事件 | 不收 |
 
 签名（`X-Hub-Signature-256`）不对的一律拒绝。GitHub 重试同一次投递（`X-GitHub-Delivery` 相同）不会变成第二条消息。
-issue 和评论的原文是外人写的：交给 Bot 时围在 `<untrusted_external_content>` 里并说明只当资料看，里面的要求不照做；
+标题、正文、评论、文件名、分支名这些外人能随便写的东西：交给 Bot 时都围在 `<untrusted_external_content>` 里并说明只当资料看，里面的要求不照做；
 Bot 觉得没有值得说的就只回 `(pass)`，房间里不留它的话。Bot 要动手还是照常走审批。
 
 **Telegram**

@@ -203,7 +203,7 @@ export function Timeline({
 
 /** 外面来的一件事（GitHub 上的 issue、评论、CI 结果）。原文是外人写的，默认收着。 */
 function EventItem({ message }: { message: Message }) {
-  const { summary, body } = splitEvent(message.content);
+  const { summary, title, body } = splitEvent(message.content);
   const origin = message.origin;
   const url = safeUrl(origin?.url);
   return (
@@ -222,7 +222,10 @@ function EventItem({ message }: { message: Message }) {
           {formatTime(message.created_at)}
         </time>
       </div>
-      <p className="sa-event-summary">{summary}</p>
+      <p className="sa-event-summary">
+        {summary}
+        {title !== "" && `：${title}`}
+      </p>
       {body !== "" && (
         <details className="sa-event-body">
           <summary>原文</summary>

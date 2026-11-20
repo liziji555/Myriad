@@ -4,11 +4,25 @@ const SOURCES: Record<Source, string> = { github: "GitHub", telegram: "Telegram"
 
 export const sourceName = (source: Source): string => SOURCES[source];
 
-/** 外面来的事那条消息的内容是「一句话说明、空行、原文」。拆开。 */
-export function splitEvent(content: string): { summary: string; body: string } {
+const TITLE = "标题：";
+
+/**
+ * 外面来的事那条消息的内容是「一句话说明、空行、原文」，原文的第一行可以是「标题：…」。拆开。
+ * 标题和原文都是外人写的，只拿来显示。
+ */
+export function splitEvent(content: string): { summary: string; title: string; body: string } {
   const cut = content.indexOf("\n\n");
-  if (cut < 0) return { summary: content.trim(), body: "" };
-  return { summary: content.slice(0, cut).trim(), body: content.slice(cut + 2).trim() };
+  if (cut < 0) return { summary: content.trim(), title: "", body: "" };
+  const summary = content.slice(0, cut).trim();
+  const rest = content.slice(cut + 2);
+  if (!rest.startsWith(TITLE)) return { summary, title: "", body: rest.trim() };
+  const end = rest.indexOf("\n");
+  const line = end < 0 ? rest : rest.slice(0, end);
+  return {
+    summary,
+    title: line.slice(TITLE.length).trim(),
+    body: end < 0 ? "" : rest.slice(end + 1).trim(),
+  };
 }
 
 /** 外面给的地址只有 http(s) 的才做成链接：别的（比如 `javascript:`）不能点。 */

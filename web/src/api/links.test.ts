@@ -11,16 +11,23 @@ import {
 } from "./links";
 
 describe("splitEvent", () => {
-  it("separates the one-line summary from what the outsider wrote", () => {
-    expect(splitEvent("alice 开了 issue #12「登录报错」\n\n点登录就 500\n\n复现步骤…")).toEqual({
-      summary: "alice 开了 issue #12「登录报错」",
+  it("separates the one-line summary, the title and what the outsider wrote", () => {
+    expect(splitEvent("alice 开了 issue #12\n\n标题：登录报错\n\n点登录就 500\n\n复现步骤…")).toEqual({
+      summary: "alice 开了 issue #12",
+      title: "登录报错",
       body: "点登录就 500\n\n复现步骤…",
     });
-    expect(splitEvent("CI「CI」通过了（分支 main）\n\n")).toEqual({
-      summary: "CI「CI」通过了（分支 main）",
+    expect(splitEvent("alice 批准了 PR #7\n\n标题：修登录")).toEqual({
+      summary: "alice 批准了 PR #7",
+      title: "修登录",
       body: "",
     });
-    expect(splitEvent("只有一句")).toEqual({ summary: "只有一句", body: "" });
+    expect(splitEvent("CI 通过了\n\n工作流：CI\n分支：main")).toEqual({
+      summary: "CI 通过了",
+      title: "",
+      body: "工作流：CI\n分支：main",
+    });
+    expect(splitEvent("只有一句")).toEqual({ summary: "只有一句", title: "", body: "" });
   });
 });
 
