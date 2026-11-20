@@ -87,8 +87,11 @@ export function applyEvent(state: Workspace, event: Event): Workspace {
     case "link.created": {
       const link = event.payload as Link;
       // 一个仓库、一个聊天只连一个房间：改连到别的房间时，原来那条换掉。
+      if (state.links.some((l) => l.id === link.id)) {
+        return { ...state, links: state.links.map((l) => (l.id === link.id ? link : l)) };
+      }
       const others = state.links.filter(
-        (l) => l.id !== link.id && !(l.source === link.source && l.external === link.external),
+        (l) => !(l.source === link.source && l.external === link.external),
       );
       return { ...state, links: [...others, link] };
     }
