@@ -9,7 +9,7 @@ use sa_protocol::{
     MessageState, Report, RoomId, Run, RunId, RunState, Sender, SessionId, Task, TaskId, TaskState,
 };
 use sa_store::tasks::{self, Workdir};
-use sa_store::{bots, events, rooms, sessions, Transaction};
+use sa_store::{bots, effects, events, rooms, sessions, Transaction};
 
 pub const MAX_TASK_TITLE_CHARS: usize = 80;
 pub const MAX_TASK_TEXT_CHARS: usize = 8_000;
@@ -216,6 +216,27 @@ impl Engine {
     /// 取走人给这个任务的、工作会话还没读到的话。没有时是空字符串。
     pub fn take_task_input(&self, id: &TaskId) -> Result<String> {
         Ok(self.store.write(|tx| tasks::take_input(tx, id))?)
+    }
+
+    /// 对外面做过的事（推送分支、开 PR）当时记下的结果。没做过是 `None`。
+    pub fn effect(&self, key: &str) -> Result<Option<serde_json::Value>> {
+        let found = self.store.read(|c| effects::get(c, key))?;
+        // 读不懂的记录当作没有：宁可再做一次，也不拿坏数据当结果。
+        Ok(found.and_then(|text| serde_json::from_str(&text).ok()))
+    }
+
+    /// 记下一件对外面做完的事。同一件事已经记过就不改。
+    pub fn record_effect(
+        &self,
+        task_id: &TaskId,
+        kind: &str,
+        key: &str,
+        result: &serde_json::Value,
+    ) -> Result<()> {
+        let (now, text) = (now_ms(), result.to_string());
+        self.store
+            .write(|tx| effects::put(tx, key, task_id, kind, &text, now))?;
+        Ok(())
     }
 
     /// 任务是在哪个工作目录里开的。没有记就是 `None`。
@@ -764,5 +785,29 @@ mod tests {
         let mut blank = new_task(&room_id, Some(&bot));
         blank.scope = "  ".into();
         assert!(engine.create_task(blank).is_err());
+    }
+
+    /// 对外面做过的事只记第一次的结果；任务删了，记录跟着没。
+    #[test]
+    fn an_effect_is_recorded_once_and_read_back() {
+        let (engine, room, bot) = engine();
+        let task = engine.create_task(new_task(&room, Some(&bot))).unwrap();
+        let key = format!("open_pr:{}", task.id);
+        assert_eq!(engine.effect(&key).unwrap(), None);
+
+        let first = serde_json::json!({ "url": "https://example.test/pr/1" });
+        engine
+            .record_effect(&task.id, "open_pr", &key, &first)
+            .unwrap();
+        let second = serde_json::json!({ "url": "https://example.test/pr/2" });
+        engine
+            .record_effect(&task.id, "open_pr", &key, &second)
+            .unwrap();
+        assert_eq!(engine.effect(&key).unwrap(), Some(first));
+
+        let missing = TaskId::new();
+        assert!(engine
+            .record_effect(&missing, "open_pr", "open_pr:none", &second)
+            .is_err());
     }
 }

@@ -7,6 +7,7 @@ mod error;
 mod migrate;
 
 pub mod bots;
+pub mod effects;
 pub mod events;
 pub mod messages;
 pub mod rooms;
