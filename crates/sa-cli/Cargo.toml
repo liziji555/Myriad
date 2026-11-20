@@ -10,6 +10,7 @@ name = "sa"
 path = "src/main.rs"
 
 [dependencies]
+chrono.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 dirs.workspace = true

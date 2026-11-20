@@ -1593,6 +1593,7 @@ name = "sa-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "clap",
  "dirs",
  "sa-engine",
