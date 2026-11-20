@@ -67,8 +67,15 @@ function Shell() {
 
   const room = workspace.rooms.find((r) => r.id === selected) ?? workspace.rooms[0];
   const roomChat = room ? workspace.chat.rooms[room.id] : undefined;
-  const replying = roomChat?.messages.some((message) => message.state === "streaming") ?? false;
-  const members = room ? workspace.bots.filter((bot) => room.member_bot_ids.includes(bot.id)) : [];
+  // 有 Bot 在写、在挑人接话之前的空档里有人排着队，都算「正在回复」，可以点停止。
+  const replying =
+    (roomChat?.messages.some((message) => message.state === "streaming") ?? false) ||
+    Boolean(roomChat?.activity?.speaking) ||
+    (roomChat?.activity?.queued.length ?? 0) > 0;
+  // 按进房间的先后排，和服务端一致。
+  const members = room
+    ? room.member_bot_ids.flatMap((id) => workspace.bots.filter((bot) => bot.id === id))
+    : [];
   const showPanel = (next: PanelTab) => {
     setTab(next);
     setPanelOpen(true);
@@ -148,6 +155,8 @@ function Shell() {
           onClose={() => setPanelOpen(false)}
           room={room}
           members={members}
+          bots={workspace.bots}
+          team={workspace.team}
           activity={demoNodes}
         />
       )}
