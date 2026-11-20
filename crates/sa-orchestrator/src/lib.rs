@@ -1,16 +1,26 @@
 //! 编排层：房间里来了消息，找到该接话的 Bot，跑一轮对话，把过程和结果写回房间。
 //!
-//! 每个有活动的房间一个后台任务，房间里的对话一轮一轮串行；不同房间互不等待。
-//! 这一版每个房间只有入口 Bot 会回应。
+//! 每个有活动的房间一个后台任务，房间里的 Bot 一个一个说话；不同房间互不等待。
+//!
+//! 谁来接话：人 `@` 了谁就是谁；没有点名时，房间里只有一个 Bot 就是它，
+//! 有几个就让便宜的模型按分工挑一个（见 [`router`]）。Bot 之间用 `ask_bot` 互相点名，
+//! 次数和转手的上限见 [`episode`]。
 
+mod ask;
+mod episode;
 mod room;
+mod router;
 
+pub use episode::{MAX_BOT_TURNS, MAX_HOP, MAX_PAIR_ASKS};
+
+use episode::Episode;
 use sa_engine::{Engine, EngineError};
 use sa_llm::Provider;
-use sa_protocol::{ApprovalDecision, ApprovalId, Message, ModelTier, RoomId};
+use sa_protocol::{ApprovalDecision, ApprovalId, Bot, BotId, Message, ModelTier, RoomId};
 use sa_tools::{Fence, ToolRegistry};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicI64;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{oneshot, Notify};
@@ -18,6 +28,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 const DEFAULT_PROMPT: &str = include_str!("../prompts/chat.md");
+const TEAM_RULES: &str = include_str!("../prompts/team.md");
 
 /// 一个档位实际用哪个模型。
 #[derive(Clone)]
@@ -79,9 +90,31 @@ pub(crate) struct Shared {
 
 struct RoomHandle {
     wake: Arc<Notify>,
-    /// 正在跑的那一轮的取消开关；空闲时是 `None`。
-    current: Arc<Mutex<Option<CancellationToken>>>,
+    link: Arc<RoomLink>,
     task: JoinHandle<()>,
+}
+
+/// 房间的后台任务和外面（发消息、停止、`ask_bot`）共用的状态。
+pub(crate) struct RoomLink {
+    /// 正在进行的那一步的取消开关，以及是哪个 Bot 在说话（正在挑人接话时是 `None`）。空闲时整个是 `None`。
+    pub current: Mutex<Option<(Option<BotId>, CancellationToken)>>,
+    episode: Mutex<Episode>,
+    /// 人发的消息已经处理到哪一条（`seq`）。`-1` 表示还没从会话记录里算出来。
+    pub handled: AtomicI64,
+}
+
+impl RoomLink {
+    fn new() -> Self {
+        Self {
+            current: Mutex::new(None),
+            episode: Mutex::new(Episode::default()),
+            handled: AtomicI64::new(-1),
+        }
+    }
+
+    pub fn episode(&self) -> std::sync::MutexGuard<'_, Episode> {
+        self.episode.lock().unwrap_or_else(|e| e.into_inner())
+    }
 }
 
 impl Orchestrator {
@@ -120,23 +153,42 @@ impl Orchestrator {
             engine.post_user_message(&room.id, &content)
         })
         .await?;
+        // 点名找的不是正在说话的那个 Bot：打断它，让被点到的来接。
+        // 没有点名、或者点的就是它：不打断，它在下一步会看到这条新消息。
+        if let Some(target) = message.mentions.first() {
+            let rooms = self.rooms.lock().unwrap();
+            if let Some(handle) = rooms.get(room_id) {
+                let current = handle.link.current.lock().unwrap();
+                if let Some((speaking, cancel)) = current.as_ref() {
+                    if speaking.as_ref() != Some(target) {
+                        cancel.cancel();
+                    }
+                }
+            }
+        }
         self.wake(room_id);
         Ok(message)
     }
 
-    /// 停下房间里正在进行的回复。返回是否真的有东西被停下。
+    /// 停下房间里正在进行的回复，排着队的 Bot 也不再说话。返回是否真的有东西被停下。
     pub fn stop(&self, room_id: &RoomId) -> bool {
         let rooms = self.rooms.lock().unwrap();
         let Some(handle) = rooms.get(room_id) else {
             return false;
         };
-        let current = handle.current.lock().unwrap();
+        let queued = {
+            let mut episode = handle.link.episode();
+            let queued = !episode.queued().is_empty();
+            episode.clear_queue();
+            queued
+        };
+        let current = handle.link.current.lock().unwrap();
         match current.as_ref() {
-            Some(cancel) => {
+            Some((_, cancel)) => {
                 cancel.cancel();
                 true
             }
-            None => false,
+            None => queued,
         }
     }
 
@@ -168,31 +220,63 @@ impl Orchestrator {
         let mut rooms = self.rooms.lock().unwrap();
         let handle = rooms.entry(room_id.clone()).or_insert_with(|| {
             let wake = Arc::new(Notify::new());
-            let current = Arc::new(Mutex::new(None));
+            let link = Arc::new(RoomLink::new());
             let task = tokio::spawn(room::run(
                 self.shared.clone(),
                 room_id.clone(),
                 wake.clone(),
-                current.clone(),
+                link.clone(),
             ));
-            RoomHandle {
-                wake,
-                current,
-                task,
-            }
+            RoomHandle { wake, link, task }
         });
         // notify_one 会存一个许可：房间正忙时也不会漏掉这次唤醒。
         handle.wake.notify_one();
     }
 }
 
-pub(crate) fn render_prompt(settings: &Settings, bot_name: &str) -> String {
-    settings
-        .prompt
-        .as_deref()
-        .unwrap_or(DEFAULT_PROMPT)
-        .replace("{bot_name}", bot_name)
+/// 这个 Bot 在这个房间里的系统提示词。`others` 是房间里别的 Bot。
+///
+/// 自定义的提示词里没有写 `{persona}`、`{team}` 时，这两段接在最后：换了提示词，协作规则也不会丢。
+pub(crate) fn render_prompt(settings: &Settings, bot: &Bot, others: &[Bot]) -> String {
+    let template = settings.prompt.as_deref().unwrap_or(DEFAULT_PROMPT);
+    let persona = if bot.persona.is_empty() {
+        String::new()
+    } else {
+        format!("你的分工和人设：\n{}", bot.persona)
+    };
+    let team = if others.is_empty() {
+        String::new()
+    } else {
+        let mut members = String::new();
+        for other in others {
+            let role: String = other
+                .persona
+                .lines()
+                .next()
+                .unwrap_or("")
+                .chars()
+                .take(100)
+                .collect();
+            let role = if role.is_empty() {
+                "（没有写分工）"
+            } else {
+                &role
+            };
+            members.push_str(&format!("- {}：{role}\n", other.name));
+        }
+        TEAM_RULES.replace("{members}", members.trim_end())
+    };
+    let mut prompt = template
+        .replace("{bot_name}", &bot.name)
         .replace("{workspace}", &settings.fence.root_display())
+        .replace("{persona}", &persona)
+        .replace("{team}", &team);
+    for (placeholder, block) in [("{persona}", persona), ("{team}", team)] {
+        if !template.contains(placeholder) && !block.is_empty() {
+            prompt = format!("{}\n\n{block}", prompt.trim_end());
+        }
+    }
+    prompt.trim_end().to_string() + "\n"
 }
 
 /// 所有档位都用同一个模型。测试和 `--mock` 用。

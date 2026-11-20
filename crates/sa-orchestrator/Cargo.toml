@@ -7,11 +7,13 @@ license.workspace = true
 
 [dependencies]
 async-trait.workspace = true
+futures-util.workspace = true
 sa-engine.workspace = true
 sa-kernel.workspace = true
 sa-llm.workspace = true
 sa-protocol.workspace = true
 sa-tools.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

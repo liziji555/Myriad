@@ -1,6 +1,8 @@
-//! 一个房间的后台任务：有新消息就跑一轮，跑完再看有没有新的。
+//! 一个房间的后台任务：有新消息就决定谁来接，让它跑一轮；它找了别的 Bot 就接着让那个 Bot 跑。
 
-use crate::{render_prompt, Shared};
+use crate::ask::AskBotTool;
+use crate::episode::Job;
+use crate::{render_prompt, router, RoomLink, Shared};
 use async_trait::async_trait;
 use sa_engine::{EngineError, UsageRecord};
 use sa_kernel::{
@@ -8,14 +10,22 @@ use sa_kernel::{
 };
 use sa_llm::{RetryPolicy, Usage};
 use sa_protocol::{
-    ApprovalDecision, ApprovalId, Bot, MessageId, MessageState, RoomId, SessionId, StepApproval,
-    StepState, ToolStep,
+    ApprovalDecision, ApprovalId, Bot, BotId, Message, MessageId, MessageState, Room, RoomActivity,
+    RoomId, Sender, SessionId, StepApproval, StepState, ToolStep,
 };
 use sa_tools::{Fence, ToolCtx};
 use serde_json::Value;
+use std::collections::HashMap;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use tokio::sync::Notify;
-use tokio_util::sync::CancellationToken;
+
+/// Bot 表示「这次我不说话」的写法。
+const PASS: &str = "(pass)";
+/// 挑人接话时给路由看最近这么多条消息。
+const ROUTER_CONTEXT: u32 = 12;
+
+type Sessions = HashMap<BotId, (SessionId, Transcript)>;
 
 /// 在阻塞线程上做数据库操作。
 pub(crate) async fn db<T: Send + 'static>(
@@ -30,73 +40,213 @@ pub(crate) async fn run(
     shared: Arc<Shared>,
     room_id: RoomId,
     wake: Arc<Notify>,
-    current: Arc<Mutex<Option<CancellationToken>>>,
+    link: Arc<RoomLink>,
 ) {
-    let mut session: Option<(SessionId, Transcript)> = None;
+    // 每个 Bot 在这个房间里的会话记录，在这个房间任务的生命周期里只打开一次。
+    let mut sessions = Sessions::new();
     loop {
         tokio::select! {
             _ = wake.notified() => {}
             _ = shared.shutdown.cancelled() => return,
         }
-        // 一轮结束后如果期间又来了新消息，接着再跑；出错就停下等下一次唤醒，避免原地打转。
-        loop {
-            match turn(&shared, &room_id, &mut session, &current).await {
-                Ok(true) if !shared.shutdown.is_cancelled() => continue,
-                Ok(_) => break,
-                Err(error) => {
-                    tracing::error!(room = %room_id, "这一轮没跑成：{error}");
-                    break;
-                }
-            }
+        // 出错就停下等下一次唤醒，避免原地打转。
+        if let Err(error) = work(&shared, &room_id, &link, &mut sessions).await {
+            tracing::error!(room = %room_id, "这一轮没跑成：{error}");
         }
+        announce(&shared, &room_id, &link, None).await;
     }
 }
 
-/// 跑一轮。返回 `Ok(true)` 表示正常跑完了，可以再看一眼有没有新消息。
-async fn turn(
+/// 把手头的事做完：新来的人类消息决定由谁接，然后排着队的 Bot 一个一个说，直到没有人要说话。
+async fn work(
     shared: &Arc<Shared>,
     room_id: &RoomId,
-    session: &mut Option<(SessionId, Transcript)>,
-    current: &Mutex<Option<CancellationToken>>,
-) -> Result<bool, String> {
-    let engine = shared.engine.clone();
-    let room = room_id.clone();
-    let (bot, session_id) = db(move || {
-        let room = engine.get_room(&room)?;
-        let bot_id = room
-            .host_bot_id
-            .ok_or_else(|| EngineError::Invalid("房间里没有 Bot".into()))?;
-        let bot = engine.get_bot(&bot_id)?;
-        let session_id = engine.ensure_front_session(&room.id, &bot_id)?;
-        Ok((bot, session_id))
-    })
-    .await
-    .map_err(|e| e.to_string())?;
+    link: &Arc<RoomLink>,
+    sessions: &mut Sessions,
+) -> Result<(), String> {
+    while !shared.shutdown.is_cancelled() {
+        let engine = shared.engine.clone();
+        let id = room_id.clone();
+        let (room, members) = db(move || {
+            let room = engine.get_room(&id)?;
+            // 按进房间的先后排。
+            let all = engine.list_bots()?;
+            let members: Vec<Bot> = room
+                .member_bot_ids
+                .iter()
+                .filter_map(|id| all.iter().find(|bot| &bot.id == id && bot.enabled).cloned())
+                .collect();
+            Ok((room, members))
+        })
+        .await
+        .map_err(|e| e.to_string())?;
 
-    // 会话记录在这个房间任务的生命周期里只打开一次。
-    if session.as_ref().is_none_or(|(id, _)| id != &session_id) {
+        if link.handled.load(Ordering::SeqCst) < 0 {
+            // 刚启动：哪些人类消息已经有 Bot 看过，从会话记录里算。
+            let mut seen = 0;
+            for bot in &members {
+                match session_of(shared, room_id, &bot.id, sessions).await {
+                    Ok((_, transcript)) => seen = seen.max(transcript.last_message_seq()),
+                    Err(error) => tracing::warn!(room = %room_id, "会话记录打不开：{error}"),
+                }
+            }
+            link.handled.store(seen, Ordering::SeqCst);
+        }
+
+        let engine = shared.engine.clone();
+        let (id, after) = (room_id.clone(), link.handled.load(Ordering::SeqCst));
+        let fresh = db(move || engine.user_messages_after(&id, after))
+            .await
+            .map_err(|e| e.to_string())?;
+        if let Some(last) = fresh.last() {
+            link.handled.fetch_max(last.seq, Ordering::SeqCst);
+            let first = dispatch(shared, &room, &members, &fresh, link).await;
+            // 人说了新的话：之前排着队的不算了，重新开始一轮。
+            link.episode()
+                .restart(first.map(|bot_id| Job { bot_id, hop: 0 }));
+        }
+
+        let Some(job) = link.episode().next() else {
+            return Ok(());
+        };
+        // 排队的时候它还在，现在可能已经被请出房间或者停用了。
+        let Some(bot) = members.iter().find(|bot| bot.id == job.bot_id).cloned() else {
+            continue;
+        };
+        let others: Vec<Bot> = members
+            .into_iter()
+            .filter(|other| other.id != bot.id)
+            .collect();
+        turn(shared, room_id, &bot, job.hop, &others, link, sessions).await?;
+    }
+    Ok(())
+}
+
+/// 新来的人类消息由谁接。点了名的听点名的，没点名的由路由挑。
+async fn dispatch(
+    shared: &Arc<Shared>,
+    room: &Room,
+    members: &[Bot],
+    fresh: &[Message],
+    link: &Arc<RoomLink>,
+) -> Option<BotId> {
+    let is_member = |id: &BotId| members.iter().any(|bot| &bot.id == id);
+    // 攒了几条时，以最后一条点了名的为准。
+    let mentioned = fresh
+        .iter()
+        .rev()
+        .find_map(|message| message.mentions.iter().find(|id| is_member(id)));
+    if let Some(bot_id) = mentioned {
+        return Some(bot_id.clone());
+    }
+    let latest = fresh.last()?;
+    let fallback = room
+        .host_bot_id
+        .clone()
+        .filter(|id| is_member(id))
+        .or_else(|| members.first().map(|bot| bot.id.clone()));
+    let Some(fallback) = fallback else {
+        // 房间里没有能说话的 Bot：放一条失败的回复说明原因。
+        if let Some(host) = &room.host_bot_id {
+            let reason = "房间里的 Bot 都停用了，没有人能回应。请在成员面板里启用一个。";
+            fail_fast(shared, &room.id, host, reason.into()).await;
+        }
+        return None;
+    };
+
+    let engine = shared.engine.clone();
+    let id = room.id.clone();
+    let recent = db(move || engine.list_messages(&id, None, ROUTER_CONTEXT))
+        .await
+        .map(|page| page.messages)
+        .unwrap_or_default();
+    let cancel = shared.shutdown.child_token();
+    *link.current.lock().unwrap() = Some((None, cancel.clone()));
+    let chosen = router::route(
+        shared, &room.id, members, &fallback, &recent, latest, &cancel,
+    )
+    .await;
+    *link.current.lock().unwrap() = None;
+    chosen
+}
+
+/// 打开（或取出已经打开的）某个 Bot 在这个房间里的会话记录。
+async fn session_of<'a>(
+    shared: &Arc<Shared>,
+    room_id: &RoomId,
+    bot_id: &BotId,
+    sessions: &'a mut Sessions,
+) -> Result<&'a mut (SessionId, Transcript), String> {
+    if !sessions.contains_key(bot_id) {
+        let engine = shared.engine.clone();
+        let (room, bot) = (room_id.clone(), bot_id.clone());
+        let session_id = db(move || engine.ensure_front_session(&room, &bot))
+            .await
+            .map_err(|e| e.to_string())?;
         let path = shared
             .settings
             .sessions_dir
             .join(format!("{session_id}.jsonl"));
-        match Transcript::open(&path) {
-            Ok(transcript) => *session = Some((session_id.clone(), transcript)),
-            Err(error) => {
-                fail_fast(shared, room_id, &bot, error.to_string()).await;
-                return Ok(false);
-            }
-        }
+        let transcript = Transcript::open(&path).map_err(|e| e.to_string())?;
+        sessions.insert(bot_id.clone(), (session_id, transcript));
     }
-    let (_, transcript) = session.as_mut().expect("上面刚放进去");
+    Ok(sessions.get_mut(bot_id).expect("上面刚放进去"))
+}
 
+/// 告诉外面房间里现在谁在说话、谁在排队。
+async fn announce(
+    shared: &Arc<Shared>,
+    room_id: &RoomId,
+    link: &RoomLink,
+    speaking: Option<&BotId>,
+) {
+    let activity = RoomActivity {
+        room_id: room_id.clone(),
+        speaking: speaking.cloned(),
+        queued: link.episode().queued(),
+        handled_seq: link.handled.load(Ordering::SeqCst).max(0),
+    };
+    let engine = shared.engine.clone();
+    if let Err(error) = db(move || engine.record_activity(&activity)).await {
+        tracing::error!(room = %room_id, "房间动态没发出去：{error}");
+    }
+}
+
+/// 让一个 Bot 说一轮。`hop` 是这次发言在 Bot 之间转到了第几手，`others` 是房间里别的 Bot。
+async fn turn(
+    shared: &Arc<Shared>,
+    room_id: &RoomId,
+    bot: &Bot,
+    hop: u32,
+    others: &[Bot],
+    link: &Arc<RoomLink>,
+    sessions: &mut Sessions,
+) -> Result<(), String> {
+    let (session_id, transcript) = match session_of(shared, room_id, &bot.id, sessions).await {
+        Ok((session_id, transcript)) => (session_id.clone(), transcript),
+        Err(error) => {
+            fail_fast(shared, room_id, &bot.id, error).await;
+            return Err("会话记录打不开".into());
+        }
+    };
+
+    let mut names: HashMap<BotId, String> = others
+        .iter()
+        .map(|other| (other.id.clone(), other.name.clone()))
+        .collect();
+    names.insert(bot.id.clone(), bot.name.clone());
     let mut inbox = RoomInbox {
         shared: shared.clone(),
+        link: link.clone(),
         room_id: room_id.clone(),
+        bot_id: bot.id.clone(),
+        names,
+        solo: others.is_empty(),
         last_seq: transcript.last_message_seq(),
     };
     let first = inbox.drain().await;
     if first.is_empty() {
-        return Ok(false);
+        return Ok(());
     }
     let mut inbox = Primed {
         first: Some(first),
@@ -105,13 +255,23 @@ async fn turn(
 
     let engine = shared.engine.clone();
     let (room, bot_id) = (room_id.clone(), bot.id.clone());
-    let draft = db(move || engine.begin_bot_message(&room, &bot_id, 0))
+    let draft = db(move || engine.begin_bot_message(&room, &bot_id, hop))
         .await
         .map_err(|e| e.to_string())?;
 
     let cancel = shared.shutdown.child_token();
-    *current.lock().unwrap() = Some(cancel.clone());
+    *link.current.lock().unwrap() = Some((Some(bot.id.clone()), cancel.clone()));
+    announce(shared, room_id, link, Some(&bot.id)).await;
 
+    let observer = RoomObserver {
+        shared: shared.clone(),
+        room_id: room_id.clone(),
+        bot: bot.clone(),
+        session_id: session_id.clone(),
+        message_id: draft.id.clone(),
+        steps: Mutex::new(vec![]),
+        held: Mutex::new(Some(String::new())),
+    };
     let outcome = match shared.models.resolve(bot.tier) {
         Err(reason) => {
             // 模型用不了：这一轮的输入照样记进会话，配置好之后接着聊时模型能看到。
@@ -121,7 +281,7 @@ async fn turn(
         Ok(model) => {
             let config = TurnConfig {
                 model: model.model.clone(),
-                system_prompt: render_prompt(&shared.settings, &bot.name),
+                system_prompt: render_prompt(&shared.settings, bot, others),
                 max_steps: shared.settings.max_steps,
                 max_tokens: None,
                 thinking: model.thinking,
@@ -138,18 +298,21 @@ async fn turn(
             };
             let mut ctx = ToolCtx::new(shared.settings.fence.clone());
             ctx.allow_private_network = shared.settings.allow_private_network;
-            let observer = RoomObserver {
-                shared: shared.clone(),
-                room_id: room_id.clone(),
-                bot: bot.clone(),
-                session_id: session_id.clone(),
-                message_id: draft.id.clone(),
-                steps: Mutex::new(vec![]),
-            };
+            // 房间里有别的 Bot 时才给它「找别的 Bot」这个工具。
+            let mut tools = shared.tools.clone();
+            if !others.is_empty() {
+                tools.register(AskBotTool {
+                    shared: shared.clone(),
+                    link: link.clone(),
+                    room_id: room_id.clone(),
+                    from: bot.clone(),
+                    hop,
+                });
+            }
             let outcome = run_turn(
                 transcript,
                 model.provider.as_ref(),
-                &shared.tools,
+                &tools,
                 &ctx,
                 &config,
                 &mut inbox,
@@ -161,7 +324,7 @@ async fn turn(
             Ok(outcome.end)
         }
     };
-    *current.lock().unwrap() = None;
+    *link.current.lock().unwrap() = None;
 
     let (state, error) = match outcome {
         Ok(TurnEnd::Completed) => (MessageState::Complete, None),
@@ -193,12 +356,30 @@ async fn turn(
         ),
         Ok(TurnEnd::Failed(reason)) | Err(reason) => (MessageState::Failed, Some(reason)),
     };
-    let finished_ok = state == MessageState::Complete;
+
+    // 它决定不说话：没做过任何事就把这条空的回复撤掉，做过事（有工具步骤）就留着步骤、不留字。
+    let silent = observer.release_held(state == MessageState::Complete);
     let engine = shared.engine.clone();
-    db(move || engine.finish_message(&draft.id, state, error))
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(finished_ok)
+    let has_steps = !observer.steps.lock().unwrap().is_empty();
+    let finished = db(move || {
+        if silent && !has_steps {
+            engine.discard_message(&draft.id).map(|()| None)
+        } else {
+            engine.finish_message(&draft.id, state, error).map(Some)
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    if let Some(message) = finished {
+        link.episode().remember(&message.content);
+    }
+    if state == MessageState::Complete {
+        Ok(())
+    } else {
+        // 没正常说完（出错、被停下）：这一轮交流到此为止，排着队的也不再说。
+        link.episode().clear_queue();
+        Err(format!("{} 的回复没有正常结束", bot.name))
+    }
 }
 
 fn record_inputs(transcript: &mut Transcript, inputs: Vec<UserInput>) -> Result<(), String> {
@@ -214,10 +395,10 @@ fn record_inputs(transcript: &mut Transcript, inputs: Vec<UserInput>) -> Result<
     Ok(())
 }
 
-/// 还没开始就失败（会话记录打不开）：直接放一条失败的回复，让人在界面上看到原因。
-async fn fail_fast(shared: &Arc<Shared>, room_id: &RoomId, bot: &Bot, reason: String) {
+/// 还没开始就失败（比如会话记录打不开）：直接放一条失败的回复，让人在界面上看到原因。
+async fn fail_fast(shared: &Arc<Shared>, room_id: &RoomId, bot_id: &BotId, reason: String) {
     let engine = shared.engine.clone();
-    let (room, bot_id) = (room_id.clone(), bot.id.clone());
+    let (room, bot_id) = (room_id.clone(), bot_id.clone());
     let result = db(move || {
         let draft = engine.begin_bot_message(&room, &bot_id, 0)?;
         engine.finish_message(&draft.id, MessageState::Failed, Some(reason))
@@ -228,10 +409,16 @@ async fn fail_fast(shared: &Arc<Shared>, room_id: &RoomId, bot: &Bot, reason: St
     }
 }
 
-/// 房间里还没进过会话的人类消息。
+/// 房间里这个 Bot 还没看过的消息：人说的，和别的 Bot 说的。
 struct RoomInbox {
     shared: Arc<Shared>,
+    link: Arc<RoomLink>,
     room_id: RoomId,
+    bot_id: BotId,
+    /// 房间里每个 Bot 的名字。
+    names: HashMap<BotId, String>,
+    /// 房间里只有它一个 Bot：人说的话原样给它，不加「是谁说的」。
+    solo: bool,
     last_seq: i64,
 }
 
@@ -240,24 +427,58 @@ impl Inbox for RoomInbox {
     async fn drain(&mut self) -> Vec<UserInput> {
         let engine = self.shared.engine.clone();
         let (room, after) = (self.room_id.clone(), self.last_seq);
-        let messages = match db(move || engine.user_messages_after(&room, after)).await {
+        let messages = match db(move || engine.messages_after(&room, after)).await {
             Ok(messages) => messages,
             Err(error) => {
                 tracing::error!(room = %self.room_id, "取不到新消息：{error}");
                 return vec![];
             }
         };
-        if let Some(last) = messages.last() {
-            self.last_seq = last.seq;
-        }
-        messages
-            .into_iter()
-            .map(|message| UserInput {
-                content: message.content,
+        let mut inputs = vec![];
+        for message in messages {
+            let speaker = match &message.sender {
+                Sender::User => None,
+                // 自己说过的话已经在自己的会话记录里了。
+                Sender::Bot { bot_id } if bot_id == &self.bot_id => {
+                    if message.state == MessageState::Streaming {
+                        continue;
+                    }
+                    self.last_seq = message.seq;
+                    continue;
+                }
+                Sender::Bot { bot_id } => {
+                    Some(self.names.get(bot_id).map_or("另一个 Bot", String::as_str))
+                }
+            };
+            // 别人还没写完的不看，也不越过它：等它写完了再一起看。
+            if message.state == MessageState::Streaming {
+                break;
+            }
+            self.last_seq = message.seq;
+            if message.content.trim().is_empty() {
+                continue;
+            }
+            if speaker.is_none() {
+                // 正在说话的 Bot 看到了这条人类消息：不用再另外挑人来接。
+                self.link.handled.fetch_max(message.seq, Ordering::SeqCst);
+            }
+            let to_me = if message.mentions.contains(&self.bot_id) {
+                "（对你说）"
+            } else {
+                ""
+            };
+            let content = match speaker {
+                None if self.solo => message.content,
+                None => format!("【用户{to_me}】{}", message.content),
+                Some(name) => format!("【{name}{to_me}】{}", message.content),
+            };
+            inputs.push(UserInput {
+                content,
                 message_id: Some(message.id.to_string()),
                 message_seq: Some(message.seq),
-            })
-            .collect()
+            });
+        }
+        inputs
     }
 }
 
@@ -285,9 +506,26 @@ struct RoomObserver {
     session_id: SessionId,
     message_id: MessageId,
     steps: Mutex<Vec<ToolStep>>,
+    /// 回复开头还分不清是不是 `(pass)` 的那几个字，先扣着不显示，免得界面上闪一下。
+    /// 一旦确定不是，就变成 `None`，之后的字直接显示。
+    held: Mutex<Option<String>>,
 }
 
 impl RoomObserver {
+    /// 一轮结束时处理扣着的字。返回这一轮是不是「不说话」：正常结束，而且说的只有 `(pass)` 或者什么都没说。
+    /// 不是的话，把扣着的字补显示出来。
+    fn release_held(&self, completed: bool) -> bool {
+        let Some(held) = self.held.lock().unwrap().take() else {
+            return false;
+        };
+        let said = held.trim();
+        if completed && (said.is_empty() || said == PASS) {
+            return true;
+        }
+        self.shared.engine.append_delta(&self.message_id, &held);
+        false
+    }
+
     async fn save_steps(&self) {
         let steps = self.steps.lock().unwrap().clone();
         let engine = self.shared.engine.clone();
@@ -328,7 +566,21 @@ impl RoomObserver {
 #[async_trait]
 impl Observer for RoomObserver {
     async fn text_delta(&self, text: &str) {
-        self.shared.engine.append_delta(&self.message_id, text);
+        let mut held = self.held.lock().unwrap();
+        let Some(buffer) = held.as_mut() else {
+            drop(held);
+            self.shared.engine.append_delta(&self.message_id, text);
+            return;
+        };
+        buffer.push_str(text);
+        let said = buffer.trim();
+        // 到目前为止还可能是 `(pass)`：接着扣。
+        if PASS.starts_with(said) {
+            return;
+        }
+        let all = held.take().expect("上面刚看过");
+        drop(held);
+        self.shared.engine.append_delta(&self.message_id, &all);
     }
 
     async fn tool_started(&self, call_id: &str, tool: &str, title: &str) {
@@ -427,8 +679,8 @@ impl Observer for RoomObserver {
     async fn usage(&self, model: &str, usage: Usage) {
         let record = UsageRecord {
             room_id: self.room_id.clone(),
-            bot_id: self.bot.id.clone(),
-            session_id: self.session_id.clone(),
+            bot_id: Some(self.bot.id.clone()),
+            session_id: Some(self.session_id.clone()),
             model: model.to_string(),
             in_tokens: usage.input_tokens as i64,
             out_tokens: usage.output_tokens as i64,

@@ -15,8 +15,9 @@ pub const MAX_PAGE: u32 = 200;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsageRecord {
     pub room_id: RoomId,
-    pub bot_id: BotId,
-    pub session_id: SessionId,
+    /// 哪个 Bot 花的。决定谁来接话的那次调用不属于任何 Bot。
+    pub bot_id: Option<BotId>,
+    pub session_id: Option<SessionId>,
     pub model: String,
     pub in_tokens: i64,
     pub out_tokens: i64,
@@ -347,8 +348,8 @@ impl Engine {
     pub fn record_usage(&self, record: UsageRecord) -> Result<()> {
         let row = usage::UsageRow {
             room_id: Some(record.room_id),
-            bot_id: Some(record.bot_id),
-            session_id: Some(record.session_id),
+            bot_id: record.bot_id,
+            session_id: record.session_id,
             model: record.model,
             in_tokens: record.in_tokens,
             out_tokens: record.out_tokens,

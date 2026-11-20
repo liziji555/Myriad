@@ -8,7 +8,7 @@ use sa_llm::MockProvider;
 use sa_orchestrator::{Orchestrator, ResolvedModel, Settings, SingleModel};
 use sa_protocol::{
     ApiError, Bot, Event, EventKind, Health, Message, MessageDelta, MessagePage, MessageState,
-    PermissionRule, Room, Sender, StepState, StopResponse, StreamReady,
+    PermissionRule, Room, RoomActivity, Sender, StepState, StopResponse, StreamReady,
 };
 use sa_server::{router, AppState};
 use sa_store::Store;
@@ -361,10 +361,10 @@ async fn post_message_streams_a_reply_over_sse() {
     assert_eq!(reply.state, MessageState::Complete);
     assert!(!reply.content.is_empty());
 
-    // 事件流里：ready、用户消息、Bot 消息创建、定稿，外加每段文字一个片段。
+    // 事件流里：ready、用户消息、Bot 消息创建、「它在说话」、定稿、「没人说话了」，外加每段文字一个片段。
     // 落库的事件之间保持顺序；片段和事件之间不保证先后，靠版本号对齐。
     let deltas = reply.rev as usize - 1;
-    let frames = read_sse(stream, 4 + deltas).await;
+    let frames = read_sse(stream, 6 + deltas).await;
     assert!(frames[0].contains("event: ready"));
     let (pieces, events): (Vec<_>, Vec<_>) = frames[1..]
         .iter()
@@ -377,9 +377,22 @@ async fn post_message_streams_a_reply_over_sse() {
         [
             EventKind::MessageCreated,
             EventKind::MessageCreated,
-            EventKind::MessageUpdated
+            EventKind::RoomActivity,
+            EventKind::MessageUpdated,
+            EventKind::RoomActivity
         ]
     );
+    let (activity, events): (Vec<_>, Vec<_>) = events
+        .into_iter()
+        .partition(|e| e.kind == EventKind::RoomActivity);
+    let activity: Vec<RoomActivity> = activity
+        .into_iter()
+        .map(|e| serde_json::from_value(e.payload).unwrap())
+        .collect();
+    assert_eq!(activity[0].speaking, room.host_bot_id);
+    assert_eq!(activity[1].speaking, None);
+    assert!(activity[1].queued.is_empty());
+    assert_eq!(activity[1].handled_seq, sent.seq);
     let payloads: Vec<Message> = events
         .into_iter()
         .map(|e| serde_json::from_value(e.payload).unwrap())
