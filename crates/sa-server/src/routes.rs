@@ -8,10 +8,11 @@ use axum::Json;
 use sa_engine::{BotPatch, Engine, EngineError, RoutinePatch};
 use sa_protocol::{
     ApprovalId, Bot, BotId, CreateBotRequest, CreateLinkRequest, CreateRoomRequest,
-    CreateRoutineRequest, CreateTaskRequest, DecideApprovalRequest, Health, Link, LinkId, Message,
-    MessagePage, ModelTier, Notice, NoticeId, Pairing, PermissionRule, PostMessageRequest, Room,
-    RoomId, Routine, RoutineId, RuleId, StopResponse, Task, TaskActionRequest, TaskDetail, TaskId,
-    UpdateBotRequest, UpdateRoomRequest, UpdateRoutineRequest, UsageSummary,
+    CreateRoutineRequest, CreateTaskRequest, DecideApprovalRequest, Extensions, Health, Link,
+    LinkId, Message, MessagePage, ModelTier, Notice, NoticeId, Pairing, PermissionRule,
+    PostMessageRequest, Room, RoomId, Routine, RoutineId, RuleId, StopResponse, Task,
+    TaskActionRequest, TaskDetail, TaskId, UpdateBotRequest, UpdateRoomRequest,
+    UpdateRoutineRequest, UsageSummary,
 };
 use serde::Deserialize;
 
@@ -443,6 +444,15 @@ pub async fn create_pairing(
     let mut pairing = blocking(&state, move |engine| engine.create_pairing(&room_id)).await?;
     pairing.bot_username = state.orchestrator.telegram_username();
     Ok((StatusCode::CREATED, Json(pairing)))
+}
+
+/// 现在有哪些技能、哪些外部 MCP 服务。技能每次都从磁盘上重新读。
+pub async fn extensions(State(state): State<AppState>) -> Result<Json<Extensions>, AppError> {
+    let orchestrator = state.orchestrator.clone();
+    let found = tokio::task::spawn_blocking(move || orchestrator.extensions())
+        .await
+        .map_err(AppError::internal)?;
+    Ok(Json(found))
 }
 
 pub async fn api_not_found() -> AppError {

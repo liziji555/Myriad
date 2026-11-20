@@ -49,6 +49,10 @@ impl AppState {
         }
     }
 
+    pub fn orchestrator(&self) -> Arc<Orchestrator> {
+        self.orchestrator.clone()
+    }
+
     /// 打开 `/hooks/github`：用 `secret` 验签名。
     pub fn with_github_hook(mut self, secret: &str, options: github_events::Options) -> Self {
         self.github_hook = Some(Arc::new(GithubHook {
@@ -113,6 +117,7 @@ pub fn router(state: AppState) -> Router {
         .route("/links", get(routes::list_links).post(routes::create_link))
         .route("/links/{link_id}", delete(routes::delete_link))
         .route("/rooms/{room_id}/pairing", post(routes::create_pairing))
+        .route("/extensions", get(routes::extensions))
         .route("/events", get(sse::events))
         .fallback(routes::api_not_found)
         .layer(middleware::from_fn_with_state(

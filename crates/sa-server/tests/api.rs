@@ -1141,3 +1141,36 @@ async fn github_deliveries_are_verified_and_taken_once() {
     let linked = engine.redeem_pairing(&pairing.code, "42", "张三").unwrap();
     assert_eq!(linked.unwrap().room_id, room.id);
 }
+
+#[tokio::test]
+async fn extensions_list_skills_from_disk_each_time() {
+    let dir = tempfile::tempdir().unwrap();
+    let skills = dir.path().join("skills");
+    let orchestrator = Arc::new(std::sync::Mutex::new(None));
+    let slot = orchestrator.clone();
+    let (app, _) = app_with(move |state| {
+        *slot.lock().unwrap() = Some(state.orchestrator());
+        state
+    });
+    let found: sa_protocol::Extensions =
+        json(app.clone().oneshot(get("/api/extensions")).await.unwrap()).await;
+    assert_eq!(found, sa_protocol::Extensions::default());
+
+    let orchestrator = orchestrator.lock().unwrap().clone().unwrap();
+    orchestrator.use_skills(skills.clone());
+    std::fs::create_dir_all(&skills).unwrap();
+    std::fs::write(skills.join("review.md"), "# 代码评审\n先看测试。\n").unwrap();
+    std::fs::write(skills.join("bad name.md"), "正文").unwrap();
+    let found: sa_protocol::Extensions =
+        json(app.clone().oneshot(get("/api/extensions")).await.unwrap()).await;
+    assert_eq!(found.skills.len(), 1);
+    assert_eq!(found.skills[0].name, "review");
+    assert_eq!(found.skills[0].description, "代码评审");
+    assert_eq!(found.skill_problems.len(), 1);
+    assert!(found.mcp.is_empty());
+
+    // 没带访问令牌的看不到。
+    let anonymous = Request::get("/api/extensions").body(Body::empty()).unwrap();
+    let response = app.oneshot(anonymous).await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
