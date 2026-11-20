@@ -41,8 +41,9 @@ const SUMS: &str = "COALESCE(SUM(u.cost_micros), 0), COALESCE(SUM(u.in_tokens), 
 
 pub fn insert(conn: &Connection, row: &UsageRow) -> Result<()> {
     conn.execute(
-        "INSERT INTO usage (room_id, bot_id, session_id, model, in_tokens, out_tokens, cached_tokens, cost_micros, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        // 是哪个任务花的在这时就记死：会话以后可能跟着 Bot 一起被删。
+        "INSERT INTO usage (room_id, bot_id, session_id, model, in_tokens, out_tokens, cached_tokens, cost_micros, created_at, task_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, (SELECT task_id FROM sessions WHERE id = ?3))",
         params![
             row.room_id.as_ref().map(RoomId::as_str),
             row.bot_id.as_ref().map(BotId::as_str),
@@ -79,9 +80,7 @@ pub fn cost_since(conn: &Connection, since: Millis) -> Result<i64> {
 /// 一个任务从开始到现在一共花了多少（它派出去的子代理也算）。
 pub fn task_cost(conn: &Connection, task_id: &TaskId) -> Result<i64> {
     Ok(conn.query_row(
-        "SELECT COALESCE(SUM(u.cost_micros), 0) FROM usage u
-         JOIN sessions s ON s.id = u.session_id
-         WHERE s.task_id = ?1",
+        "SELECT COALESCE(SUM(cost_micros), 0) FROM usage WHERE task_id = ?1",
         [task_id.as_str()],
         |row| row.get(0),
     )?)
@@ -90,10 +89,9 @@ pub fn task_cost(conn: &Connection, task_id: &TaskId) -> Result<i64> {
 /// 每个任务从开始到现在一共花了多少。一次模型都没调用过的任务不在里面。
 pub fn task_costs(conn: &Connection) -> Result<Vec<(TaskId, i64)>> {
     let mut stmt = conn.prepare(
-        "SELECT s.task_id, SUM(u.cost_micros) FROM usage u
-         JOIN sessions s ON s.id = u.session_id
-         WHERE s.task_id IS NOT NULL
-         GROUP BY s.task_id",
+        "SELECT task_id, SUM(cost_micros) FROM usage
+         WHERE task_id IS NOT NULL
+         GROUP BY task_id",
     )?;
     let rows = stmt.query_map([], |row| {
         Ok((TaskId::from(row.get::<_, String>(0)?), row.get(1)?))
@@ -111,11 +109,7 @@ pub fn grouped(
     let (key, join, filter) = match by {
         GroupBy::Model => ("u.model", "", ""),
         GroupBy::Bot => ("COALESCE(u.bot_id, '')", "", ""),
-        GroupBy::Task => (
-            "s.task_id",
-            "JOIN sessions s ON s.id = u.session_id",
-            "AND s.task_id IS NOT NULL",
-        ),
+        GroupBy::Task => ("u.task_id", "", "AND u.task_id IS NOT NULL"),
     };
     let mut stmt = conn.prepare(&format!(
         "SELECT {key}, {SUMS} FROM usage u {join}

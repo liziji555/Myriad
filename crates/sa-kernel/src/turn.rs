@@ -415,7 +415,10 @@ impl Turn {
             let event = tokio::select! {
                 // 取消优先：不等模型那边回应。
                 biased;
-                _ = cancel.cancelled() => return (reply, Some(LlmError::Cancelled)),
+                _ = cancel.cancelled() => {
+                    charge_unreported(request, &mut reply);
+                    return (reply, Some(LlmError::Cancelled));
+                }
                 event = stream.next() => event,
             };
             match event {
@@ -429,15 +432,41 @@ impl Turn {
                     }
                     reply.push(&event);
                 }
-                Some(Err(error)) => return (reply, Some(error)),
+                Some(Err(error)) => {
+                    charge_unreported(request, &mut reply);
+                    return (reply, Some(error));
+                }
                 None => break,
             }
         }
+        charge_unreported(request, &mut reply);
         if reply.stop.is_none() {
             return (reply, Some(LlmError::Protocol("回复没有正常结束".into())));
         }
         (reply, None)
     }
+}
+
+/// 请求已经发出去了，但模型那边没来得及报用量（被停下、中途断了）：这次调用照样花了钱，
+/// 按字数估一个数记上，不然花费的上限会被少算。
+fn charge_unreported(request: &ChatRequest, reply: &mut Accumulator) {
+    if reply.usage.is_some() {
+        return;
+    }
+    let input =
+        compact::estimate_messages(&request.messages) + compact::estimate_tools(&request.tools);
+    let output = compact::estimate(&reply.text)
+        + compact::estimate(&reply.reasoning)
+        + reply
+            .tool_calls
+            .iter()
+            .map(|call| compact::estimate(&call.name) + compact::estimate(&call.arguments))
+            .sum::<usize>();
+    reply.usage = Some(Usage {
+        input_tokens: input as u64,
+        output_tokens: output as u64,
+        cached_tokens: 0,
+    });
 }
 
 fn none_if_empty(text: String) -> Option<String> {

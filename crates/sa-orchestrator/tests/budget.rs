@@ -303,6 +303,14 @@ async fn a_task_stops_at_its_limit_and_continuing_grants_another_share() {
     assert_eq!(summary.tasks.len(), 1);
     assert_eq!(summary.tasks[0].label, "看目录");
     assert_eq!(summary.tasks[0].spend.cost, 60.0);
+
+    // 负责的 Bot 被删掉以后，任务花了多少还查得到。
+    let other = rig.engine.create_bot("替补", ModelTier::Mid, "").unwrap();
+    rig.engine.add_room_member(&rig.room, &other.id).unwrap();
+    rig.engine.delete_bot(&rig.bot).unwrap();
+    assert_eq!(rig.engine.task_spend(&task.id).unwrap().total, 60_000_000);
+    let summary = rig.orchestrator.usage_summary().await.unwrap();
+    assert_eq!(summary.tasks[0].spend.cost, 60.0);
     rig.orchestrator.shutdown().await;
 }
 
@@ -510,5 +518,61 @@ async fn the_watchdog_stops_a_task_that_spends_far_more_than_the_others() {
         "{}",
         blocked.note
     );
+    rig.orchestrator.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_reply_stopped_halfway_is_still_charged() {
+    let dir = tempfile::tempdir().unwrap();
+    // 模型说了几个字就挂住，一直没报用量；人点了停止。
+    let rig = start(
+        dir.path(),
+        // 文字放在最后：看到它的时候前面的工具调用肯定已经收到了。
+        vec![MockReply::Hang(vec![
+            sa_llm::StreamEvent::ToolCallStart {
+                id: "c1".into(),
+                name: "写".into(),
+            },
+            sa_llm::StreamEvent::ToolCallArgsDelta {
+                id: "c1".into(),
+                json_fragment: "{\"内容".into(),
+            },
+            sa_llm::StreamEvent::TextDelta("说到一半".into()),
+        ])],
+        vec![],
+        pricey(0.0, 0.0),
+        Watchdog::default(),
+    );
+    rig.orchestrator
+        .post_message(&rig.room, "在吗".into())
+        .await
+        .unwrap();
+    for _ in 0..500 {
+        let said = rig
+            .engine
+            .list_messages(&rig.room, None, 100)
+            .unwrap()
+            .messages
+            .iter()
+            .any(|m| m.content == "说到一半");
+        if said {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    rig.orchestrator.stop(&rig.room);
+    for _ in 0..500 {
+        if rig.orchestrator.usage_summary().await.unwrap().today.calls == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    // 没有模型报的数，按字数估：输出是「说到一半」四个字，加上写了一半的工具调用
+    //（名字 1 + 参数 3）；输入是发出去的整个请求。
+    let today = rig.orchestrator.usage_summary().await.unwrap().today;
+    assert_eq!(today.calls, 1);
+    assert_eq!(today.output_tokens, 8);
+    assert!(today.input_tokens > 0);
+    assert!(today.cost > 4.0, "{today:?}");
     rig.orchestrator.shutdown().await;
 }
