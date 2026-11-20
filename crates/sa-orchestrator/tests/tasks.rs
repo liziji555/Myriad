@@ -531,6 +531,13 @@ async fn stopping_keeps_the_work_and_cancelling_throws_it_away() {
         "写了一半\n"
     );
     assert_eq!(blocked.artifacts.len(), 1);
+    // 运行收了尾之后再点停止，什么都不会停。
+    for _ in 0..500 {
+        if !rig.orchestrator.stop_task(&task.id) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     assert!(!rig.orchestrator.stop_task(&task.id));
 
     // 继续：接着同一个会话，告诉它上次没做完。

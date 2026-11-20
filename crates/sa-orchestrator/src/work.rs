@@ -86,6 +86,15 @@ async fn schedule(shared: Arc<Shared>) {
                 run_task(&shared, task, &token).await;
                 shared.works.running.lock().unwrap().remove(&id);
                 shared.works.stopped.lock().unwrap().remove(&id);
+                // 任务到此为止（不用做了，或者被取消）：独立目录不留。
+                // 要在把自己从表里去掉之后再看：之前来的取消指望这里删目录，之后来的取消会自己删。
+                let (engine, task_id) = (shared.engine.clone(), id.clone());
+                let ended = db(move || engine.get_task(&task_id)).await;
+                if ended.is_ok_and(|task| {
+                    matches!(task.state, TaskState::Dropped | TaskState::Cancelled)
+                }) {
+                    cleanup(&shared, &id).await;
+                }
                 // 空出了一个位置：看看有没有排着队的。
                 shared.works.wake.notify_one();
             });
@@ -177,13 +186,8 @@ async fn run_task(shared: &Arc<Shared>, task: Task, cancel: &CancellationToken) 
     let (run, draft, session_id) = match db(move || engine.start_run(&id, &bot_id)).await {
         Ok(started) => started,
         Err(error) => {
-            // 多半是开工前被人取消了：刚准备好的目录不留。
+            // 多半是开工前被人取消了。
             tracing::info!(task = %task.id, "任务没有开工：{error}");
-            let (engine, id) = (shared.engine.clone(), task.id.clone());
-            let ended = db(move || engine.get_task(&id)).await;
-            if ended.is_ok_and(|task| task.state.is_terminal()) {
-                cleanup(shared, &task.id).await;
-            }
             return;
         }
     };
@@ -366,13 +370,8 @@ async fn run_task(shared: &Arc<Shared>, task: Task, cancel: &CancellationToken) 
         },
     };
     let (engine, run_id) = (shared.engine.clone(), run.id.clone());
-    match db(move || engine.finish_run(&run_id, outcome)).await {
-        // 任务到此为止（不用做了，或者中途被取消）：独立目录不留。
-        Ok(task) if matches!(task.state, TaskState::Dropped | TaskState::Cancelled) => {
-            cleanup(shared, &task.id).await;
-        }
-        Ok(_) => {}
-        Err(error) => tracing::error!(task = %task.id, "运行结果没记上：{error}"),
+    if let Err(error) = db(move || engine.finish_run(&run_id, outcome)).await {
+        tracing::error!(task = %task.id, "运行结果没记上：{error}");
     }
 }
 

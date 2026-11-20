@@ -267,7 +267,7 @@ pub async fn apply_to_workspace(workspace: &Path, workdir: &Workdir) -> Result<(
 /// 任务结束后删掉它的独立目录。分支留着。删不掉只记日志，不影响任务状态。
 pub async fn remove(workspace: &Path, work_root: &Path, task_id: &TaskId, workdir: &Workdir) {
     let root = repo_root(workdir, work_root, task_id);
-    if workdir.kind == KIND_WORKTREE {
+    if workdir.kind == KIND_WORKTREE && root.exists() {
         let root_text = plain(&root).display().to_string();
         if let Err(error) = git(workspace, &["worktree", "remove", "--force", &root_text]).await {
             tracing::warn!(task = %task_id, "worktree 没删掉：{error}");
