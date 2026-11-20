@@ -58,7 +58,7 @@ async fn ctrl_c() {
 fn pick_room(app: &App, wanted: Option<&str>) -> Result<Room> {
     let mut rooms = app.engine.list_rooms()?;
     // 按创建时间排，第一个是默认房间。
-    rooms.sort_by_key(|room| room.created_at);
+    rooms.sort_by(|a, b| (a.created_at, a.id.to_string()).cmp(&(b.created_at, b.id.to_string())));
     let Some(wanted) = wanted else {
         return rooms.into_iter().next().context("还没有房间");
     };
@@ -431,6 +431,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let app = open(dir.path());
         let default = pick_room(&app, None).unwrap();
+        // 创建时间只精确到毫秒，隔开一点，保证先后顺序确定。
+        std::thread::sleep(Duration::from_millis(5));
         let other = app.engine.create_room("调研").unwrap();
         assert_eq!(pick_room(&app, None).unwrap().id, default.id);
         assert_eq!(pick_room(&app, Some("调研")).unwrap().id, other.id);
