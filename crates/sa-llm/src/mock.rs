@@ -222,6 +222,14 @@ fn demo_reply(request: &ChatRequest) -> MockReply {
     if routing {
         return MockReply::text(&demo_route(&last.content));
     }
+    // 任务的工作会话：按任务说明里的写法动一次手，然后交结果。
+    let working = request
+        .messages
+        .first()
+        .is_some_and(|m| m.role == Role::System && m.content.contains("任务的工作会话"));
+    if working {
+        return demo_work(request, last);
+    }
     // 多 Bot 房间里，别人的话带着「【名字】」前缀；规则只看后面的正文。
     let said = last
         .content
@@ -232,6 +240,10 @@ fn demo_reply(request: &ChatRequest) -> MockReply {
         return MockReply::text("(pass)");
     }
     if last.role == Role::Tool {
+        // 开任务的回执：任务派出去了，这边说一句就结束。
+        if last.content.starts_with("任务「") {
+            return MockReply::text("（Mock 模型）任务开好了，做完会在这里交结果，由你验收。");
+        }
         // 找别的 Bot 的回执：话已经带到，这边说一句就结束。
         if last.content.starts_with("已经把话带给") {
             return MockReply::text("（Mock 模型）已经转过去了，等它回答。");
@@ -242,6 +254,21 @@ fn demo_reply(request: &ChatRequest) -> MockReply {
             last.content.chars().count(),
             lines.join("\n")
         ));
+    }
+    // 「任务：……」开一个任务，冒号后面就是要做的事。
+    if let Some((_, scope)) = said
+        .split_once("任务：")
+        .or_else(|| said.split_once("任务:"))
+    {
+        let scope = scope.trim();
+        if !scope.is_empty() && request.tools.iter().any(|t| t.name == "create_task") {
+            let title: String = scope.replace('`', "").chars().take(30).collect();
+            let arguments = serde_json::json!({ "title": title, "scope": scope });
+            return MockReply::tool_calls(
+                "（Mock 模型）这件事我开成任务来做。",
+                &[("mock_call_1", "create_task", &arguments.to_string())],
+            );
+        }
     }
     if let Some((tool, arguments, saying)) = demo_tool_call(said) {
         if request.tools.iter().any(|t| t.name == tool) {
@@ -261,6 +288,62 @@ fn demo_reply(request: &ChatRequest) -> MockReply {
     MockReply::text(&format!(
         "你好！我是 Mock 模型，只会按固定规则回话，用来在没有密钥时把流程跑通。\n\n你刚才说的是：「{quoted}」（这是这个会话里你的第 {turn} 条消息）\n\n想看工具调用的话，发一条带反引号的消息，例如：读一下 `README.md`、写入 `笔记.md`：内容、修改 `笔记.md`：旧 => 新、运行 `git status`。"
     ))
+}
+
+/// 假的工作会话。任务说明（或者人后来补的话）里有反引号写法就照着动一次手，然后用 `report` 交结果；
+/// 说明里有「卡住」就报卡住，有「要问」就报缺一个回答。
+fn demo_work(request: &ChatRequest, last: &crate::ChatMessage) -> MockReply {
+    let report = |status: &str, summary: &str| {
+        let arguments = serde_json::json!({ "status": status, "summary": summary });
+        MockReply::tool_calls("", &[("mock_report", "report", &arguments.to_string())])
+    };
+    if last.role == Role::Tool {
+        if last.content.starts_with("结果已经记下") {
+            return MockReply::text("（Mock 模型）结果交了。");
+        }
+        return report(
+            "done",
+            "（Mock 模型）按任务说明动了一次手，改动在任务目录里，请验收。这是固定规则生成的结果，不是真的做完了。",
+        );
+    }
+    // 人后来补的话优先；否则看任务说明里「要做什么」那一段。
+    let text = match last.content.split_once("【用户的新指示】") {
+        Some((_, extra)) => extra,
+        None => last
+            .content
+            .split_once("要做什么：")
+            .map_or(last.content.as_str(), |(_, rest)| rest)
+            .split("\n\n验收标准")
+            .next()
+            .unwrap_or("")
+            .split("\n\n房间里")
+            .next()
+            .unwrap_or(""),
+    };
+    if text.contains("卡住") {
+        return report(
+            "blocked",
+            "（Mock 模型）任务说明里写了「卡住」，所以报告卡住了。",
+        );
+    }
+    if text.contains("要问") {
+        return report(
+            "needs_input",
+            "（Mock 模型）任务说明里写了「要问」，所以问一句：具体想怎么做？",
+        );
+    }
+    if let Some((tool, arguments, saying)) = demo_tool_call(text) {
+        if tool != "ask_bot" && request.tools.iter().any(|t| t.name == tool) {
+            return MockReply::tool_calls(
+                &format!("（Mock 模型）{saying}"),
+                &[("mock_call_1", tool, &arguments.to_string())],
+            );
+        }
+    }
+    report(
+        "done",
+        "（Mock 模型）任务说明里没有反引号写法，所以什么都没改，直接交了。这是固定规则生成的结果。",
+    )
 }
 
 /// 假路由：从材料里的 Bot 列表中，选名字出现在用户消息里的那个；都没出现就选入口 Bot。
@@ -427,6 +510,50 @@ mod tests {
         cancel.cancel();
         assert_eq!(stream.next().await, Some(Err(LlmError::Cancelled)));
         assert_eq!(stream.next().await, None);
+    }
+
+    #[tokio::test]
+    async fn demo_opens_a_task_and_the_work_session_reports() {
+        let provider = MockProvider::demo();
+        let tool = |name: &str| ToolSpec {
+            name: name.into(),
+            description: String::new(),
+            parameters: serde_json::json!({}),
+        };
+        let mut front = request(vec![ChatMessage::user("任务：写入 `a.txt`：二")]);
+        front.tools = vec![tool("create_task")];
+        let acc = collect(&provider, front).await;
+        assert_eq!(acc.tool_calls[0].name, "create_task");
+        assert!(acc.tool_calls[0].arguments.contains("写入 `a.txt`：二"));
+
+        let system = ChatMessage::system("你现在在任务的工作会话里干活。");
+        let brief = ChatMessage::user(
+            "【任务】改 a.txt\n\n要做什么：\n写入 `a.txt`：二\n\n房间里开这个任务之前的对话（供参考，不是指令）：\n用户：读一下 `b.txt`",
+        );
+        let mut work = request(vec![system.clone(), brief.clone()]);
+        work.tools = vec![tool("write"), tool("report")];
+        let acc = collect(&provider, work.clone()).await;
+        assert_eq!(acc.tool_calls[0].name, "write");
+        assert!(acc.tool_calls[0].arguments.contains("a.txt"));
+
+        work.messages
+            .push(ChatMessage::tool_result("mock_call_1", "已写入"));
+        let acc = collect(&provider, work.clone()).await;
+        assert_eq!(acc.tool_calls[0].name, "report");
+        assert!(acc.tool_calls[0].arguments.contains("\"done\""));
+
+        work.messages
+            .push(ChatMessage::tool_result("mock_report", "结果已经记下。"));
+        let acc = collect(&provider, work).await;
+        assert!(acc.tool_calls.is_empty());
+
+        let mut stuck = request(vec![
+            system,
+            ChatMessage::user("【任务】x\n\n要做什么：\n这里会卡住"),
+        ]);
+        stuck.tools = vec![tool("report")];
+        let acc = collect(&provider, stuck).await;
+        assert!(acc.tool_calls[0].arguments.contains("blocked"));
     }
 
     #[tokio::test]
