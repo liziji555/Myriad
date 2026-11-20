@@ -963,7 +963,7 @@ async fn usage_and_notices_are_served_and_a_notice_can_be_dismissed() {
 
     let response = app.clone().oneshot(get("/api/notices")).await.unwrap();
     let notices: Vec<sa_protocol::Notice> = json(response).await;
-    assert_eq!(notices, [notice.clone()]);
+    assert_eq!(notices, std::slice::from_ref(&notice));
 
     let path = format!("/api/notices/{}/dismiss", notice.id);
     let response = app.clone().oneshot(post(&path, "")).await.unwrap();
