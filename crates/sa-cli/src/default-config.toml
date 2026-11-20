@@ -51,3 +51,15 @@ api_base = "https://api.github.com"
 token_env = "GITHUB_TOKEN"
 # 仓库不写就从工作目录的 origin 地址里认；认不出来时写在这里：
 # repo = "owner/name"
+# 接收 GitHub 事件（issue、评论、CI 结果）：在仓库的 Webhook 设置里把地址填成
+# 「你的公网地址/hooks/github」、内容类型选 application/json、密钥和下面这个环境变量里的一样。
+# 不设密钥就不接收。哪个仓库进哪个房间，在界面的「连接」页或者用 sa link github 来定。
+webhook_secret_env = "GITHUB_WEBHOOK_SECRET"
+# 只收带这些标签之一的新 issue；空着就都收。
+issue_labels = []
+
+[telegram]
+# 在 Telegram 里和房间里的 Bot 说话：找 @BotFather 建一个机器人，把它给的令牌放进这个环境变量。
+# 不设令牌就不连 Telegram。哪个聊天进哪个房间，在界面的「连接」页里生成配对码来定。
+token_env = "TELEGRAM_BOT_TOKEN"
+api_base = "https://api.telegram.org"

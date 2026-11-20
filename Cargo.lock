@@ -1676,6 +1676,7 @@ dependencies = [
  "chrono",
  "clap",
  "dirs",
+ "sa-adapters",
  "sa-engine",
  "sa-llm",
  "sa-orchestrator",

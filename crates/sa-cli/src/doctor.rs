@@ -86,6 +86,25 @@ pub fn collect(data_dir: &DataDir, env: &dyn Fn(&str) -> Option<String>) -> Vec<
             ),
         });
     }
+    if let Some(config) = &config {
+        // 外面的连接是可选的：没设只说明一下，不算问题。
+        for (name, var, off) in [
+            (
+                "GitHub 事件",
+                &config.github.webhook_secret_env,
+                "不接收 GitHub 事件",
+            ),
+            ("Telegram", &config.telegram.token_env, "不连 Telegram"),
+        ] {
+            let set = env(var).is_some_and(|value| !value.trim().is_empty());
+            let detail = if set {
+                format!("环境变量 {var} 已设置")
+            } else {
+                format!("环境变量 {var} 未设置，{off}")
+            };
+            checks.push(Check::new(name, Status::Ok, detail));
+        }
+    }
     checks.push(check_database(data_dir));
     if let Some(config) = &config {
         checks.push(check_port(SocketAddr::new(

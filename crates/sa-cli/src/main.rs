@@ -2,6 +2,7 @@ mod app;
 mod chat;
 mod config;
 mod doctor;
+mod link;
 mod models;
 mod paths;
 mod routine;
@@ -46,6 +47,11 @@ enum Command {
         #[command(subcommand)]
         command: routine::RoutineCommand,
     },
+    /// 和外面的连接：列出、把 GitHub 仓库连到房间、断开（不能和 sa serve 同时运行）
+    Link {
+        #[command(subcommand)]
+        command: link::LinkCommand,
+    },
     /// 任务：列出、开任务、继续、验收、打回、取消（不能和 sa serve 同时运行）
     Task(task::TaskArgs),
     /// 看今天和最近几天花了多少（不能和 sa serve 同时运行）
@@ -62,6 +68,7 @@ fn main() -> ExitCode {
         Command::Bot { command } => team::run(&data_dir, team::Command::Bot(command)),
         Command::Room { command } => team::run(&data_dir, team::Command::Room(command)),
         Command::Routine { command } => routine::run(&data_dir, command),
+        Command::Link { command } => link::run(&data_dir, command),
         Command::Task(args) => task::run(&data_dir, args),
         Command::Usage => usage::run(&data_dir),
         Command::Doctor => Ok(doctor::run(&data_dir)),
