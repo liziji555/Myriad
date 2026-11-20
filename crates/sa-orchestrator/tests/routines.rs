@@ -258,3 +258,37 @@ async fn run_now_does_not_wait_for_the_schedule_and_a_missing_bot_is_skipped() {
     assert_eq!(rig.mock.requests().len(), 1);
     rig.orchestrator.shutdown().await;
 }
+
+#[tokio::test]
+async fn routines_due_together_in_one_room_run_one_per_tick() {
+    let dir = tempfile::tempdir().unwrap();
+    let rig = start(
+        dir.path(),
+        vec![
+            MockReply::text("第一个做完了。"),
+            MockReply::text("第二个做完了。"),
+        ],
+        Budget::default(),
+    );
+    let first = rig.due(2_000);
+    let second = rig
+        .engine
+        .create_routine(&rig.room, None, "晚报", "总结一下", "0 21 * * *")
+        .unwrap();
+    rig.engine
+        .reschedule_routine(&second.id, now_ms() - 1_000)
+        .unwrap();
+
+    // 排在后面的不提前占租约：等前面的做完，下一遍再抢。
+    let done = rig.orchestrator.routines_tick().await;
+    assert_eq!(done.len(), 1);
+    assert_eq!(done[0].id, first.id);
+    assert_eq!(rig.engine.get_routine(&second.id).unwrap().last_at, None);
+
+    let done = rig.orchestrator.routines_tick().await;
+    assert_eq!(done.len(), 1);
+    assert_eq!(done[0].id, second.id);
+    assert_eq!(done[0].last_result, Some(RoutineResult::Spoke));
+    assert_eq!(rig.bot_said(), ["第一个做完了。", "第二个做完了。"]);
+    rig.orchestrator.shutdown().await;
+}

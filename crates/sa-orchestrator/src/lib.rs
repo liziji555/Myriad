@@ -117,6 +117,8 @@ pub(crate) struct Shared {
     pub works: work::Works,
     /// 这个进程在租约上签的名字。
     pub owner: String,
+    /// 正在做定时任务的房间。一个房间里的定时任务一个一个来。
+    pub routine_rooms: Mutex<std::collections::HashSet<RoomId>>,
 }
 
 struct RoomHandle {
@@ -163,6 +165,7 @@ impl Orchestrator {
                 approvals: Mutex::new(HashMap::new()),
                 works: work::Works::default(),
                 owner: format!("sa-{}", sa_protocol::RoutineId::new()),
+                routine_rooms: Mutex::default(),
             }),
             rooms: Mutex::new(HashMap::new()),
         }
