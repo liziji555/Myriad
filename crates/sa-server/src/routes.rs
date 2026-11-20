@@ -5,12 +5,13 @@ use axum::extract::rejection::{JsonRejection, QueryRejection};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
-use sa_engine::{BotPatch, Engine, EngineError};
+use sa_engine::{BotPatch, Engine, EngineError, RoutinePatch};
 use sa_protocol::{
-    ApprovalId, Bot, BotId, CreateBotRequest, CreateRoomRequest, CreateTaskRequest,
-    DecideApprovalRequest, Health, Message, MessagePage, ModelTier, Notice, NoticeId,
-    PermissionRule, PostMessageRequest, Room, RoomId, RuleId, StopResponse, Task,
-    TaskActionRequest, TaskDetail, TaskId, UpdateBotRequest, UpdateRoomRequest, UsageSummary,
+    ApprovalId, Bot, BotId, CreateBotRequest, CreateRoomRequest, CreateRoutineRequest,
+    CreateTaskRequest, DecideApprovalRequest, Health, Message, MessagePage, ModelTier, Notice,
+    NoticeId, PermissionRule, PostMessageRequest, Room, RoomId, Routine, RoutineId, RuleId,
+    StopResponse, Task, TaskActionRequest, TaskDetail, TaskId, UpdateBotRequest, UpdateRoomRequest,
+    UpdateRoutineRequest, UsageSummary,
 };
 use serde::Deserialize;
 
@@ -345,6 +346,68 @@ pub async fn dismiss_notice(
     Ok(Json(
         blocking(&state, move |engine| engine.dismiss_notice(&notice_id)).await?,
     ))
+}
+
+pub async fn list_routines(State(state): State<AppState>) -> Result<Json<Vec<Routine>>, AppError> {
+    Ok(Json(
+        blocking(&state, |engine| engine.list_routines()).await?,
+    ))
+}
+
+pub async fn create_routine(
+    State(state): State<AppState>,
+    body: Result<Json<CreateRoutineRequest>, JsonRejection>,
+) -> Result<(StatusCode, Json<Routine>), AppError> {
+    let Json(body) = body.map_err(|e| AppError::bad_request(e.body_text()))?;
+    let routine = blocking(&state, move |engine| {
+        engine.create_routine(
+            &body.room_id,
+            body.bot_id.as_ref(),
+            &body.title,
+            &body.prompt,
+            &body.schedule,
+        )
+    })
+    .await?;
+    Ok((StatusCode::CREATED, Json(routine)))
+}
+
+pub async fn update_routine(
+    State(state): State<AppState>,
+    Path(routine_id): Path<RoutineId>,
+    body: Result<Json<UpdateRoutineRequest>, JsonRejection>,
+) -> Result<Json<Routine>, AppError> {
+    let Json(body) = body.map_err(|e| AppError::bad_request(e.body_text()))?;
+    let patch = RoutinePatch {
+        bot_id: body.bot_id,
+        title: body.title,
+        prompt: body.prompt,
+        schedule: body.schedule,
+        enabled: body.enabled,
+    };
+    Ok(Json(
+        blocking(&state, move |engine| {
+            engine.update_routine(&routine_id, patch)
+        })
+        .await?,
+    ))
+}
+
+pub async fn delete_routine(
+    State(state): State<AppState>,
+    Path(routine_id): Path<RoutineId>,
+) -> Result<StatusCode, AppError> {
+    blocking(&state, move |engine| engine.delete_routine(&routine_id)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// 现在就做一次。马上返回；做完之后结果通过 `routine.updated` 事件到达。
+pub async fn run_routine(
+    State(state): State<AppState>,
+    Path(routine_id): Path<RoutineId>,
+) -> Result<(StatusCode, Json<Routine>), AppError> {
+    let routine = state.orchestrator.run_routine_now(&routine_id).await?;
+    Ok((StatusCode::ACCEPTED, Json(routine)))
 }
 
 pub async fn api_not_found() -> AppError {
