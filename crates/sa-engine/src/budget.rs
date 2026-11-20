@@ -97,6 +97,14 @@ impl Engine {
             return Ok(None);
         };
         self.publish(seq);
+        // 看门狗和预算守卫发现的事（停下了什么、到了什么上限）也留底。
+        let mut entry =
+            crate::Audit::system(&format!("notice.{}", notice.kind.as_str()), &notice.text)
+                .task(notice.task_id.as_ref());
+        if let Some(room_id) = &notice.room_id {
+            entry = entry.room(room_id);
+        }
+        self.audit(entry);
         Ok(Some(notice))
     }
 
