@@ -941,30 +941,31 @@ async fn a_team_is_exported_and_imported_over_the_api() {
         .unwrap();
     engine.add_room_member(&room.id, &coder.id).unwrap();
     engine.update_room(&room.id, None, Some(&coder.id)).unwrap();
+    let import = |text: &str| {
+        let body = serde_json::json!({ "text": text }).to_string();
+        app.clone().oneshot(post("/api/templates/import", &body))
+    };
 
     let path = format!("/api/templates/rooms/{}", room.id);
-    let team: sa_protocol::TeamTemplate =
+    let file: sa_protocol::TemplateFile =
         json(app.clone().oneshot(get(&path)).await.unwrap()).await;
-    assert_eq!(team.version, 1);
+    assert!(file.name.starts_with("superagent-") && file.name.ends_with(".toml"));
+    let team = sa_engine::parse_template(&file.text).unwrap();
     assert_eq!(team.bots.len(), 2);
-    let wanted = team.room.clone().unwrap();
-    assert_eq!(wanted.host.as_deref(), Some("Coder"));
-    let everyone: sa_protocol::TeamTemplate = json(
+    assert_eq!(team.room.clone().unwrap().host.as_deref(), Some("Coder"));
+    let everyone: sa_protocol::TemplateFile = json(
         app.clone()
             .oneshot(get("/api/templates/bots"))
             .await
             .unwrap(),
     )
     .await;
+    assert_eq!(everyone.name, "superagent-bots.toml");
+    let everyone = sa_engine::parse_template(&everyone.text).unwrap();
     assert_eq!((everyone.bots.len(), everyone.room), (2, None));
 
     // 导回同一个地方：Bot 都在，只多一个房间。
-    let body = serde_json::to_string(&team).unwrap();
-    let response = app
-        .clone()
-        .oneshot(post("/api/templates/import", &body))
-        .await
-        .unwrap();
+    let response = import(&file.text).await.unwrap();
     assert_eq!(response.status(), StatusCode::CREATED);
     let report: sa_protocol::ImportReport = json(response).await;
     assert!(report.created.is_empty());
@@ -974,26 +975,28 @@ async fn a_team_is_exported_and_imported_over_the_api() {
     assert_eq!(engine.list_rooms().unwrap().len(), 2);
 
     // 加一个新的 Bot 再导：只建这一个。
-    let more = r#"{"version":1,"bots":[{"name":"Tester","tier":"cheap"}]}"#;
-    let response = app
-        .clone()
-        .oneshot(post("/api/templates/import", more))
-        .await
-        .unwrap();
-    let report: sa_protocol::ImportReport = json(response).await;
+    let more = "version = 1\n[[bots]]\nname = \"Tester\"\ntier = \"cheap\"\n";
+    let report: sa_protocol::ImportReport = json(import(more).await.unwrap()).await;
     assert_eq!(report.created.len(), 1);
     assert!(report.created[0].enabled && report.created[0].persona.is_empty());
 
-    // 版本不对、缺版本、不是 JSON：都是 400，什么都不建。
-    for bad in [r#"{"version":2,"bots":[]}"#, r#"{"bots":[]}"#, "不是 JSON"] {
-        let response = app
-            .clone()
-            .oneshot(post("/api/templates/import", bad))
-            .await
-            .unwrap();
+    // 版本不对、读不懂、成员对不上：都是 400，什么都不建。
+    for bad in [
+        "version = 2\n",
+        "这不是模板",
+        "version = 1\n[room]\nname = \"x\"\nmembers = [\"没有这个\"]\n",
+    ] {
+        let response = import(bad).await.unwrap();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{bad}");
     }
+    let response = app
+        .clone()
+        .oneshot(post("/api/templates/import", "{}"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     assert_eq!(engine.list_bots().unwrap().len(), 3);
+    assert_eq!(engine.list_rooms().unwrap().len(), 2);
     let missing = format!("/api/templates/rooms/{}", sa_protocol::RoomId::new());
     let response = app.clone().oneshot(get(&missing)).await.unwrap();
     assert_eq!(response.status(), StatusCode::NOT_FOUND);

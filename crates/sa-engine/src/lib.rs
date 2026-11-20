@@ -40,7 +40,10 @@ pub use tasks::{
 };
 pub use team::{find_mentions, BotPatch, MAX_BOT_NAME_CHARS, MAX_PERSONA_CHARS, MAX_ROOM_MEMBERS};
 
-pub use templates::{MAX_TEMPLATE_BOTS, TEMPLATE_VERSION};
+pub use templates::{
+    parse_template, template_file_name, template_text, MAX_TEMPLATE_BOTS, MAX_TEMPLATE_BYTES,
+    TEMPLATE_VERSION,
+};
 pub const MAX_ROOM_NAME_CHARS: usize = 60;
 pub const MAX_MESSAGE_CHARS: usize = 100_000;
 /// 流式片段的广播缓冲。订阅者落后超过这个数会收到 `Lagged`，应当重新取快照。

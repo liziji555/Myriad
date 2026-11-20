@@ -261,6 +261,21 @@ pub struct TeamTemplate {
     pub room: Option<RoomTemplate>,
 }
 
+/// 一份模板写成的文件：建议的文件名和内容（TOML）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TemplateFile {
+    pub name: String,
+    pub text: String,
+}
+
+/// 导入模板：把模板文件的内容原样交上来。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ImportTemplateRequest {
+    pub text: String,
+}
+
 /// 导入的结果。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]

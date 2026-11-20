@@ -9,10 +9,10 @@ use sa_engine::{AuditFilter, BotPatch, Engine, EngineError, RoutinePatch};
 use sa_protocol::{
     ApprovalId, AuditPage, Bot, BotId, CreateBotRequest, CreateLinkRequest, CreateRoomRequest,
     CreateRoutineRequest, CreateTaskRequest, DecideApprovalRequest, Extensions, Health,
-    ImportReport, Link, LinkId, Message, MessagePage, ModelTier, Notice, NoticeId, Pairing,
-    PermissionRule, PostMessageRequest, Room, RoomId, Routine, RoutineId, RuleId, StopResponse,
-    Task, TaskActionRequest, TaskDetail, TaskId, TeamTemplate, UpdateBotRequest, UpdateRoomRequest,
-    UpdateRoutineRequest, UsageSummary,
+    ImportReport, ImportTemplateRequest, Link, LinkId, Message, MessagePage, ModelTier, Notice,
+    NoticeId, Pairing, PermissionRule, PostMessageRequest, Room, RoomId, Routine, RoutineId,
+    RuleId, StopResponse, Task, TaskActionRequest, TaskDetail, TaskId, TeamTemplate, TemplateFile,
+    UpdateBotRequest, UpdateRoomRequest, UpdateRoutineRequest, UsageSummary,
 };
 use serde::Deserialize;
 
@@ -364,29 +364,37 @@ pub async fn audit(
 }
 
 /// 所有 Bot 导出成一份模板。
-pub async fn export_bots(State(state): State<AppState>) -> Result<Json<TeamTemplate>, AppError> {
-    Ok(Json(
-        blocking(&state, |engine| engine.export_bots(&[])).await?,
-    ))
+pub async fn export_bots(State(state): State<AppState>) -> Result<Json<TemplateFile>, AppError> {
+    let team = blocking(&state, |engine| engine.export_bots(&[])).await?;
+    Ok(Json(template_file(&team)))
+}
+
+fn template_file(team: &TeamTemplate) -> TemplateFile {
+    TemplateFile {
+        name: sa_engine::template_file_name(team),
+        text: sa_engine::template_text(team),
+    }
 }
 
 /// 一个房间的团队导出成一份模板：成员、谁是入口、房间叫什么。
 pub async fn export_room(
     State(state): State<AppState>,
     Path(room_id): Path<RoomId>,
-) -> Result<Json<TeamTemplate>, AppError> {
-    Ok(Json(
-        blocking(&state, move |engine| engine.export_room(&room_id)).await?,
-    ))
+) -> Result<Json<TemplateFile>, AppError> {
+    let team = blocking(&state, move |engine| engine.export_room(&room_id)).await?;
+    Ok(Json(template_file(&team)))
 }
 
 /// 导入一份模板。已经有同名的 Bot 跳过；模板有一处不对就什么都不建。
 pub async fn import_team(
     State(state): State<AppState>,
-    body: Result<Json<TeamTemplate>, JsonRejection>,
+    body: Result<Json<ImportTemplateRequest>, JsonRejection>,
 ) -> Result<(StatusCode, Json<ImportReport>), AppError> {
-    let Json(team) = body.map_err(|e| AppError::bad_request(e.body_text()))?;
-    let report = blocking(&state, move |engine| engine.import_team(&team)).await?;
+    let Json(body) = body.map_err(|e| AppError::bad_request(e.body_text()))?;
+    let report = blocking(&state, move |engine| {
+        engine.import_team(&sa_engine::parse_template(&body.text)?)
+    })
+    .await?;
     Ok((StatusCode::CREATED, Json(report)))
 }
 

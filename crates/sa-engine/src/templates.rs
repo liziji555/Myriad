@@ -10,6 +10,50 @@ pub const TEMPLATE_VERSION: u32 = 1;
 /// 一份模板里最多这么多个 Bot。
 pub const MAX_TEMPLATE_BOTS: usize = 50;
 
+/// 模板文件最大这么多字节。
+pub const MAX_TEMPLATE_BYTES: usize = 1024 * 1024;
+
+/// 模板写成文件的样子（TOML）。
+pub fn template_text(team: &TeamTemplate) -> String {
+    let body = toml::to_string_pretty(team).expect("模板里只有字符串、数字和布尔值，总能写成 TOML");
+    format!(
+        "# SuperAgent 的 Bot 模板。在「成员」页导入，或者用 `sa bot import <这个文件>`。\n\n{body}"
+    )
+}
+
+/// 读一份模板文件。认 TOML；以 `{` 开头的按 JSON 读。
+pub fn parse_template(text: &str) -> Result<TeamTemplate> {
+    if text.len() > MAX_TEMPLATE_BYTES {
+        return Err(EngineError::Invalid("模板文件太大了（超过 1 MB）".into()));
+    }
+    let text = text.trim_start_matches('\u{feff}');
+    let parsed = if text.trim_start().starts_with('{') {
+        serde_json::from_str(text).map_err(|e| e.to_string())
+    } else {
+        toml::from_str(text).map_err(|e| e.message().to_string())
+    };
+    parsed.map_err(|why| EngineError::Invalid(format!("这不是一份能认的模板：{why}")))
+}
+
+/// 模板文件建议叫什么：带上房间的名字，去掉文件名里不能有的字符。
+pub fn template_file_name(team: &TeamTemplate) -> String {
+    let label = match &team.room {
+        Some(room) => room.name.as_str(),
+        None => "bots",
+    };
+    let safe: String = label
+        .trim()
+        .chars()
+        .map(|c| match c {
+            '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | '.' => '-',
+            c if c.is_whitespace() || c.is_control() => '-',
+            c => c,
+        })
+        .take(40)
+        .collect();
+    format!("superagent-{safe}.toml")
+}
+
 fn template(bot: &Bot) -> BotTemplate {
     BotTemplate {
         name: bot.name.clone(),
@@ -287,6 +331,59 @@ mod tests {
             "{}",
             audit[0].summary
         );
+    }
+
+    #[test]
+    fn a_template_survives_being_written_to_a_file_and_read_back() {
+        let persona = "写代码\n\"引号\"、# 井号、''' 三个单引号、\\ 反斜杠";
+        let team = TeamTemplate {
+            version: 1,
+            bots: vec![
+                bot("Coder", ModelTier::Strong, persona),
+                BotTemplate {
+                    enabled: false,
+                    ..bot("审查员", ModelTier::Cheap, "")
+                },
+            ],
+            room: Some(RoomTemplate {
+                name: "修 bug / 第 2 轮".into(),
+                host: Some("Coder".into()),
+                members: vec!["Coder".into(), "审查员".into()],
+            }),
+        };
+        let text = template_text(&team);
+        assert!(text.starts_with("# SuperAgent"), "{text}");
+        assert_eq!(parse_template(&text).unwrap(), team);
+        // 带 BOM 的（Windows 记事本存的）、JSON 写的也认。
+        assert_eq!(parse_template(&format!("\u{feff}{text}")).unwrap(), team);
+        let json = serde_json::to_string_pretty(&team).unwrap();
+        assert_eq!(parse_template(&json).unwrap(), team);
+        // 手写的可以只写必须的：没写的人设是空的，默认启用，没有房间。
+        let short = "version = 1\n[[bots]]\nname = \"A\"\ntier = \"mid\"\n";
+        let parsed = parse_template(short).unwrap();
+        assert_eq!(parsed.bots, [bot("A", ModelTier::Mid, "")]);
+        assert_eq!(parsed.room, None);
+
+        for bad in [
+            "",
+            "version = ",
+            "[[bots]]\nname = \"A\"\ntier = \"mid\"",
+            "{\"version\":1,",
+            "version = 1\n[[bots]]\nname = \"A\"\ntier = \"huge\"",
+        ] {
+            let error = parse_template(bad).unwrap_err().to_string();
+            assert!(error.contains("不是一份能认的模板"), "{bad}: {error}");
+        }
+        let huge = format!("# {}", "x".repeat(MAX_TEMPLATE_BYTES));
+        let error = parse_template(&huge).unwrap_err().to_string();
+        assert!(error.contains("太大"), "{error}");
+
+        assert_eq!(
+            template_file_name(&team),
+            "superagent-修-bug---第-2-轮.toml"
+        );
+        let bots_only = TeamTemplate { room: None, ..team };
+        assert_eq!(template_file_name(&bots_only), "superagent-bots.toml");
     }
 
     #[test]

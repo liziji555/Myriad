@@ -5,7 +5,7 @@ use crate::app::open_state;
 use crate::paths::DataDir;
 use anyhow::{bail, Context, Result};
 use sa_engine::{BotPatch, Engine};
-use sa_protocol::{Bot, ModelTier, Room, TeamTemplate};
+use sa_protocol::{Bot, ModelTier, Room};
 use std::io::Write;
 use std::process::ExitCode;
 
@@ -178,7 +178,7 @@ fn bot(engine: &Engine, command: BotCommand, out: &mut impl Write) -> Result<()>
                     engine.export_bots(&ids.collect::<Result<Vec<_>>>()?)?
                 }
             };
-            let text = template_text(&team)?;
+            let text = sa_engine::template_text(&team);
             match output {
                 Some(path) => {
                     std::fs::write(&path, text)
@@ -196,8 +196,8 @@ fn bot(engine: &Engine, command: BotCommand, out: &mut impl Write) -> Result<()>
         BotCommand::Import { file } => {
             let text = std::fs::read_to_string(&file)
                 .with_context(|| format!("读不了 {}", file.display()))?;
-            let team: TeamTemplate = toml::from_str(&text)
-                .with_context(|| format!("{} 不是一份能认的模板", file.display()))?;
+            let team = sa_engine::parse_template(&text)
+                .with_context(|| format!("读不懂 {}", file.display()))?;
             let report = engine.import_team(&team)?;
             for bot in &report.created {
                 writeln!(out, "已新建 {}（{}）", bot.name, bot.tier.as_str())?;
@@ -284,14 +284,6 @@ pub(crate) fn find_bot(engine: &Engine, wanted: &str) -> Result<Bot> {
     bots.into_iter()
         .find(|bot| bot.id.as_str() == wanted || bot.name.to_lowercase() == wanted.to_lowercase())
         .with_context(|| format!("没有叫「{wanted}」的 Bot。现有的 Bot：{}", names.join("、")))
-}
-
-/// 模板写成文件的样子。
-fn template_text(team: &TeamTemplate) -> Result<String> {
-    let body = toml::to_string_pretty(team).context("模板写不成 TOML")?;
-    Ok(format!(
-        "# SuperAgent 的 Bot 模板。用 `sa bot import <这个文件>` 导入。\n\n{body}"
-    ))
 }
 
 /// 按名字或 ID 找房间。
@@ -416,10 +408,13 @@ mod tests {
         let bad = dir.path().join("bad.toml");
         std::fs::write(&bad, "这不是 TOML = = =").unwrap();
         let error = sa(&there, &format!("bot import {}", bad.display())).unwrap_err();
-        assert!(error.to_string().contains("不是一份能认的模板"), "{error}");
+        assert!(
+            format!("{error:#}").contains("不是一份能认的模板"),
+            "{error:#}"
+        );
         std::fs::write(&bad, "version = 9\n").unwrap();
         let error = sa(&there, &format!("bot import {}", bad.display())).unwrap_err();
-        assert!(error.to_string().contains("版本"), "{error}");
+        assert!(format!("{error:#}").contains("版本"), "{error:#}");
         assert!(sa(&there, "bot import /没有/这个文件.toml").is_err());
     }
 
