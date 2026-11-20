@@ -297,12 +297,17 @@ button.sa-row:hover {
   list-style: none;
 }
 .sa-step {
+  display: grid;
+  gap: var(--sa-space-1);
+  min-width: 0;
+  font-size: var(--sa-text-sm);
+  color: var(--sa-fg-muted);
+}
+.sa-step-line {
   display: flex;
   align-items: center;
   gap: var(--sa-space-2);
   min-width: 0;
-  font-size: var(--sa-text-sm);
-  color: var(--sa-fg-muted);
 }
 .sa-step-dot {
   flex: none;
@@ -317,8 +322,44 @@ button.sa-row:hover {
 .sa-step[data-state="ok"] .sa-step-dot {
   background: var(--sa-ok);
 }
-.sa-step[data-state="error"] .sa-step-dot {
+.sa-step[data-state="error"] .sa-step-dot,
+.sa-step[data-state="denied"] .sa-step-dot {
   background: var(--sa-danger);
+}
+.sa-step[data-state="waiting"] .sa-step-dot {
+  background: var(--sa-warn);
+}
+.sa-step[data-state="waiting"] .sa-step-state {
+  color: var(--sa-fg);
+  font-weight: 600;
+}
+.sa-approval {
+  display: grid;
+  gap: var(--sa-space-2);
+  margin: var(--sa-space-1) 0 var(--sa-space-2) calc(8px + var(--sa-space-2));
+  padding: var(--sa-space-3);
+  border: 1px solid var(--sa-border);
+  border-left: 3px solid var(--sa-warn);
+  border-radius: var(--sa-radius-md);
+  background: var(--sa-bg-side);
+  color: var(--sa-fg);
+}
+.sa-approval-reason {
+  margin: 0;
+  font-family: var(--sa-font-mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 12em;
+  overflow-y: auto;
+}
+.sa-approval-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sa-space-2);
+}
+.sa-approval-expiry {
+  color: var(--sa-fg-faint);
 }
 .sa-step-title {
   min-width: 0;

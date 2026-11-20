@@ -1,6 +1,8 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { RoomChat } from "../api/chat";
-import type { Bot, Message, ToolStep } from "../api/types";
+import type { ApprovalDecision, ApprovalId, Bot, Message, ToolStep } from "../api/types";
+
+type Decide = (id: ApprovalId, decision: ApprovalDecision) => Promise<void>;
 
 interface Props {
   chat: RoomChat | undefined;
@@ -9,13 +11,15 @@ interface Props {
   loadError: string | null;
   onRetry(): void;
   onLoadOlder(): Promise<void>;
+  /** 答复一张审批卡。 */
+  onDecide: Decide;
   onLightDemo(source: HTMLElement): void;
 }
 
 /** 离底部这么近就算「在看最新的」，新内容来了自动跟着滚。 */
 const STICK_PX = 80;
 
-export function Timeline({ chat, bots, loadError, onRetry, onLoadOlder, onLightDemo }: Props) {
+export function Timeline({ chat, bots, loadError, onRetry, onLoadOlder, onDecide, onLightDemo }: Props) {
   const scroller = useRef<HTMLElement>(null);
   const stick = useRef(true);
   /** 往前翻页之前的内容高度，用来在新内容插到上面之后保持视线位置。 */
@@ -35,6 +39,15 @@ export function Timeline({ chat, bots, loadError, onRetry, onLoadOlder, onLightD
       el.scrollTop = el.scrollHeight;
     }
   }, [messages.length, messages[0]?.id, last?.rev, last?.content.length]);
+
+  // 最后一条消息里有没有在等批准的步骤：卡片出现时要滚到看得见。
+  const asking = last?.steps.some((step) => step.state === "waiting") ?? false;
+  useEffect(() => {
+    if (asking) {
+      stick.current = true;
+      scroller.current?.scrollTo({ top: scroller.current.scrollHeight });
+    }
+  }, [asking]);
 
   // 自己刚发的消息总要看得到。
   useEffect(() => {
@@ -96,7 +109,7 @@ export function Timeline({ chat, bots, loadError, onRetry, onLoadOlder, onLightD
           </li>
         )}
         {messages.map((message) => (
-          <MessageItem key={message.id} message={message} bots={bots} />
+          <MessageItem key={message.id} message={message} bots={bots} onDecide={onDecide} />
         ))}
       </ol>
     );
@@ -117,7 +130,15 @@ export function Timeline({ chat, bots, loadError, onRetry, onLoadOlder, onLightD
   );
 }
 
-function MessageItem({ message, bots }: { message: Message; bots: readonly Bot[] }) {
+function MessageItem({
+  message,
+  bots,
+  onDecide,
+}: {
+  message: Message;
+  bots: readonly Bot[];
+  onDecide: Decide;
+}) {
   const { sender, state } = message;
   const name =
     sender.kind === "user" ? "你" : (bots.find((bot) => bot.id === sender.bot_id)?.name ?? "Bot");
@@ -133,7 +154,7 @@ function MessageItem({ message, bots }: { message: Message; bots: readonly Bot[]
       {message.steps.length > 0 && (
         <ul className="sa-steps" aria-label="工具调用">
           {message.steps.map((step, index) => (
-            <StepItem key={`${step.id}-${index}`} step={step} />
+            <StepItem key={`${step.id}-${index}`} step={step} onDecide={onDecide} />
           ))}
         </ul>
       )}
@@ -156,19 +177,99 @@ function MessageItem({ message, bots }: { message: Message; bots: readonly Bot[]
 }
 
 const STEP_LABEL: Record<ToolStep["state"], string> = {
+  waiting: "等你批准",
   running: "进行中",
   ok: "完成",
   error: "失败",
   cancelled: "已停止",
+  denied: "没有批准",
 };
 
-function StepItem({ step }: { step: ToolStep }) {
+function StepItem({ step, onDecide }: { step: ToolStep; onDecide: Decide }) {
   return (
     <li className="sa-step" data-state={step.state}>
-      <span className="sa-step-dot" aria-hidden="true" />
-      <span className="sa-step-title">{step.title}</span>
-      <span className="sa-step-state">{STEP_LABEL[step.state]}</span>
+      <div className="sa-step-line">
+        <span className="sa-step-dot" aria-hidden="true" />
+        <span className="sa-step-title" title={step.title}>
+          {step.title}
+        </span>
+        <span className="sa-step-state">{STEP_LABEL[step.state]}</span>
+      </div>
+      {step.state === "waiting" && step.approval && (
+        <ApprovalCard
+          id={step.approval.id}
+          reason={step.approval.reason}
+          expiresAt={step.approval.expires_at}
+          // 只有命令和写文件能记住「总是允许」。
+          canRemember={["shell", "write", "edit"].includes(step.tool)}
+          onDecide={onDecide}
+        />
+      )}
     </li>
+  );
+}
+
+const DECISIONS: { decision: ApprovalDecision; label: string; hint: string }[] = [
+  { decision: "once", label: "允许一次", hint: "只允许这一次" },
+  { decision: "always", label: "总是允许", hint: "这个房间里以后同样的操作不再问" },
+  { decision: "deny", label: "拒绝", hint: "不执行，Bot 会被告知" },
+];
+
+function ApprovalCard({
+  id,
+  reason,
+  expiresAt,
+  canRemember,
+  onDecide,
+}: {
+  id: ApprovalId;
+  reason: string;
+  expiresAt: number;
+  canRemember: boolean;
+  onDecide: Decide;
+}) {
+  const [sending, setSending] = useState<ApprovalDecision | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const decide = async (decision: ApprovalDecision) => {
+    setSending(decision);
+    setError(null);
+    try {
+      await onDecide(id, decision);
+      // 成功后保持按钮禁用：卡片会随事件流送来的新状态消失。
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+      setSending(null);
+    }
+  };
+
+  return (
+    <div className="sa-approval" role="group" aria-label="需要你批准">
+      <p className="sa-approval-reason">{reason}</p>
+      <div className="sa-approval-actions">
+        {DECISIONS.filter(({ decision }) => canRemember || decision !== "always").map(
+          ({ decision, label, hint }) => (
+            <button
+              key={decision}
+              type="button"
+              className="sa-button"
+              data-decision={decision}
+              title={hint}
+              disabled={sending !== null}
+              onClick={() => void decide(decision)}
+            >
+              {sending === decision ? "正在提交…" : label}
+            </button>
+          ),
+        )}
+        <span className="sa-approval-expiry">{formatTime(expiresAt)} 前不处理按拒绝算</span>
+      </div>
+      {error && (
+        <p className="sa-msg-error" role="alert">
+          {error}
+        </p>
+      )}
+    </div>
   );
 }
 
