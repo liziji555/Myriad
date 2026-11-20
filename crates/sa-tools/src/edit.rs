@@ -1,4 +1,4 @@
-use crate::write::{write_atomically, write_permission};
+use crate::write::{file_lock, write_atomically, write_permission, STOPPED};
 use crate::{arg, blocking, parse_input, Permission, Tool, ToolCtx, ToolError, ToolResult};
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -65,7 +65,10 @@ impl Tool for EditTool {
         }
         let (path, _) = ctx.fence.resolve_for_write(&input.path)?;
         let shown = input.path.trim().to_string();
+        let cancel = ctx.cancel.clone();
         blocking(move || {
+            // 从读到写回都拿着锁：别的写入不会夹在中间。
+            let _lock = file_lock();
             let io_error = |e: std::io::Error| match e.kind() {
                 std::io::ErrorKind::NotFound => {
                     ToolError(format!("{shown} 不存在。要新建文件请用 write。"))
@@ -97,6 +100,9 @@ impl Tool for EditTool {
                 )));
             }
             let updated = text.replace(&input.old_string, &input.new_string);
+            if cancel.is_cancelled() {
+                return Err(ToolError::new(STOPPED));
+            }
             write_atomically(&path, updated.as_bytes()).map_err(io_error)?;
             Ok(format!("已修改 {shown}（替换了 {count} 处）。"))
         })
@@ -180,5 +186,43 @@ mod tests {
             EditTool.check_permission(&input, &ctx).await,
             Permission::Ask(_)
         ));
+    }
+
+    /// 同时改同一个文件的不同地方：每一处改动都要留下，不能互相盖掉。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_edits_of_one_file_all_land() {
+        let (dir, ctx) = rig();
+        let lines: String = (0..40).map(|i| format!("旧{i:02}\n")).collect();
+        fs::write(dir.path().join("many.txt"), lines).unwrap();
+        let edits = (0..40).map(|i| {
+            let ctx = ctx.clone();
+            tokio::spawn(async move {
+                let input = json!({
+                    "path": "many.txt",
+                    "old_string": format!("旧{i:02}"),
+                    "new_string": format!("新{i:02}"),
+                });
+                EditTool.call(input, &ctx).await.unwrap()
+            })
+        });
+        for edit in edits.collect::<Vec<_>>() {
+            edit.await.unwrap();
+        }
+        let expected: String = (0..40).map(|i| format!("新{i:02}\n")).collect();
+        assert_eq!(
+            fs::read_to_string(dir.path().join("many.txt")).unwrap(),
+            expected
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stopped_edit_changes_nothing() {
+        let (dir, ctx) = rig();
+        let before = fs::read_to_string(dir.path().join("a.rs")).unwrap();
+        ctx.cancel.cancel();
+        let input = json!({"path": "a.rs", "old_string": "let x = 1;", "new_string": "let x = 2;"});
+        let error = EditTool.call(input, &ctx).await.unwrap_err();
+        assert!(error.0.contains("已停止"), "{}", error.0);
+        assert_eq!(fs::read_to_string(dir.path().join("a.rs")).unwrap(), before);
     }
 }

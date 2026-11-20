@@ -56,7 +56,12 @@ impl Tool for WriteTool {
         }
         let (path, _) = ctx.fence.resolve_for_write(&input.path)?;
         let shown = input.path.trim().to_string();
+        let cancel = ctx.cancel.clone();
         blocking(move || {
+            let _lock = file_lock();
+            if cancel.is_cancelled() {
+                return Err(ToolError::new(STOPPED));
+            }
             if path.is_dir() {
                 return Err(ToolError(format!("{shown} 是目录，不能当文件写。")));
             }
@@ -84,7 +89,21 @@ pub(crate) fn write_permission(path: &str, ctx: &ToolCtx) -> Permission {
     }
 }
 
+pub(crate) const STOPPED: &str = "已停止，文件没有改动。";
+
+/// 写文件、改文件一次只做一个。
+///
+/// 两个房间同时改同一个文件时，「读出来、改好、写回去」不能交错，否则后写的会盖掉先写的改动。
+/// 这些操作都很快，所以不按文件分锁，整个进程共用一把。
+pub(crate) fn file_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// 先写到同目录的临时文件再改名：中途失败不会留下写了一半的文件。
+///
+/// 临时文件名每次都不一样，并且只在它不存在时才创建：
+/// 不会和别的写入撞名，也不会顺着别人事先放好的符号链接写到别处去。
 pub(crate) fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let dir = path
         .parent()
@@ -94,9 +113,12 @@ pub(crate) fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()>
         .file_name()
         .ok_or_else(|| std::io::Error::other("路径没有文件名"))?
         .to_string_lossy();
-    let temp = dir.join(format!(".{name}.sa-tmp-{}", std::process::id()));
+    let temp = dir.join(format!(".{name}.sa-tmp-{}", uuid::Uuid::new_v4().simple()));
     let result = (|| {
-        let mut file = std::fs::File::create(&temp)?;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)?;
         file.write_all(bytes)?;
         file.sync_all()?;
         // 覆盖已有文件时保留它原来的权限（比如可执行位）。
@@ -218,5 +240,63 @@ mod tests {
             WriteTool.check_permission(&input, &ctx).await,
             Permission::Ask(_)
         ));
+    }
+
+    /// 同时写同一个文件：最后留下的是其中一份完整的内容，不会混在一起，也不留临时文件。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_writes_never_mix_and_leave_no_temp_files() {
+        let (outer, ctx) = rig();
+        let writes = (0..24u8).map(|i| {
+            let ctx = ctx.clone();
+            tokio::spawn(async move {
+                let content = char::from(b'a' + i).to_string().repeat(200_000);
+                let input = json!({"path": "same.txt", "content": content});
+                WriteTool.call(input, &ctx).await.unwrap()
+            })
+        });
+        for write in writes.collect::<Vec<_>>() {
+            write.await.unwrap();
+        }
+        let work = outer.path().join("work");
+        let text = fs::read_to_string(work.join("same.txt")).unwrap();
+        assert_eq!(text.len(), 200_000);
+        let first = text.chars().next().unwrap();
+        assert!(text.chars().all(|c| c == first), "两次写入的内容混在一起了");
+        let leftovers: Vec<_> = fs::read_dir(&work)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains("sa-tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
+    }
+
+    /// 临时文件只在不存在时创建：事先放在那里的符号链接不会被顺着写出去。
+    #[cfg(unix)]
+    #[test]
+    fn temp_file_is_never_opened_through_an_existing_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let secret = dir.path().join("secret.txt");
+        fs::write(&secret, "原样").unwrap();
+        // 旧的命名方式（进程号）下，这个链接会被当成临时文件打开并截断。
+        let planted = dir
+            .path()
+            .join(format!(".note.md.sa-tmp-{}", std::process::id()));
+        std::os::unix::fs::symlink(&secret, &planted).unwrap();
+        write_atomically(&dir.path().join("note.md"), b"new").unwrap();
+        assert_eq!(fs::read_to_string(&secret).unwrap(), "原样");
+        assert_eq!(
+            fs::read_to_string(dir.path().join("note.md")).unwrap(),
+            "new"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stopped_write_changes_nothing() {
+        let (outer, ctx) = rig();
+        ctx.cancel.cancel();
+        let input = json!({"path": "late.txt", "content": "x"});
+        let error = WriteTool.call(input, &ctx).await.unwrap_err();
+        assert!(error.0.contains("已停止"), "{}", error.0);
+        assert!(!outer.path().join("work/late.txt").exists());
     }
 }
