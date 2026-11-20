@@ -152,7 +152,7 @@ fn leaves_a_mark(tool: &str) -> bool {
         "web_fetch",
         "todo",
         "skill",
-        "subagent",
+        "agent",
     ];
     !READ_ONLY.contains(&tool)
 }
