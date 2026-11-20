@@ -180,6 +180,48 @@ async fn commands_and_approvals_are_on_record_and_reading_is_not() {
 }
 
 #[tokio::test]
+async fn stopping_while_an_approval_is_pending_is_on_record() {
+    let dir = tempfile::tempdir().unwrap();
+    let rig = boot(
+        dir.path(),
+        vec![MockReply::tool_calls(
+            "",
+            &[("c1", "shell", r#"{"command":"echo 一"}"#)],
+        )],
+    );
+    rig.orchestrator
+        .post_message(&rig.room, "跑个命令".into())
+        .await
+        .unwrap();
+    rig.until("有一步在等批准", |m| {
+        m.steps.iter().any(|step| step.state == StepState::Waiting)
+    })
+    .await;
+    assert!(rig.orchestrator.stop(&rig.room));
+    rig.until("回复停下", |m| m.state == MessageState::Cancelled)
+        .await;
+    let dropped = AuditFilter {
+        action: Some("approval.".into()),
+        ..Default::default()
+    };
+    // 记录是停下之后在后台写的，等它一下。
+    let mut entries = vec![];
+    for _ in 0..200 {
+        entries = rig.engine.list_audit(&dropped, 50).unwrap().entries;
+        if !entries.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert_eq!(entries.len(), 1, "{entries:?}");
+    assert_eq!(entries[0].action, "approval.dropped");
+    assert_eq!(entries[0].actor, AuditActor::System);
+    assert!(entries[0].summary.contains("echo 一") && entries[0].summary.contains("没等到答复"));
+    assert_eq!(entries[0].room_id.as_ref(), Some(&rig.room));
+    rig.orchestrator.shutdown().await;
+}
+
+#[tokio::test]
 async fn an_approval_nobody_answers_is_recorded_as_expired() {
     let dir = tempfile::tempdir().unwrap();
     let mut rig = boot(dir.path(), vec![]);

@@ -874,7 +874,23 @@ impl Observer for RoomObserver {
         });
         self.save_steps().await;
 
-        // 没人答复的三种情况都按拒绝算，审计里分开记：到时间了、这一轮被停下了。
+        // 这一轮被停下时，等答复的这段代码是被直接丢掉的，走不到下面记审计的地方：
+        // 所以先备好「没等到答复就停下了」这一条，被丢掉时由它记上；等到了结果再把它撤掉。
+        let task = self.rule_scope.clone().map(sa_protocol::TaskId::from);
+        let dropped = format!(
+            "{} 要「{}」：没等到答复就停下了，按拒绝算",
+            self.bot.name, request.title
+        );
+        let mut unanswered = Unanswered {
+            engine: self.shared.engine.clone(),
+            entry: Some(
+                Audit::system("approval.dropped", dropped)
+                    .room(&self.room_id)
+                    .task(task.as_ref())
+                    .detail(request.reason),
+            ),
+        };
+        // 没人答复的几种情况都按拒绝算，审计里分开记：到时间了、这一轮被停下了。
         let (decision, verdict) = tokio::select! {
             answer = answer => match answer {
                 Ok(ApprovalDecision::Once) => (ApprovalDecision::Once, ("approval.allowed", "允许一次")),
@@ -884,6 +900,7 @@ impl Observer for RoomObserver {
             },
             _ = tokio::time::sleep(timeout) => (ApprovalDecision::Deny, ("approval.expired", "到时间没人处理，按拒绝算")),
         };
+        unanswered.entry = None;
         self.beat();
         let (action, label) = verdict;
         let summary = format!("{} 要「{}」：{label}", self.bot.name, request.title);
@@ -939,6 +956,26 @@ struct Pending<'a> {
 impl Drop for Pending<'_> {
     fn drop(&mut self) {
         self.shared.approvals.lock().unwrap().remove(&self.id);
+    }
+}
+
+/// 还没等到结果的审批。就这么被丢掉（这一轮被停下了）时，把「没等到答复」记进审计。
+struct Unanswered {
+    engine: Arc<sa_engine::Engine>,
+    entry: Option<Audit>,
+}
+
+impl Drop for Unanswered {
+    fn drop(&mut self) {
+        let Some(entry) = self.entry.take() else {
+            return;
+        };
+        let engine = self.engine.clone();
+        // 写数据库不占着异步线程；运行时已经在收尾时就地写。
+        match tokio::runtime::Handle::try_current() {
+            Ok(runtime) => drop(runtime.spawn_blocking(move || engine.audit(entry))),
+            Err(_) => engine.audit(entry),
+        }
     }
 }
 
