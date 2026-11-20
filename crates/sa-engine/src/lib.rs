@@ -12,6 +12,7 @@ mod routines;
 mod rules;
 mod tasks;
 mod team;
+mod templates;
 
 use sa_protocol::{
     Bot, BotId, BotKind, Event, EventKind, Message, MessageDelta, MessageId, Millis, ModelTier,
@@ -39,6 +40,7 @@ pub use tasks::{
 };
 pub use team::{find_mentions, BotPatch, MAX_BOT_NAME_CHARS, MAX_PERSONA_CHARS, MAX_ROOM_MEMBERS};
 
+pub use templates::{MAX_TEMPLATE_BOTS, TEMPLATE_VERSION};
 pub const MAX_ROOM_NAME_CHARS: usize = 60;
 pub const MAX_MESSAGE_CHARS: usize = 100_000;
 /// 流式片段的广播缓冲。订阅者落后超过这个数会收到 `Lagged`，应当重新取快照。
@@ -55,6 +57,20 @@ pub enum EngineError {
 }
 
 pub type Result<T> = std::result::Result<T, EngineError>;
+
+/// 新房间的名字合不合规矩。
+pub(crate) fn check_room_name(name: &str) -> Result<()> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(EngineError::Invalid("房间名不能为空".into()));
+    }
+    if name.chars().count() > MAX_ROOM_NAME_CHARS {
+        return Err(EngineError::Invalid(format!(
+            "房间名不能超过 {MAX_ROOM_NAME_CHARS} 个字"
+        )));
+    }
+    Ok(())
+}
 
 pub struct Engine {
     store: Store,
@@ -136,14 +152,7 @@ impl Engine {
     /// 新建房间。入口 Bot 取最早创建的、已启用的 Bot（没有则为空）。
     pub fn create_room(&self, name: &str) -> Result<Room> {
         let name = name.trim();
-        if name.is_empty() {
-            return Err(EngineError::Invalid("房间名不能为空".into()));
-        }
-        if name.chars().count() > MAX_ROOM_NAME_CHARS {
-            return Err(EngineError::Invalid(format!(
-                "房间名不能超过 {MAX_ROOM_NAME_CHARS} 个字"
-            )));
-        }
+        check_room_name(name)?;
         let now = now_ms();
         let (room, seq) = self.store.write(|tx| {
             let host = bots::list(tx)?
