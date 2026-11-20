@@ -212,4 +212,86 @@ mod tests {
         assert_eq!(redact("/srv/origin.git"), "/srv/origin.git");
         assert_eq!(encode("me:sa/task-1 x"), "me%3Asa%2Ftask-1%20x");
     }
+
+    /// 假的 GitHub：开 PR 一律回 `status` 和 `body`；查 PR 回一个已有的，并记下查询参数。
+    async fn fake(
+        status: u16,
+        body: Value,
+    ) -> (GitHub, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        use axum::extract::RawQuery;
+        use axum::http::StatusCode;
+        use axum::routing::post;
+        let queries = std::sync::Arc::new(std::sync::Mutex::new(vec![]));
+        let seen = queries.clone();
+        let app = axum::Router::new().route(
+            "/repos/me/proj/pulls",
+            post(move || async move { (StatusCode::from_u16(status).unwrap(), axum::Json(body)) })
+                .get(move |RawQuery(query): RawQuery| async move {
+                    seen.lock().unwrap().push(query.unwrap_or_default());
+                    axum::Json(
+                        json!([{ "html_url": "https://github.test/me/proj/pull/3", "number": 3 }]),
+                    )
+                }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let github = GitHub {
+            api_base: format!("http://{address}/"),
+            token: Some("t0ken".into()),
+            repo: None,
+        };
+        (github, queries)
+    }
+
+    const PR: NewPr<'static> = NewPr {
+        repo: "me/proj",
+        title: "标题",
+        body: "",
+        head: "sa/task-1",
+        base: "main",
+    };
+
+    /// 上次开出来了但没来得及记下：再开时 GitHub 说已经有了，就把那一个找回来。
+    #[tokio::test]
+    async fn an_existing_pr_for_the_branch_is_adopted() {
+        let said = json!({
+            "message": "Validation Failed",
+            "errors": [{ "message": "A pull request already exists for me:sa/task-1." }]
+        });
+        let (github, queries) = fake(422, said).await;
+        let found = open_pr(&github, PR, &CancellationToken::new()).await;
+        let expected = PullRequest {
+            url: "https://github.test/me/proj/pull/3".into(),
+            number: 3,
+        };
+        assert_eq!(found, Ok(expected));
+        assert_eq!(
+            *queries.lock().unwrap(),
+            ["state=open&head=me%3Asa%2Ftask-1"]
+        );
+    }
+
+    #[tokio::test]
+    async fn failures_say_what_went_wrong_without_the_token() {
+        let (github, queries) = fake(401, json!({ "message": "Bad credentials" })).await;
+        let error = open_pr(&github, PR, &CancellationToken::new())
+            .await
+            .unwrap_err();
+        assert!(error.contains("401") && !error.contains("t0ken"), "{error}");
+
+        let said = json!({ "message": "Validation Failed", "errors": [{ "message": "No commits between main and sa/task-1" }] });
+        let (github, _) = fake(422, said).await;
+        let error = open_pr(&github, PR, &CancellationToken::new())
+            .await
+            .unwrap_err();
+        assert!(error.contains("No commits between"), "{error}");
+        assert!(queries.lock().unwrap().is_empty());
+
+        let no_token = GitHub::default();
+        let error = open_pr(&no_token, PR, &CancellationToken::new())
+            .await
+            .unwrap_err();
+        assert_eq!(error, NO_TOKEN);
+    }
 }
