@@ -39,6 +39,8 @@ impl Default for Routines {
 }
 
 const POLL: Duration = Duration::from_millis(50);
+/// 停下一个超时的定时任务之后，最多等这么久让它收尾。
+const STOP_GRACE: Duration = Duration::from_secs(10);
 
 impl Orchestrator {
     /// 启动定时器：每隔一阵看一遍，直到服务关闭。
@@ -137,9 +139,11 @@ impl Orchestrator {
     }
 
     fn room_busy(&self, room_id: &RoomId) -> bool {
-        if self.shared.routine_rooms.lock().unwrap().contains(room_id) {
-            return true;
-        }
+        self.shared.routine_rooms.lock().unwrap().contains(room_id) || self.room_active(room_id)
+    }
+
+    /// 房间的后台任务是不是正在干活。
+    fn room_active(&self, room_id: &RoomId) -> bool {
         let rooms = self.rooms.lock().unwrap();
         rooms
             .get(room_id)
@@ -259,6 +263,15 @@ impl Orchestrator {
             }
         };
 
+        if !finished {
+            // 到时间了还没做完：停下它。不然这一次已经记成「没做成」、租约也还了，Bot 却还在接着动手。
+            self.stop(&routine.room_id);
+            let deadline = tokio::time::Instant::now() + STOP_GRACE;
+            while self.room_active(&routine.room_id) && tokio::time::Instant::now() < deadline {
+                tokio::time::sleep(POLL).await;
+            }
+        }
+
         let (engine, room_id) = (shared.engine.clone(), routine.room_id.clone());
         let after = db(move || engine.messages_after(&room_id, posted.seq)).await?;
         let reply = after.iter().find(|message| {
@@ -271,7 +284,10 @@ impl Orchestrator {
             }
             Some(reply) if reply.state == MessageState::Streaming || !finished => (
                 RoutineResult::Failed,
-                format!("等了 {} 分钟还没做完", settings.settle.as_secs() / 60),
+                format!(
+                    "等了 {} 分钟还没做完，已经停下",
+                    settings.settle.as_secs() / 60
+                ),
             ),
             Some(reply) => (
                 RoutineResult::Failed,
@@ -282,7 +298,10 @@ impl Orchestrator {
             ),
             None if !finished => (
                 RoutineResult::Failed,
-                format!("等了 {} 分钟还没轮到", settings.settle.as_secs() / 60),
+                format!(
+                    "等了 {} 分钟还没做完，已经停下",
+                    settings.settle.as_secs() / 60
+                ),
             ),
             None => (RoutineResult::Silent, String::new()),
         }))

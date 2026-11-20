@@ -2,9 +2,12 @@
 
 use sa_engine::{now_ms, Engine};
 use sa_llm::{MockProvider, MockReply};
-use sa_orchestrator::{Budget, ModelRouter, Orchestrator, Price, ResolvedModel, Settings};
+use sa_orchestrator::{
+    Budget, ModelRouter, Orchestrator, Price, ResolvedModel, Routines, Settings,
+};
 use sa_protocol::{
-    Message, MessageKind, ModelTier, NoticeKind, RoomId, Routine, RoutineResult, Sender,
+    Message, MessageKind, MessageState, ModelTier, NoticeKind, RoomId, Routine, RoutineResult,
+    Sender,
 };
 use sa_store::Store;
 use sa_tools::Fence;
@@ -33,6 +36,15 @@ struct Rig {
 }
 
 fn start(dir: &Path, replies: Vec<MockReply>, budget: Budget) -> Rig {
+    start_with(
+        dir,
+        MockProvider::scripted(replies),
+        budget,
+        Routines::default(),
+    )
+}
+
+fn start_with(dir: &Path, mock: MockProvider, budget: Budget, routines: Routines) -> Rig {
     let data = dir.join("data");
     let workspace = dir.join("ws");
     std::fs::create_dir_all(&data).unwrap();
@@ -40,7 +52,7 @@ fn start(dir: &Path, replies: Vec<MockReply>, budget: Budget) -> Rig {
     let engine = Arc::new(Engine::new(Store::open(&data.join("state.db")).unwrap()).unwrap());
     engine.ensure_defaults().unwrap();
     let room = engine.list_rooms().unwrap().pop().unwrap();
-    let mock = Arc::new(MockProvider::scripted(replies));
+    let mock = Arc::new(mock);
     let settings = Settings {
         sessions_dir: data.join("sessions"),
         fence: Fence::new(&workspace, std::slice::from_ref(&data)).unwrap(),
@@ -52,7 +64,7 @@ fn start(dir: &Path, replies: Vec<MockReply>, budget: Budget) -> Rig {
         github: None,
         budget,
         watchdog: Default::default(),
-        routines: Default::default(),
+        routines,
     };
     Rig {
         orchestrator: Arc::new(Orchestrator::new(
@@ -290,5 +302,41 @@ async fn routines_due_together_in_one_room_run_one_per_tick() {
     assert_eq!(done[0].id, second.id);
     assert_eq!(done[0].last_result, Some(RoutineResult::Spoke));
     assert_eq!(rig.bot_said(), ["第一个做完了。", "第二个做完了。"]);
+    rig.orchestrator.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_routine_that_runs_out_of_time_is_stopped_not_left_running() {
+    let dir = tempfile::tempdir().unwrap();
+    // 一个字一个字慢慢写，远远超过给它的时间。
+    let slow = MockProvider::scripted(vec![MockReply::text(&"慢".repeat(2_000))])
+        .with_chunk_delay(Duration::from_millis(100));
+    let routines = Routines {
+        settle: Duration::from_millis(300),
+        ..Routines::default()
+    };
+    let rig = start_with(dir.path(), slow, Budget::default(), routines);
+    rig.due(1_000);
+
+    let done = rig.orchestrator.routines_tick().await;
+    assert_eq!(done[0].last_result, Some(RoutineResult::Failed));
+    assert!(
+        done[0].last_note.contains("已经停下"),
+        "{}",
+        done[0].last_note
+    );
+
+    // 记成「没做成」的时候它已经停了：不会在租约还掉之后接着写。
+    let replies: Vec<Message> = rig
+        .messages()
+        .into_iter()
+        .filter(|m| m.kind == MessageKind::Chat && m.sender != Sender::User)
+        .collect();
+    assert_eq!(replies.len(), 1);
+    assert_eq!(replies[0].state, MessageState::Cancelled);
+    let written: usize = replies.iter().map(|reply| reply.content.len()).sum();
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let later: usize = rig.bot_said().iter().map(String::len).sum();
+    assert_eq!(written, later);
     rig.orchestrator.shutdown().await;
 }
