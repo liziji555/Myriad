@@ -4,6 +4,7 @@
 //! 这一层不调用模型、不发 HTTP。
 
 mod messages;
+mod rules;
 
 use sa_protocol::{
     Bot, BotId, BotKind, Event, EventKind, Message, MessageDelta, MessageId, Millis, ModelTier,

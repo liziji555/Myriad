@@ -268,7 +268,9 @@ impl Printer {
                 continue;
             }
             let line = match step.state {
+                StepState::Waiting => format!("  ? {}（等你批准）", step.title),
                 StepState::Running => format!("  · {} …", step.title),
+                StepState::Denied => format!("  ✗ {}（没有批准，未执行）", step.title),
                 StepState::Ok => format!("  ✓ {}", step.title),
                 StepState::Error => format!("  ✗ {}（失败，原因已交给 Bot）", step.title),
                 StepState::Cancelled => format!("  - {}（已停止）", step.title),
