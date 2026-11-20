@@ -2,7 +2,7 @@
 
 Rust 多 Bot Agent Harness：房间里的 AI 团队。一个可执行文件，自带内核、本机服务和三栏界面。
 
-## 现在能做什么（M4）
+## 现在能做什么（M5a）
 
 - 任务：Bot 把要花些功夫的事开成任务，在独立的目录里做，做完交给你验收；验收通过，改动才回到你的工作目录
 - 任务里可以派子代理去查资料（只读），可以把任务分支推到远端、在 GitHub 上开 PR（每次都要你批准）
@@ -18,9 +18,11 @@ Rust 多 Bot Agent Harness：房间里的 AI 团队。一个可执行文件，�
 - `sa serve`：本机服务 + 三栏界面（房间、时间线、输入框、右侧面板）
 - `sa chat`：在终端里对话
 - `sa task`：在终端里看任务、开任务、验收
+- 花费有上限：每天的上限到了就暂停调用模型，每个任务也有上限；界面右侧「用量」页和 `sa usage` 看花了多少
+- 看门狗：跑太久、没动静、花得特别多的任务会被自动停下并提醒你；Bot 转圈说同一句话也会被停下
 - `sa doctor`：检查数据目录、配置、模型密钥、git、GitHub 令牌、数据库、端口和前端页面
 
-还不能做：定时和看门狗、预算守卫、Telegram、GitHub 事件（评论、CI 结果）、MCP。这些在后面的里程碑里。
+还不能做：定时任务、Telegram、GitHub 事件（评论、CI 结果）、MCP。这些在后面的里程碑里。
 
 ## 运行
 
@@ -84,9 +86,8 @@ mid = { provider = "opencode-go", model = "deepseek-v4.1-flash" }
 strong = { provider = "opencode-go", model = "deepseek-v4.1-flash" }
 ```
 
-密钥只从环境变量读，不会写进配置文件或数据库。`config.toml` 里的每日花费上限这个版本还没有生效，
-花费请在模型服务的控制台里看。换模型、换服务地址改数据目录里的 `config.toml`，
-改完用 `sa doctor` 检查。
+密钥只从环境变量读，不会写进配置文件或数据库。换模型、换服务地址改数据目录里的 `config.toml`，
+改完用 `sa doctor` 检查。接上真实模型之前，先按下面「花了多少、什么时候停」把 `[prices]` 改成你用的服务的价格。
 
 ### Bot 能看到什么
 
@@ -225,6 +226,49 @@ token_env = "GITHUB_TOKEN"
 
 接口：`GET/POST /api/rooms/{房间}/tasks`、`GET /api/tasks/{id}`、`POST /api/tasks/{id}/{resume|accept|reject|stop|cancel}`（请求体 `{"note": "…", "owner_bot_id": "…"}`，都可以不带）。
 
+### 花了多少、什么时候停
+
+每次调用模型之后，按 `config.toml` 里 `[prices]` 的价格把这次的 token 折成钱记下来。这是估算：
+实际扣多少以模型服务的账单为准。默认的价格是故意偏高的占位，请改成你用的服务的价目表
+（每一百万 token 多少钱，单位是 `[budget]` 的 `currency`）：
+
+```toml
+[budget]
+daily_limit = 50.0   # 所有房间加起来每天最多花多少，0 表示不限
+task_limit = 10.0    # 一个任务最多花多少，0 表示不限
+currency = "CNY"
+
+[prices]
+default = { input = 10.0, cached_input = 10.0, output = 30.0 }      # 没有单独写的模型
+"deepseek-flash" = { input = 1.0, cached_input = 0.1, output = 2.0 }  # 名字和 [tiers] 里的 model 一样
+```
+
+| 情况 | 会怎样 |
+|------|--------|
+| 今天花到每日上限的 80% | 提醒一次 |
+| 今天花到每日上限 | 之后的模型调用在发出去之前就被拦下：对话里的回复显示失败和原因，排队的任务不开工，正在做的任务停成「卡住了」。第二天（本机时间零点）起可以照常调用，排队的任务自动开工，停成「卡住了」的要你点继续；也可以调高 `daily_limit` 后重启 |
+| 一个任务花到任务上限 | 任务停成「卡住了」等你。让它继续就是再给它一份额度 |
+
+检查在每次调用之前做，所以最后一次调用可能让花费略微超过上限。老的配置文件里没有 `task_limit` 和 `[prices]` 也能用：
+任务上限按 10，价格按上面 `default` 那一行算。
+
+`sa serve` 运行时，看门狗每分钟看一遍：
+
+| 看到什么 | 做什么 |
+|----------|--------|
+| 一次运行跑了 1 小时 | 提醒；跑到 3 小时停下它，任务变成「卡住了」 |
+| 正在做的任务 30 分钟没有输出、也没有调用工具 | 停下它，任务变成「卡住了」 |
+| 人说完一句话之后，Bot 把同一句话说了 3 遍 | 停下这个房间里正在进行的对话 |
+| 一个任务花的钱超过做完的任务平均花费的 3 倍（至少有 5 个做完的任务可比） | 停下它，等你决定要不要继续 |
+| 排队的任务超过 50 个，或者有任务等了 10 分钟以上 | 提醒 |
+| 最近一小时结束的运行里失败的超过三成（至少 3 次） | 提醒 |
+| 数据目录所在的磁盘剩余不到 10%，或者数据库超过 1 GB | 提醒 |
+
+看门狗不调用模型，也不往外发任何东西。被它停下的任务，改动都还在，让它继续就接着做。
+提醒显示在时间线上方，可以收起；同一件事只提醒一次。
+
+接口：`GET /api/usage`、`GET /api/notices`、`POST /api/notices/{id}/dismiss`。
+
 ### 对话太长怎么办
 
 对话快占满模型的上下文窗口时，Bot 会先把前面的部分总结成一份摘要（时间线上显示「对话太长，压缩前面的内容」），
@@ -243,9 +287,10 @@ token_env = "GITHUB_TOKEN"
 | `sa bot list` / `add <名字> [--tier 档位] [--persona 分工] [--room 房间]` / `set <Bot> [--name] [--tier] [--persona] [--enable\|--disable]` / `rm <Bot>` | 管理 Bot |
 | `sa room list` / `add <名字>` / `invite <房间> <Bot>` / `kick <房间> <Bot>` / `host <房间> <Bot>` | 管理房间、成员和入口 Bot |
 | `sa task list [--room 房间]` / `show <任务>` / `add <标题> --scope 做什么 [--acceptance 验收标准] [--owner Bot]` / `resume <任务> [--note 话] [--owner Bot]` / `accept <任务>` / `reject <任务> --note 意见` / `cancel <任务>` | 任务。`<任务>` 可以只写 ID 的开头几位；`add`、`resume`、`reject` 会等到任务需要你处理为止 |
+| `sa usage` | 今天和最近 7 天花了多少，按模型、Bot、任务分 |
 | `sa doctor` | 体检 |
 
-所有命令都可以加 `--data-dir <目录>` 指定数据目录。`sa serve`、`sa chat`、`sa task`、`sa bot`、`sa room` 用同一份数据，同一个数据目录同一时刻只能有一个在运行；
+所有命令都可以加 `--data-dir <目录>` 指定数据目录。`sa serve`、`sa chat`、`sa task`、`sa usage`、`sa bot`、`sa room` 用同一份数据，同一个数据目录同一时刻只能有一个在运行；
 `sa serve` 开着的时候，Bot 和房间在界面的「成员」面板里管理。
 
 数据目录里：`config.toml` 配置，`state.db` 房间和消息，`sessions/*.jsonl` 每个会话发给模型的完整记录，`spill/` 被截短的工具结果的完整内容，`work/` 任务的独立目录，

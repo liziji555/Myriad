@@ -70,6 +70,7 @@ pub fn collect(data_dir: &DataDir, env: &dyn Fn(&str) -> Option<String>) -> Vec<
     };
     if let Some(config) = &config {
         checks.extend(check_api_keys(config, env));
+        checks.push(check_budget(config));
     }
     checks.push(check_git());
     if let Some(config) = &config {
@@ -129,6 +130,36 @@ fn check_data_dir(data_dir: &DataDir) -> Check {
             format!("{} 不可写：{err}", root.display()),
         ),
     }
+}
+
+/// 花费上限是多少；档位用到的模型有没有写价格（没写就按偏高的占位算，会早到上限）。
+fn check_budget(config: &Config) -> Check {
+    let limits = config.budget_notice();
+    let limits = limits.split('。').next().unwrap_or_default();
+    let mut unpriced: Vec<&str> = config
+        .tiers
+        .iter()
+        .map(|(_, tier)| tier.model.as_str())
+        .filter(|model| !config.prices.contains_key(*model))
+        .collect();
+    unpriced.sort_unstable();
+    unpriced.dedup();
+    if unpriced.is_empty() {
+        return Check::new("花费上限", Status::Ok, limits.to_string());
+    }
+    let fallback = if config.prices.contains_key("default") {
+        "[prices] 的 default"
+    } else {
+        "内置的偏高价格"
+    };
+    Check::new(
+        "花费上限",
+        Status::Warn,
+        format!(
+            "{limits}。{} 没有在 [prices] 里写价格，花费按{fallback}估算，可能和实际差得多",
+            unpriced.join("、")
+        ),
+    )
 }
 
 /// 任务要用 git：给每个任务开独立目录、算改了什么、把改动带回来。
@@ -332,5 +363,22 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let check = check_port(listener.local_addr().unwrap());
         assert_eq!(check.status, Status::Warn);
+    }
+
+    #[test]
+    fn models_without_a_price_are_a_warning() {
+        use crate::config::DEFAULT_CONFIG_TOML;
+        // 默认配置只有 default 这一行价格：提醒按它估算。
+        let check = check_budget(&Config::parse(DEFAULT_CONFIG_TOML).unwrap());
+        assert_eq!(check.status, Status::Warn);
+        assert!(check.detail.contains("每天 50 CNY，每个任务 10 CNY"));
+        assert!(check.detail.contains("deepseek-flash、deepseek-v4-pro"));
+        assert!(check.detail.contains("[prices] 的 default"));
+
+        let priced = format!(
+            "{DEFAULT_CONFIG_TOML}\n[prices.\"deepseek-flash\"]\ninput = 1.0\noutput = 2.0\n[prices.\"deepseek-v4-pro\"]\ninput = 3.0\noutput = 6.0\n"
+        );
+        let check = check_budget(&Config::parse(&priced).unwrap());
+        assert_eq!(check.status, Status::Ok, "{}", check.detail);
     }
 }
