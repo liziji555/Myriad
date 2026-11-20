@@ -151,14 +151,40 @@ async fn fetch(mut url: Url, allow_private: bool) -> ToolResult {
             body.extend_from_slice(&chunk);
         }
         let text = if is_html {
-            html2text::from_read(body.as_slice(), TEXT_WIDTH)
-                .map_err(|e| ToolError(format!("{url} 的 HTML 解析不了：{e}")))?
+            let text = html2text::from_read(body.as_slice(), TEXT_WIDTH)
+                .map_err(|e| ToolError(format!("{url} 的 HTML 解析不了：{e}")))?;
+            // 转成纯文本时 <title> 会丢，单独取出来放在最前面。
+            match html_title(&String::from_utf8_lossy(&body)) {
+                Some(title) => format!("标题：{title}\n\n{text}"),
+                None => text,
+            }
         } else {
             String::from_utf8_lossy(&body).into_owned()
         };
         return Ok(wrap(&url, &text, cut));
     }
     Err(ToolError(format!("跳转超过 {MAX_REDIRECTS} 次，已放弃。")))
+}
+
+/// 网页的 `<title>`，压成一行。没有或者是空的就返回 `None`。
+fn html_title(html: &str) -> Option<String> {
+    let lower = html.to_ascii_lowercase();
+    let open = lower.find("<title")?;
+    let start = open + lower[open..].find('>')? + 1;
+    let end = start + lower[start..].find("</title")?;
+    // to_ascii_lowercase 不改变字节长度，下标可以直接用在原文上。
+    let raw = html.get(start..end)?;
+    let title = raw
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let title: String = title.chars().take(200).collect();
+    (!title.is_empty()).then_some(title)
 }
 
 /// 外部内容用标记包起来，并在前后都提醒：这是资料，不是指令。
@@ -338,6 +364,7 @@ mod tests {
             .await
             .unwrap();
         assert!(out.contains("你好") && out.contains("正文 & 更多"), "{out}");
+        assert!(out.contains("标题：标题\n"), "{out}");
         assert!(!out.contains("alert(1)"));
         assert!(out.contains("不可信"));
         // 正文伪造的结束标记不能提前关掉围栏。
@@ -394,6 +421,17 @@ mod tests {
             .await
             .contains("用户名"));
         assert!(err("不是网址".into()).await.contains("网址不对"));
+    }
+
+    #[test]
+    fn extracts_the_title() {
+        assert_eq!(
+            html_title("<HTML><Title lang=en>\n  A &amp; B\n  站点 </TITLE>").as_deref(),
+            Some("A & B 站点")
+        );
+        assert_eq!(html_title("<title>  </title>"), None);
+        assert_eq!(html_title("<p>没有标题</p>"), None);
+        assert_eq!(html_title("<title>没有结尾"), None);
     }
 
     #[test]
