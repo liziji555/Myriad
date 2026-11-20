@@ -288,3 +288,60 @@ async fn an_mcp_server_that_cannot_start_is_reported_and_harms_nothing() {
         .all(|tool| !tool.name.starts_with("mcp__")));
     rig.orchestrator.shutdown().await;
 }
+
+#[tokio::test]
+async fn a_server_that_died_after_connecting_is_not_shown_as_connected() {
+    let dir = tempfile::tempdir().unwrap();
+    let rig = start(dir.path(), vec![], Budget::default());
+    // 第一次和第三次能连上，第二次连不上。
+    let dials = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let dialer: Dialer = Box::new(move || {
+        let attempt = dials.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Box::pin(async move {
+            if attempt == 1 {
+                return Err(sa_tools::mcp::McpError("找不到命令「demo」".into()));
+            }
+            let (ours, theirs) = tokio::io::duplex(64 * 1024);
+            let (server_in, server_out) = tokio::io::split(theirs);
+            tokio::spawn(run_demo_server(server_in, server_out));
+            let (reader, writer) = tokio::io::split(ours);
+            Ok(Pipe::new(reader, writer))
+        })
+    });
+    let server = Arc::new(McpServer::with_dialer("demo", vec![], dialer));
+    rig.orchestrator.connect_mcp(server.clone()).await.unwrap();
+    let state = || rig.orchestrator.extensions().mcp.remove(0);
+    assert_eq!(state().state, McpState::Ready);
+
+    // 服务自己退出了：还没人再调用它，也不能说「已连上」。
+    let never = tokio_util::sync::CancellationToken::new();
+    assert!(server
+        .call("quit", serde_json::json!({}), &never)
+        .await
+        .is_err());
+    let died = state();
+    assert_eq!(died.state, McpState::Failed);
+    assert!(died.error.unwrap().contains("下一次调用时会重新启动"));
+    assert_eq!(died.tools.len(), 5);
+
+    // 重新启动没成：写明原因。
+    assert!(server
+        .call("echo", serde_json::json!({ "text": "在吗" }), &never)
+        .await
+        .is_err());
+    let failed = state();
+    assert_eq!(failed.state, McpState::Failed);
+    assert_eq!(
+        failed.error.as_deref(),
+        Some("重新连接没成：找不到命令「demo」")
+    );
+
+    // 再下一次连上了：恢复成「已连上」。
+    let back = server
+        .call("echo", serde_json::json!({ "text": "在吗" }), &never)
+        .await;
+    assert_eq!(back.unwrap(), "在吗");
+    let ready = state();
+    assert_eq!((ready.state, ready.error), (McpState::Ready, None));
+    rig.orchestrator.shutdown().await;
+}

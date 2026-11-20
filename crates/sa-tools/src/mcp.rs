@@ -445,6 +445,8 @@ pub struct McpServer {
     dialer: Dialer,
     timeouts: McpTimeouts,
     conn: tokio::sync::Mutex<Option<Arc<Connection>>>,
+    /// 上一次重新连接为什么没成。连上了就清掉。
+    trouble: Mutex<Option<String>>,
 }
 
 impl McpServer {
@@ -466,6 +468,7 @@ impl McpServer {
             dialer,
             timeouts: McpTimeouts::default(),
             conn: tokio::sync::Mutex::new(None),
+            trouble: Mutex::new(None),
         }
     }
 
@@ -490,7 +493,18 @@ impl McpServer {
         *slot = None;
         let (conn, tools) = self.dial().await?;
         *slot = Some(conn);
+        *self.trouble.lock().unwrap() = None;
         Ok(tools)
+    }
+
+    /// 连上之后又出了什么事：服务退出了还没重新启动，或者重新启动没成。一切正常是 `None`。
+    pub fn problem(&self) -> Option<String> {
+        if let Some(trouble) = self.trouble.lock().unwrap().clone() {
+            return Some(format!("重新连接没成：{trouble}"));
+        }
+        let slot = self.conn.try_lock().ok()?;
+        let conn = slot.as_ref().filter(|conn| conn.is_closed())?;
+        Some(format!("{}下一次调用时会重新启动。", conn.gone()))
     }
 
     /// 断开。进程一起结束。
@@ -505,7 +519,9 @@ impl McpServer {
             return Ok(conn.clone());
         }
         *slot = None;
-        let (conn, _) = self.dial().await?;
+        let dialed = self.dial().await;
+        *self.trouble.lock().unwrap() = dialed.as_ref().err().map(|error| error.0.clone());
+        let (conn, _) = dialed?;
         *slot = Some(conn.clone());
         Ok(conn)
     }

@@ -22,6 +22,20 @@ pub(crate) struct BotSkills {
     pub tool: Option<SkillTool>,
 }
 
+impl Mcp {
+    /// 现在的样子。连上之后服务又退出了、重新启动也没成的，不能还说「已连上」。
+    fn now(&self) -> McpServerInfo {
+        let mut info = self.info.clone();
+        if info.state == McpState::Ready {
+            if let Some(problem) = self.server.problem() {
+                info.state = McpState::Failed;
+                info.error = Some(problem);
+            }
+        }
+        info
+    }
+}
+
 impl Shared {
     /// 现在每个 Bot 都有的工具。
     pub(crate) fn tools(&self) -> sa_tools::ToolRegistry {
@@ -148,7 +162,7 @@ impl Orchestrator {
         Extensions {
             skills: skills.collect(),
             skill_problems: set.problems,
-            mcp: mcp.iter().map(|mcp| mcp.info.clone()).collect(),
+            mcp: mcp.iter().map(Mcp::now).collect(),
         }
     }
 }
