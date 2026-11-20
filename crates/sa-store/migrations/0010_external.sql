@@ -60,9 +60,3 @@ CREATE TABLE outbound (
 ) STRICT;
 
 CREATE INDEX outbound_pending ON outbound (retry_at) WHERE state = 'pending';
-
--- 零碎的状态，例如 Telegram 读到哪一条了。
-CREATE TABLE kv (
-    key   TEXT PRIMARY KEY,
-    value TEXT NOT NULL
-) STRICT;

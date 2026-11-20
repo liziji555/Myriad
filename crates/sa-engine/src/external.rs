@@ -305,14 +305,6 @@ impl Engine {
             .store
             .write(|tx| external::enqueue(tx, source, target, body, key, now_ms()))?)
     }
-
-    pub fn kv_get(&self, key: &str) -> Result<Option<String>> {
-        Ok(self.store.read(|c| external::kv_get(c, key))?)
-    }
-
-    pub fn kv_put(&self, key: &str, value: &str) -> Result<()> {
-        Ok(self.store.write(|tx| external::kv_put(tx, key, value))?)
-    }
 }
 
 /// GitHub 的仓库名不分大小写，统一成小写；Telegram 的聊天 id 原样。

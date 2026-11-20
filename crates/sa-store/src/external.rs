@@ -237,23 +237,6 @@ pub fn mark_failed(conn: &Connection, id: i64, error: &str, retry_at: Option<i64
     Ok(())
 }
 
-pub fn kv_get(conn: &Connection, key: &str) -> Result<Option<String>> {
-    Ok(conn
-        .query_row("SELECT value FROM kv WHERE key = ?1", [key], |row| {
-            row.get(0)
-        })
-        .optional()?)
-}
-
-pub fn kv_put(conn: &Connection, key: &str, value: &str) -> Result<()> {
-    conn.execute(
-        "INSERT INTO kv (key, value) VALUES (?1, ?2)
-         ON CONFLICT (key) DO UPDATE SET value = excluded.value",
-        params![key, value],
-    )?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -403,21 +386,5 @@ mod tests {
             .read(|c| pending(c, Source::Telegram, 1_000, 10))
             .unwrap()
             .is_empty());
-    }
-
-    #[test]
-    fn kv_keeps_the_latest_value() {
-        let store = Store::open_in_memory().unwrap();
-        assert_eq!(store.read(|c| kv_get(c, "telegram.offset")).unwrap(), None);
-        store
-            .write(|tx| kv_put(tx, "telegram.offset", "7"))
-            .unwrap();
-        store
-            .write(|tx| kv_put(tx, "telegram.offset", "9"))
-            .unwrap();
-        assert_eq!(
-            store.read(|c| kv_get(c, "telegram.offset")).unwrap(),
-            Some("9".into())
-        );
     }
 }

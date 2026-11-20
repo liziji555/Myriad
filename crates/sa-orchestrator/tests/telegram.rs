@@ -122,11 +122,12 @@ impl FakeTelegram {
                     let fresh: Vec<Value> = {
                         let mut fake = fake.0.lock().unwrap();
                         fake.offsets.push(offset);
-                        fake.updates
-                            .iter()
-                            .filter(|update| update["update_id"].as_i64().unwrap() >= offset)
-                            .cloned()
-                            .collect()
+                        // 和真的一样：带着位置来取，就是确认了这之前的；之后不带位置也不会再给。
+                        if offset > 0 {
+                            fake.updates
+                                .retain(|update| update["update_id"].as_i64().unwrap() >= offset);
+                        }
+                        fake.updates.clone()
                     };
                     if fresh.is_empty() {
                         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -235,12 +236,9 @@ async fn a_private_chat_is_paired_and_then_talks_to_the_room() {
         ("42", "张三")
     );
 
-    // 收到哪了记了下来；同一条再送来（重启之后重新收到）不会变成第二条消息。
-    assert_eq!(
-        rig.engine.kv_get("telegram.offset.900").unwrap().as_deref(),
-        Some("5")
-    );
-    assert_eq!(fake.0.lock().unwrap().offsets.last(), Some(&5));
+    // 四条都向 Telegram 确认过了；同一条再送来（重启之后重新收到）不会变成第二条消息。
+    assert!(fake.0.lock().unwrap().offsets.contains(&5));
+    assert!(fake.0.lock().unwrap().updates.is_empty());
     let again = Incoming {
         source: Source::Telegram,
         key: "900:4".into(),
@@ -290,6 +288,37 @@ async fn in_a_group_only_what_is_said_to_the_bot_is_taken() {
     let input = format!("{:?}", requests[0].messages.last().unwrap());
     assert!(input.contains("【张三（Telegram）】看下日志"), "{input}");
     assert!(!input.contains("吃什么"), "{input}");
+    rig.orchestrator.shutdown().await;
+}
+
+#[tokio::test]
+async fn updates_numbered_below_the_last_one_are_still_taken() {
+    let dir = tempfile::tempdir().unwrap();
+    let rig = start(
+        dir.path(),
+        vec![
+            MockReply::text("第一句收到。"),
+            MockReply::text("第二句也收到。"),
+        ],
+        Budget::default(),
+    );
+    let pairing = rig.engine.create_pairing(&rig.room).unwrap();
+    let fake = FakeTelegram::default();
+    fake.says(5_000, 42, "private", &format!("/pair {}", pairing.code));
+    fake.says(5_001, 42, "private", "第一句");
+    connect(&rig, &fake).await;
+    assert_eq!(fake.sent_count(2).await[1], "第一句收到。");
+
+    // 隔了很久（期间取过空的），Telegram 重新编号，新的编号比原来的小。
+    for _ in 0..400 {
+        if fake.0.lock().unwrap().offsets.last() == Some(&0) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    fake.says(17, 42, "private", "第二句");
+    assert_eq!(fake.sent_count(3).await[2], "第二句也收到。");
+    assert_eq!(rig.mock.requests().len(), 2);
     rig.orchestrator.shutdown().await;
 }
 

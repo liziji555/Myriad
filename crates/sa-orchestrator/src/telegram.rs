@@ -1,7 +1,7 @@
 //! Telegram：把那边对机器人说的话收进房间，把房间里的回复送回去。
 //!
-//! 收和送是两条互不相干的循环。收：长轮询，一条更新处理完才把位置往前挪并记下来，
-//! 重启后从记下的位置接着收；更新的编号又是幂等键，收重了也不会变成两条消息。
+//! 收和送是两条互不相干的循环。收：长轮询，一条更新处理完才把位置往前挪（也就是向 Telegram 确认）；
+//! 更新的编号又是幂等键，重启后重新收到的不会变成两条消息。
 //! 送：从待发送里一条一条取，没送成的按原因决定等多久再试。
 
 use crate::room::db;
@@ -84,18 +84,9 @@ impl Orchestrator {
     }
 
     async fn telegram_poll(&self, client: Telegram, options: TelegramOptions, id: i64, me: &str) {
-        // 换了机器人，更新的编号从头算：位置和幂等键都带上是哪个机器人。
-        let cursor = format!("telegram.offset.{id}");
-        let engine = self.shared.engine.clone();
-        let saved = {
-            let (engine, cursor) = (engine.clone(), cursor.clone());
-            db(move || engine.kv_get(&cursor)).await
-        };
-        let mut offset: i64 = saved
-            .ok()
-            .flatten()
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(0);
+        // 位置只用来告诉 Telegram「这之前的都收到了」，不用存：不带位置去取，拿到的就是还没确认的。
+        // 重启后重新拿到的那几条靠幂等键认出来。
+        let mut offset: i64 = 0;
         let mut wait = options.backoff;
         loop {
             let updates = tokio::select! {
@@ -120,6 +111,11 @@ impl Orchestrator {
                     continue;
                 }
             };
+            if updates.is_empty() {
+                // 都确认过了。下一次不带位置去取：Telegram 隔久了会重新编号，
+                // 新的编号可能比记着的位置小，带着旧位置去取会把它们当成已经收到的丢掉。
+                offset = 0;
+            }
             for update in updates {
                 let next = update.update_id + 1;
                 if let Err(error) = self.telegram_update(update, id, me).await {
@@ -130,12 +126,7 @@ impl Orchestrator {
                     }
                     break;
                 }
-                offset = offset.max(next);
-                let (engine, cursor) = (engine.clone(), cursor.clone());
-                let saved = db(move || engine.kv_put(&cursor, &offset.to_string())).await;
-                if let Err(error) = saved {
-                    tracing::warn!("记不下 Telegram 收到哪了：{error}");
-                }
+                offset = next;
             }
         }
     }
