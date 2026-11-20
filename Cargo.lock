@@ -1576,6 +1576,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "sa-orchestrator"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "sa-engine",
+ "sa-kernel",
+ "sa-llm",
+ "sa-protocol",
+ "sa-store",
+ "sa-tools",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "sa-protocol"
 version = "0.1.0"
 dependencies = [
