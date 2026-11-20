@@ -389,10 +389,13 @@ mod tests {
         Status(u16, &'static str),
     }
 
+    type Seen = (Option<String>, Value);
+
     #[derive(Clone, Default)]
     struct Server {
         replies: Arc<Mutex<VecDeque<Canned>>>,
-        seen: Arc<Mutex<Vec<(Option<String>, Value)>>>,
+        /// 每个请求的 `Authorization` 头和请求体。
+        seen: Arc<Mutex<Vec<Seen>>>,
     }
 
     async fn handle(
