@@ -97,8 +97,9 @@ impl Fence {
             match component {
                 Component::CurDir => {}
                 Component::ParentDir => {
-                    // 和操作系统一样：文件后面不能跟 `..`。
-                    if real.exists() && !real.is_dir() {
+                    // 和操作系统一样：文件后面不能跟 `..`。只对围栏里面的路径这么说：
+                    // 外面的和数据目录里的，有没有、是不是文件都不透露，照旧算出路径交给上层去问人或拒绝。
+                    if self.allows(&real) && real.exists() && !real.is_dir() {
                         return Err(ToolError(format!(
                             "路径 {input} 没法解析：`..` 前面的不是目录。"
                         )));
@@ -219,6 +220,11 @@ mod tests {
         assert!(fence.resolve("ok.txt").is_ok());
         assert!(fence.resolve(".superagent/token").is_err());
         assert!(fence.resolve(".superagent").is_err());
+        // 写也一样；并且不透露里面有什么：文件存在和不存在，回答相同。
+        for path in [".superagent/token/../x.txt", ".superagent/没有/../x.txt"] {
+            let error = fence.resolve_for_write(path).unwrap_err();
+            assert!(error.0.contains("数据目录"), "{path}: {error}");
+        }
     }
 
     #[cfg(unix)]
@@ -280,12 +286,20 @@ mod tests {
         assert_eq!(real, outer_real.join("elsewhere/a.txt"));
         assert!(!inside);
         // 文件后面跟 `..`：操作系统不认，这里也不认（不管是文件本身还是指向文件的链接）。
-        std::os::unix::fs::symlink(outer.path().join("elsewhere/x.txt"), root.join("file-link"))
-            .unwrap();
+        std::os::unix::fs::symlink(root.join("x.txt"), root.join("file-link")).unwrap();
         for bad in ["x.txt/../y.txt", "file-link/../y.txt", "docs/y.txt/.."] {
             let error = fence.resolve_for_write(bad).unwrap_err();
             assert!(error.0.contains("不是目录"), "{bad}: {error}");
         }
+        // 围栏外面的文件：不说它存不存在、是不是目录，结果和它不存在时一样。
+        let (there, inside) = fence
+            .resolve_for_write("../elsewhere/x.txt/../y.txt")
+            .unwrap();
+        let (absent, _) = fence
+            .resolve_for_write("../elsewhere/没有/../y.txt")
+            .unwrap();
+        assert_eq!(there, absent);
+        assert!(!inside);
         // 悬空的链接本身可以被换成普通文件；穿过它写到外面要问。
         std::os::unix::fs::symlink(outer.path().join("nowhere"), root.join("dangling")).unwrap();
         let (real, inside) = fence.resolve_for_write("dangling").unwrap();
