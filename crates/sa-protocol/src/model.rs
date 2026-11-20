@@ -144,6 +144,10 @@ pub struct ToolStep {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub approval: Option<StepApproval>,
+    /// 这一步交回来的结果（失败时是原因），截短过，给人展开看。没有结果、被停下的步骤没有。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub output: Option<String>,
 }
 
 /// 一次审批：Bot 想做一件要人点头的事。

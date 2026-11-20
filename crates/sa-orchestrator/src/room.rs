@@ -158,6 +158,77 @@ fn leaves_a_mark(tool: &str) -> bool {
     !READ_ONLY.contains(&tool)
 }
 
+/// 一步的结果在消息里最多留这么多字，给人展开看；完整的在会话记录里。
+pub const MAX_STEP_OUTPUT_CHARS: usize = 2_000;
+/// 一条消息里所有步骤的结果加起来最多留这么多字。超了就从最早的步骤开始不留。
+pub const MAX_MESSAGE_OUTPUT_CHARS: usize = 40_000;
+
+fn step_output(output: &str) -> Option<String> {
+    let output = output.trim_end();
+    if output.trim().is_empty() {
+        return None;
+    }
+    let mut kept: String = output.chars().take(MAX_STEP_OUTPUT_CHARS).collect();
+    if kept.len() < output.len() {
+        kept.push_str("\n…（后面的没有留在这里）");
+    }
+    Some(kept)
+}
+
+/// 步骤很多的回复：结果只留后面的，免得一条消息越存越大。
+fn trim_outputs(steps: &mut [ToolStep]) {
+    let size = |step: &ToolStep| step.output.as_ref().map_or(0, |text| text.chars().count());
+    let mut total: usize = steps.iter().map(size).sum();
+    for step in steps.iter_mut() {
+        if total <= MAX_MESSAGE_OUTPUT_CHARS {
+            break;
+        }
+        total -= size(step);
+        step.output = None;
+    }
+}
+
+#[cfg(test)]
+mod output_tests {
+    use super::*;
+
+    fn step(output: Option<String>) -> ToolStep {
+        ToolStep {
+            id: "c".into(),
+            tool: "shell".into(),
+            title: "执行".into(),
+            state: StepState::Ok,
+            approval: None,
+            output,
+        }
+    }
+
+    #[test]
+    fn a_step_keeps_a_short_result_and_cuts_a_long_one() {
+        assert_eq!(step_output("  \n"), None);
+        assert_eq!(step_output("好了\n\n").as_deref(), Some("好了"));
+        let long = step_output(&"字".repeat(MAX_STEP_OUTPUT_CHARS + 5)).unwrap();
+        assert!(long.starts_with(&"字".repeat(MAX_STEP_OUTPUT_CHARS)));
+        assert!(long.ends_with("（后面的没有留在这里）"));
+        let exact = "字".repeat(MAX_STEP_OUTPUT_CHARS);
+        assert_eq!(step_output(&exact).as_deref(), Some(exact.as_str()));
+    }
+
+    #[test]
+    fn a_reply_with_many_steps_drops_the_oldest_results_first() {
+        let full = "x".repeat(MAX_STEP_OUTPUT_CHARS);
+        let count = MAX_MESSAGE_OUTPUT_CHARS / MAX_STEP_OUTPUT_CHARS;
+        let mut steps: Vec<ToolStep> = (0..count + 2).map(|_| step(Some(full.clone()))).collect();
+        trim_outputs(&mut steps);
+        assert!(steps[0].output.is_none() && steps[1].output.is_none());
+        assert!(steps[2..].iter().all(|step| step.output.is_some()));
+        // 没超的不动。
+        let mut few = vec![step(Some(full.clone())), step(None)];
+        trim_outputs(&mut few);
+        assert!(few[0].output.is_some());
+    }
+}
+
 /// 留底时记工具的哪些参数。写文件、改文件只记是哪个文件：内容在文件里，不往审计里抄一份。
 fn audit_arguments(tool: &str, arguments: &str) -> String {
     if !matches!(tool, "write" | "edit") {
@@ -813,11 +884,12 @@ impl Observer for RoomObserver {
             title: title.to_string(),
             state: StepState::Running,
             approval: None,
+            output: None,
         });
         self.save_steps().await;
     }
 
-    async fn tool_finished(&self, call_id: &str, ok: bool) {
+    async fn tool_finished(&self, call_id: &str, ok: bool, output: &str) {
         self.beat();
         {
             let mut steps = self.steps.lock().unwrap();
@@ -828,7 +900,9 @@ impl Observer for RoomObserver {
                 .find(|s| s.id == call_id && s.state == StepState::Running)
             {
                 step.state = if ok { StepState::Ok } else { StepState::Error };
+                step.output = step_output(output);
             }
+            trim_outputs(&mut steps);
         }
         self.save_steps().await;
     }

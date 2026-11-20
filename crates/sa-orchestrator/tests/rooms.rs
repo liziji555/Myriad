@@ -289,6 +289,14 @@ async fn reads_a_workspace_file_and_shows_the_step() {
             ("read", "读取 ../data/token", StepState::Error),
         ]
     );
+    // 每一步交回来的结果留在消息里，给人展开看：读到了什么、为什么没做成。
+    let read = reply.steps[0].output.as_deref().unwrap();
+    assert!(read.contains("项目代号：海豚"), "{read}");
+    let refused = reply.steps[1].output.as_deref().unwrap();
+    assert!(
+        !refused.is_empty() && !refused.contains("机密令牌"),
+        "{refused}"
+    );
 
     let second = &rig.provider.requests()[1];
     let results: Vec<_> = second
