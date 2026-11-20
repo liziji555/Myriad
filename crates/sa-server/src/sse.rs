@@ -1,5 +1,7 @@
+use crate::error::AppError;
 use crate::routes::blocking;
 use crate::AppState;
+use axum::extract::rejection::QueryRejection;
 use axum::extract::{Query, State};
 use axum::http::HeaderMap;
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
@@ -34,9 +36,10 @@ struct Cursor {
 /// 所以断线期间的事件不会丢。
 pub async fn events(
     State(state): State<AppState>,
-    Query(query): Query<EventsQuery>,
+    query: Result<Query<EventsQuery>, QueryRejection>,
     headers: HeaderMap,
-) -> Sse<impl Stream<Item = Result<SseEvent, Infallible>>> {
+) -> Result<Sse<impl Stream<Item = Result<SseEvent, Infallible>>>, AppError> {
+    let Query(query) = query.map_err(|e| AppError::bad_request(e.body_text()))?;
     let wake = state.engine.subscribe();
     let closing = state.closing.subscribe();
     let head = state.engine.event_head();
@@ -58,7 +61,7 @@ pub async fn events(
         let event = cursor.next().await?;
         Some((Ok(event), cursor))
     });
-    Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
+    Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))))
 }
 
 impl Cursor {

@@ -1,5 +1,6 @@
 use crate::error::AppError;
 use crate::AppState;
+use axum::extract::rejection::JsonRejection;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::Json;
@@ -31,8 +32,9 @@ pub async fn list_rooms(State(state): State<AppState>) -> Result<Json<Vec<Room>>
 
 pub async fn create_room(
     State(state): State<AppState>,
-    Json(body): Json<CreateRoomRequest>,
+    body: Result<Json<CreateRoomRequest>, JsonRejection>,
 ) -> Result<(StatusCode, Json<Room>), AppError> {
+    let Json(body) = body.map_err(|e| AppError::bad_request(e.body_text()))?;
     let room = blocking(&state, move |engine| engine.create_room(&body.name)).await?;
     Ok((StatusCode::CREATED, Json(room)))
 }

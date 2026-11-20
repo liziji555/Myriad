@@ -28,6 +28,15 @@ impl AppError {
         )
     }
 
+    /// 请求本身不合格：JSON 或查询参数解析不了。
+    pub fn bad_request(err: impl std::fmt::Display) -> Self {
+        Self::new(
+            StatusCode::BAD_REQUEST,
+            "bad_request",
+            format!("请求格式不对：{err}"),
+        )
+    }
+
     pub fn internal(err: impl std::fmt::Display) -> Self {
         tracing::error!("内部错误：{err}");
         Self::new(

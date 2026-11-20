@@ -172,6 +172,28 @@ async fn create_room_with_blank_name_is_a_400() {
 }
 
 #[tokio::test]
+async fn malformed_requests_get_a_structured_400() {
+    let (app, _) = app();
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/api/rooms")
+                .header(AUTHORIZATION, format!("Bearer {TOKEN}"))
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"name":3}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(json::<ApiError>(response).await.code, "bad_request");
+
+    let response = app.oneshot(get("/api/events?cursor=abc")).await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(json::<ApiError>(response).await.code, "bad_request");
+}
+
+#[tokio::test]
 async fn unknown_api_path_is_a_json_404() {
     let (app, _) = app();
     let response = app.oneshot(get("/api/nope")).await.unwrap();
