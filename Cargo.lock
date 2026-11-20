@@ -1651,6 +1651,7 @@ dependencies = [
  "futures-util",
  "globset",
  "html2text",
+ "html5ever",
  "ignore",
  "regex",
  "reqwest",

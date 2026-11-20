@@ -10,6 +10,7 @@ async-trait.workspace = true
 futures-util.workspace = true
 globset.workspace = true
 html2text.workspace = true
+html5ever.workspace = true
 ignore.workspace = true
 regex.workspace = true
 reqwest.workspace = true

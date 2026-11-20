@@ -167,22 +167,70 @@ async fn fetch(mut url: Url, allow_private: bool) -> ToolResult {
 }
 
 /// 网页的 `<title>`，压成一行。没有或者是空的就返回 `None`。
+///
+/// 用 HTML 分词器取，不自己找字符串：注释里的、脚本里的 `<title>` 不算，
+/// 字符引用（`&amp;`、`&#8217;`）按浏览器的规则解码。
 fn html_title(html: &str) -> Option<String> {
-    let lower = html.to_ascii_lowercase();
-    let open = lower.find("<title")?;
-    let start = open + lower[open..].find('>')? + 1;
-    let end = start + lower[start..].find("</title")?;
-    // to_ascii_lowercase 不改变字节长度，下标可以直接用在原文上。
-    let raw = html.get(start..end)?;
-    let title = raw
-        .replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'")
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
+    use html5ever::tendril::StrTendril;
+    use html5ever::tokenizer::states::RawKind;
+    use html5ever::tokenizer::{
+        BufferQueue, CharacterTokens, EndTag, StartTag, TagToken, Token, TokenSink,
+        TokenSinkResult, Tokenizer,
+    };
+    use std::cell::{Cell, RefCell};
+
+    #[derive(Default)]
+    struct Sink {
+        text: RefCell<String>,
+        inside: Cell<bool>,
+        /// 标题已经取完，或者已经过了能出现标题的地方。
+        done: Cell<bool>,
+    }
+
+    impl TokenSink for Sink {
+        type Handle = ();
+
+        fn process_token(&self, token: Token, _line: u64) -> TokenSinkResult<()> {
+            match token {
+                TagToken(tag) if tag.kind == StartTag => match &*tag.name {
+                    "title" if !self.done.get() => {
+                        self.inside.set(true);
+                        return TokenSinkResult::RawData(RawKind::Rcdata);
+                    }
+                    // 这些元素的内容是原样文本，里面像标签的东西不是标签。
+                    "script" => return TokenSinkResult::RawData(RawKind::ScriptData),
+                    "style" | "xmp" | "iframe" | "noembed" | "noframes" => {
+                        return TokenSinkResult::RawData(RawKind::Rawtext)
+                    }
+                    "textarea" => return TokenSinkResult::RawData(RawKind::Rcdata),
+                    // 正文里的 <title>（比如 SVG 图标的）不是网页标题。
+                    "body" => self.done.set(true),
+                    _ => {}
+                },
+                TagToken(tag) if tag.kind == EndTag => {
+                    if &*tag.name == "title" && self.inside.get() {
+                        self.inside.set(false);
+                        self.done.set(true);
+                    } else if &*tag.name == "head" {
+                        self.done.set(true);
+                    }
+                }
+                CharacterTokens(text) if self.inside.get() => {
+                    self.text.borrow_mut().push_str(&text);
+                }
+                _ => {}
+            }
+            TokenSinkResult::Continue
+        }
+    }
+
+    let input = BufferQueue::default();
+    input.push_back(StrTendril::from(html));
+    let tokenizer = Tokenizer::new(Sink::default(), Default::default());
+    let _ = tokenizer.feed(&input);
+    tokenizer.end();
+    let text = tokenizer.sink.text.borrow();
+    let title = text.split_whitespace().collect::<Vec<_>>().join(" ");
     let title: String = title.chars().take(200).collect();
     (!title.is_empty()).then_some(title)
 }
@@ -431,7 +479,30 @@ mod tests {
         );
         assert_eq!(html_title("<title>  </title>"), None);
         assert_eq!(html_title("<p>没有标题</p>"), None);
-        assert_eq!(html_title("<title>没有结尾"), None);
+        // 字符引用按浏览器的规则解码，而且只解码一次。
+        assert_eq!(
+            html_title("<title>It&#8217;s &amp;lt;b&amp;gt; &copy; &#x4f60;</title>").as_deref(),
+            Some("It\u{2019}s &lt;b&gt; \u{a9} 你")
+        );
+        // 注释里、脚本里的不算；标题里像标签的东西是文字。
+        assert_eq!(
+            html_title(
+                "<head><!-- <title>旧标题</title> -->\
+                 <script>var s = '<title>脚本里的</title>';</script>\
+                 <title>真标题 <b>不是标签</b></title></head>"
+            )
+            .as_deref(),
+            Some("真标题 <b>不是标签</b>")
+        );
+        // 只认第一个；正文里的（SVG 图标的）不算。
+        assert_eq!(
+            html_title("<title>第一个</title><title>第二个</title>").as_deref(),
+            Some("第一个")
+        );
+        assert_eq!(
+            html_title("<head></head><body><svg><title>图标</title></svg></body>"),
+            None
+        );
     }
 
     #[test]
