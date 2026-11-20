@@ -82,7 +82,10 @@ mod tests {
         assert!(!engine
             .is_always_allowed(&other, "shell", "cargo test")
             .unwrap());
-        assert_eq!(engine.list_rules(&room).unwrap(), [rule.clone()]);
+        assert_eq!(
+            engine.list_rules(&room).unwrap(),
+            std::slice::from_ref(&rule)
+        );
 
         assert!(engine.delete_rule(&rule.id).unwrap());
         assert!(!engine.delete_rule(&rule.id).unwrap());

@@ -177,7 +177,16 @@ async fn hello_gets_a_streamed_reply_from_the_host_bot() {
     let tools: Vec<_> = request.tools.iter().map(|t| t.name.as_str()).collect();
     assert_eq!(
         tools,
-        ["read", "list_dir", "glob", "grep", "web_fetch", "write", "edit", "shell"]
+        [
+            "read",
+            "list_dir",
+            "glob",
+            "grep",
+            "web_fetch",
+            "write",
+            "edit",
+            "shell"
+        ]
     );
     rig.orchestrator.shutdown().await;
 }
