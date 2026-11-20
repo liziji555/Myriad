@@ -5,7 +5,7 @@
 //! 同时最多跑 [`MAX_PARALLEL_RUNS`] 个任务，多的排队。
 
 use crate::agent::AgentTool;
-use crate::deliver::{Delivery, GitPushTool, OpenPrTool};
+use crate::deliver::{push_key, Delivery, GitPushTool, OpenPrTool};
 use crate::room::{db, RoomObserver};
 use crate::{render_work_prompt, workdir, Orchestrator, OrchestratorError, Shared};
 use async_trait::async_trait;
@@ -34,6 +34,8 @@ const BRIEF_MESSAGES: u32 = 10;
 const MAX_FILE_ARTIFACTS: usize = 30;
 const STOPPED_NOTE: &str = "被停下了。补充说明后可以让它继续。";
 const PR_NOTE: &str = "改动在 PR 里，没有合进本地的工作目录。";
+const UNPUSHED_NOTE: &str =
+    "开了 PR 之后任务目录里又有改动还没推送，PR 里看不到。打回并让它再推送一次，或者取消任务。";
 
 #[derive(Default)]
 pub(crate) struct Works {
@@ -789,7 +791,16 @@ impl Orchestrator {
                     OrchestratorError::Conflict(format!("任务目录里的改动没能记下来：{reason}"))
                 })?;
             // 开了 PR 的任务，改动走 PR 合进去，不再往本地合一遍（否则 PR 合并时会和本地撞上）。
-            if !in_pr {
+            if in_pr {
+                // PR 里只有推上去的东西。之后又改过而没推的话，验收会把那些改动留在本地分支上没人管。
+                let sha = workdir::head(dir)
+                    .await
+                    .map_err(OrchestratorError::Conflict)?;
+                let (engine, key) = (shared.engine.clone(), push_key(id, &sha));
+                if db(move || engine.effect(&key)).await?.is_none() {
+                    return Err(OrchestratorError::Conflict(UNPUSHED_NOTE.into()));
+                }
+            } else {
                 workdir::apply_to_workspace(dir)
                     .await
                     .map_err(OrchestratorError::Conflict)?;

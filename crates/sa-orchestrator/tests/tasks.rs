@@ -891,6 +891,10 @@ async fn a_task_pushes_its_branch_and_opens_one_pr_each_with_a_yes_from_the_pers
             open_pr("o2", "加 b.txt（再来一次）"),
             report("done", "PR 开好了"),
             MockReply::text("交完了。"),
+            // 被打回之后的第二次运行。
+            MockReply::tool_calls("再推一次。", &[("p2", "git_push", "{}")]),
+            report("done", "补推了"),
+            MockReply::text("交完了。"),
         ],
         true,
         Some(github),
@@ -942,6 +946,36 @@ async fn a_task_pushes_its_branch_and_opens_one_pr_each_with_a_yes_from_the_pers
         .map(|a| (a.reference.as_str(), a.summary.as_str()))
         .collect();
     assert_eq!(prs, [("https://github.test/me/proj/pull/7", "#7 加 b.txt")]);
+
+    // PR 开出来之后任务目录里又多了没推的改动：不能验收，否则这些改动哪儿都到不了。
+    let late = rig.task_dir(&task.id).join("late.txt");
+    std::fs::write(&late, "后来加的\n").unwrap();
+    let refused = rig.orchestrator.accept_task(&task.id).await.unwrap_err();
+    assert!(
+        matches!(&refused, OrchestratorError::Conflict(why) if why.contains("还没推送")),
+        "{refused:?}"
+    );
+    assert_eq!(
+        rig.engine.get_task(&task.id).unwrap().state,
+        TaskState::Review
+    );
+    assert!(late.exists());
+
+    // 打回让它推：推上去之后就能验收了。
+    rig.orchestrator
+        .reject_task(&task.id, "把后来的改动也推上去".into())
+        .await
+        .unwrap();
+    let (again, _) = rig.next_approval(&[push, pr]).await;
+    assert!(rig.orchestrator.decide(&again, ApprovalDecision::Once));
+    let task = rig.task_in(&task.id, TaskState::Review).await;
+    assert_eq!(
+        task.artifacts
+            .iter()
+            .filter(|a| a.kind == ArtifactKind::Pr)
+            .count(),
+        1
+    );
 
     // 验收：改动在 PR 里，不往本地合；任务目录收走，分支留着。
     let task = rig.orchestrator.accept_task(&task.id).await.unwrap();
