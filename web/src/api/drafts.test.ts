@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { MAX_DRAFT_CHARS, readDraft, writeDraft } from "./drafts";
+import { MAX_DRAFT_CHARS, readDraft, withExample, writeDraft } from "./drafts";
 
 function memory() {
   const items = new Map<string, string>();
@@ -34,6 +34,12 @@ describe("drafts", () => {
     writeDraft(store, "a", "短的");
     writeDraft(store, "a", "字".repeat(MAX_DRAFT_CHARS + 1));
     expect(readDraft(store, "a")).toBe("");
+  });
+
+  it("点示例不盖掉已经写了的话", () => {
+    expect(withExample("", "示例")).toBe("示例");
+    expect(withExample("  \n", "示例")).toBe("示例");
+    expect(withExample("我写了一半 \n", "示例")).toBe("我写了一半\n示例");
   });
 
   it("浏览器不让存时不报错", () => {

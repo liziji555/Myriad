@@ -24,6 +24,11 @@ export function writeDraft(store: Store, roomId: string, text: string): void {
   }
 }
 
+/** 点了一句示例之后输入框里该是什么：已经写了东西就接在后面，不盖掉人写的。 */
+export function withExample(draft: string, example: string): string {
+  return draft.trim() === "" ? example : `${draft.trimEnd()}\n${example}`;
+}
+
 function browserStore(): Store | null {
   try {
     return globalThis.localStorage ?? null;

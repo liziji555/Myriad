@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
-import { loadDraft, saveDraft } from "../api/drafts";
+import { loadDraft, saveDraft, withExample } from "../api/drafts";
 import { groupCommands, matchCommands, slashQuery, type SlashCommand } from "../api/slash";
 import type { Bot } from "../api/types";
 
@@ -78,12 +78,13 @@ export function Composer({
 
   useEffect(() => {
     if (prefill === null) return;
-    setText(prefill);
-    setCaret(prefill.length);
+    const next = withExample(text, prefill);
+    setText(next);
+    setCaret(next.length);
     onPrefilled();
     requestAnimationFrame(() => {
       input.current?.focus();
-      input.current?.setSelectionRange(prefill.length, prefill.length);
+      input.current?.setSelectionRange(next.length, next.length);
     });
     // 只跟着要填的那句话走。
   }, [prefill]);
