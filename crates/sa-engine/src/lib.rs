@@ -162,6 +162,9 @@ impl Engine {
             Ok((room, seq))
         })?;
         self.publish(seq);
+        self.audit(
+            Audit::user("room.created", format!("新建了房间「{}」", room.name)).room(&room.id),
+        );
         Ok(room)
     }
 

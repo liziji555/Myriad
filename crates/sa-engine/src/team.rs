@@ -74,6 +74,14 @@ impl Engine {
             Ok(Ok((bot, seq)))
         })??;
         self.publish(seq);
+        let state = if bot.enabled { "启用" } else { "停用" };
+        self.audit(
+            Audit::user(
+                "bot.updated",
+                format!("改了 Bot「{}」（{state}）", bot.name),
+            )
+            .detail(&bot.persona),
+        );
         Ok(bot)
     }
 
@@ -208,6 +216,12 @@ impl Engine {
             Ok(Ok((room, seq)))
         })??;
         self.publish(seq);
+        let members = room.member_bot_ids.len();
+        let summary = format!(
+            "改了房间「{}」的设置或成员（现在 {members} 个 Bot）",
+            room.name
+        );
+        self.audit(Audit::user("room.updated", summary).room(&room.id));
         Ok(room)
     }
 }
