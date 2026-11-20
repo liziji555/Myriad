@@ -72,7 +72,7 @@ pub fn parse(event: &str, delivery: &str, payload: &Value, options: &Options) ->
         .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '[' | ']'))
         .take(40)
         .collect();
-    let titled = |title: &str, rest: &str| format!("标题：{}\n\n{rest}", title.trim());
+    let titled = |title: &str| format!("标题：{}", title.trim());
     // 机器人账号做的事不看（CI 结果除外：它本来就是机器跑出来的）。
     if event != "workflow_run" && text("/sender/type") == "Bot" {
         return Parsed::Ignored("机器人账号做的".into());
@@ -82,6 +82,8 @@ pub fn parse(event: &str, delivery: &str, payload: &Value, options: &Options) ->
         label: String,
         url: String,
         summary: String,
+        /// 原文前面的几行说明（标题、文件、分支）。也是外人能写的。
+        head: String,
         body: String,
         pr: Option<u64>,
         branch: Option<String>,
@@ -113,7 +115,8 @@ pub fn parse(event: &str, delivery: &str, payload: &Value, options: &Options) ->
                 label: format!("{repo}#{n}"),
                 url: text("/issue/html_url").into(),
                 summary: format!("{who} 开了 issue #{n}"),
-                body: titled(text("/issue/title"), text("/issue/body")),
+                head: titled(text("/issue/title")),
+                body: text("/issue/body").into(),
                 pr: None,
                 branch: None,
                 task_only: false,
@@ -128,7 +131,8 @@ pub fn parse(event: &str, delivery: &str, payload: &Value, options: &Options) ->
                 label: format!("{repo}#{n}"),
                 url: text("/comment/html_url").into(),
                 summary: format!("{who} 在 {what} #{n} 下评论"),
-                body: titled(text("/issue/title"), text("/comment/body")),
+                head: titled(text("/issue/title")),
+                body: text("/comment/body").into(),
                 pr: on_pr.then_some(n),
                 branch: None,
                 task_only: false,
@@ -149,7 +153,8 @@ pub fn parse(event: &str, delivery: &str, payload: &Value, options: &Options) ->
                 label: format!("{repo}#{n}"),
                 url: text("/review/html_url").into(),
                 summary: format!("{who} {verdict} PR #{n}"),
-                body: titled(text("/pull_request/title"), body),
+                head: titled(text("/pull_request/title")),
+                body: body.into(),
                 pr: Some(n),
                 branch: None,
                 task_only: true,
@@ -162,12 +167,12 @@ pub fn parse(event: &str, delivery: &str, payload: &Value, options: &Options) ->
                 label: format!("{repo}#{n}"),
                 url: text("/comment/html_url").into(),
                 summary: format!("{who} 在 PR #{n} 的代码上评论"),
-                body: format!(
-                    "标题：{}\n文件：{}\n\n{}",
-                    text("/pull_request/title").trim(),
-                    text("/comment/path").trim(),
-                    text("/comment/body")
+                head: format!(
+                    "{}\n文件：{}",
+                    titled(text("/pull_request/title")),
+                    text("/comment/path").trim()
                 ),
+                body: text("/comment/body").into(),
                 pr: Some(n),
                 branch: None,
                 task_only: true,
@@ -187,10 +192,11 @@ pub fn parse(event: &str, delivery: &str, payload: &Value, options: &Options) ->
                 label: format!("{repo}@{branch}"),
                 url: text("/workflow_run/html_url").into(),
                 summary: format!("CI {result}"),
-                body: format!(
+                head: format!(
                     "工作流：{}\n分支：{branch}",
                     text("/workflow_run/name").trim()
                 ),
+                body: String::new(),
                 pr: number("/workflow_run/pull_requests/0/number"),
                 branch: Some(branch.to_string()),
                 task_only: true,
@@ -200,9 +206,14 @@ pub fn parse(event: &str, delivery: &str, payload: &Value, options: &Options) ->
         }
         _ => return Parsed::Ignored(format!("不管 {event} 事件的 {action} 动作")),
     };
+    // 只看正文：记号是 SuperAgent 自己写在评论里的。标题里有这几个字不算。
     if found.body.contains(MARKER) {
         return Parsed::Ignored("是 SuperAgent 自己发的".into());
     }
+    let body = match found.body.trim() {
+        "" => found.head,
+        text => format!("{}\n\n{text}", found.head),
+    };
     Parsed::Event(Incoming {
         source: Source::Github,
         key: delivery.to_string(),
@@ -212,7 +223,7 @@ pub fn parse(event: &str, delivery: &str, payload: &Value, options: &Options) ->
         url: Some(found.url).filter(|url| !url.is_empty()),
         kind: IncomingKind::Event {
             summary: found.summary,
-            body: found.body,
+            body,
             pr: found.pr,
             branch: found.branch,
             task_only: found.task_only,
@@ -332,7 +343,7 @@ mod tests {
         assert_eq!(summary, "alice 要求修改 PR #7");
         assert_eq!(
             (body.as_str(), pr, task_only, notify),
-            ("标题：修登录\n\n", Some(7), true, true)
+            ("标题：修登录", Some(7), true, true)
         );
 
         let inline = base(json!({
@@ -429,6 +440,15 @@ mod tests {
                 "action": "created",
                 "issue": { "number": 7, "title": "t" },
                 "comment": { "body": format!("已经在修了。\n{MARKER}") },
+            }))
+        ));
+        // 记号只认评论正文里的：标题里写了这几个字的 issue，下面的评论照常收。
+        assert!(!ignored(
+            "issue_comment",
+            base(json!({
+                "action": "created",
+                "issue": { "number": 7, "title": format!("文档里的 {MARKER} 是什么") },
+                "comment": { "body": "我也想知道" },
             }))
         ));
     }
