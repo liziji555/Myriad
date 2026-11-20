@@ -1,5 +1,6 @@
 //! 一轮对话：调模型 → 执行它要的工具 → 把结果交回去，直到模型不再要工具。
 
+use crate::compact::{self, Limits, COMPACT_PROMPT};
 use crate::transcript::{EntryBody, Transcript, TranscriptError};
 use async_trait::async_trait;
 use futures_util::stream::{self, StreamExt};
@@ -15,6 +16,8 @@ use tokio_util::sync::CancellationToken;
 const MAX_PARALLEL_TOOLS: usize = 10;
 const DENIED_RESULT: &str =
     "用户没有批准这次操作，它没有执行。不要换个办法绕过去；告诉用户你原本想做什么，问他想怎么办。";
+/// 压缩连续失败这么多次就不再试了，免得每一步都白花一次模型调用。
+const MAX_COMPACT_FAILURES: u32 = 3;
 const CANCELLED_RESULT: &str = "（用户在这个工具返回之前点了停止，结果未知。）";
 
 #[derive(Debug, Clone)]
@@ -27,6 +30,8 @@ pub struct TurnConfig {
     pub thinking: Option<bool>,
     /// 会话 ID，原样带在每次模型请求上。
     pub session_id: Option<String>,
+    /// 模型的上下文窗口有多大（token）。对话快占满时自动压缩前面的部分。`None` 表示不压缩。
+    pub context_window: Option<usize>,
     /// 工具结果太长被截断时，完整内容存到这个目录里。`None` 表示不存。
     pub spill_dir: Option<std::path::PathBuf>,
     pub retry: RetryPolicy,
@@ -85,6 +90,8 @@ pub enum TurnEnd {
     Cancelled,
     /// 调模型的次数到了上限。
     MaxSteps,
+    /// 对话已经放不进模型的上下文窗口，压缩之后还是放不下（或者压缩一直失败）。
+    ContextLimit,
     /// 出错了。文字是给人看的原因。
     Failed(String),
 }
@@ -116,6 +123,8 @@ pub async fn run_turn(
         steps: 0,
         usage: Usage::default(),
         said_something: false,
+        compactions: 0,
+        compact_failures: 0,
     };
     let end = match state
         .run(
@@ -139,6 +148,10 @@ struct Turn {
     /// 这一轮里模型已经说过话。之后每次调用的第一段文字前面补一个空行，
     /// 这样多次调用的文字连在一起时还是分段的。
     said_something: bool,
+    /// 这一轮里试过几次压缩。
+    compactions: u32,
+    /// 压缩连续失败了几次。
+    compact_failures: u32,
 }
 
 impl Turn {
@@ -176,6 +189,20 @@ impl Turn {
             }
             if self.steps >= config.max_steps {
                 return Ok(TurnEnd::MaxSteps);
+            }
+            if let Some(window) = config.context_window {
+                let limits = Limits::new(window, config.max_tokens);
+                // 系统提示词和工具说明每次都要带，压缩不掉。
+                let fixed =
+                    compact::estimate(&config.system_prompt) + compact::estimate_tools(&specs);
+                if let Some(end) = self
+                    .fit_context(
+                        transcript, provider, config, limits, fixed, observer, cancel,
+                    )
+                    .await?
+                {
+                    return Ok(end);
+                }
             }
             self.steps += 1;
 
@@ -255,6 +282,107 @@ impl Turn {
                 return Ok(TurnEnd::Cancelled);
             }
         }
+    }
+
+    /// 对话快占满窗口时压缩前面的部分。返回 `Some` 表示这一轮到此为止。
+    #[allow(clippy::too_many_arguments)]
+    async fn fit_context(
+        &mut self,
+        transcript: &mut Transcript,
+        provider: &dyn Provider,
+        config: &TurnConfig,
+        limits: Limits,
+        fixed: usize,
+        observer: &dyn Observer,
+        cancel: &CancellationToken,
+    ) -> Result<Option<TurnEnd>, TranscriptError> {
+        let size = |transcript: &Transcript| {
+            fixed + compact::estimate_messages(&transcript.to_chat_messages())
+        };
+        if size(transcript) <= limits.threshold {
+            return Ok(None);
+        }
+        let plan = (self.compact_failures < MAX_COMPACT_FAILURES)
+            .then(|| compact::plan(transcript, limits.keep(), limits.hard))
+            .flatten();
+        if let Some(plan) = plan {
+            self.compactions += 1;
+            // 压缩也是一步过程，和工具调用一样显示出来。
+            let step = format!(
+                "compact-{}-{}",
+                transcript.entries().len(),
+                self.compactions
+            );
+            observer
+                .tool_started(&step, "compact", "对话太长，压缩前面的内容")
+                .await;
+            let summary = self
+                .summarise(provider, config, plan.text, observer, cancel)
+                .await;
+            observer.tool_finished(&step, summary.is_ok()).await;
+            match summary {
+                Ok(content) => {
+                    transcript.append(EntryBody::Summary {
+                        content,
+                        kept: plan.kept,
+                    })?;
+                    self.compact_failures = 0;
+                }
+                Err(LlmError::Cancelled) => return Ok(Some(TurnEnd::Cancelled)),
+                Err(_) => self.compact_failures += 1,
+            }
+        }
+        // 没压下来但还放得下：照常继续，下一步再试。真的放不下了才停。
+        Ok((size(transcript) > limits.hard).then_some(TurnEnd::ContextLimit))
+    }
+
+    /// 让模型把一段对话写成摘要。不带工具，文字不报给人看。
+    async fn summarise(
+        &mut self,
+        provider: &dyn Provider,
+        config: &TurnConfig,
+        material: String,
+        observer: &dyn Observer,
+        cancel: &CancellationToken,
+    ) -> Result<String, LlmError> {
+        let request = ChatRequest {
+            model: config.model.clone(),
+            messages: vec![
+                ChatMessage::system(COMPACT_PROMPT.to_string()),
+                ChatMessage::user(material),
+            ],
+            tools: vec![],
+            max_tokens: config.max_tokens,
+            thinking: config.thinking,
+            session_id: config.session_id.clone(),
+        };
+        let mut reply = Accumulator::default();
+        let mut stream = open_with_retry(provider, &request, cancel, config.retry).await?;
+        let failure = loop {
+            let event = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => break Some(LlmError::Cancelled),
+                event = stream.next() => event,
+            };
+            match event {
+                Some(Ok(event)) => reply.push(&event),
+                Some(Err(error)) => break Some(error),
+                None => break None,
+            }
+        };
+        if let Some(usage) = reply.usage {
+            self.usage.add(usage);
+            observer.usage(&config.model, usage).await;
+        }
+        if let Some(error) = failure {
+            return Err(error);
+        }
+        let summary = reply.text.trim();
+        // 没写完的摘要不能用：后面的对话全靠它。
+        if summary.is_empty() || matches!(reply.stop, None | Some(StopReason::MaxTokens)) {
+            return Err(LlmError::Protocol("模型没有给出完整的摘要".into()));
+        }
+        Ok(summary.to_string())
     }
 
     /// 调一次模型，边收边把文字报出去。返回收到的内容，以及中途失败的原因（如果有）。
@@ -682,6 +810,7 @@ mod tests {
                 max_tokens: None,
                 thinking: None,
                 session_id: Some("ses_test".into()),
+                context_window: None,
                 spill_dir: None,
                 retry: RetryPolicy {
                     max_retries: 2,
@@ -720,6 +849,7 @@ mod tests {
                     EntryBody::User { .. } => "user",
                     EntryBody::Assistant { .. } => "assistant",
                     EntryBody::ToolResult { .. } => "tool",
+                    EntryBody::Summary { .. } => "summary",
                 })
                 .collect()
         }
@@ -1082,6 +1212,249 @@ mod tests {
             std::fs::read_to_string(&files[0]).unwrap(),
             "长".repeat(200)
         );
+    }
+
+    /// 往记录里放 `count` 组问答，每条 1000 个汉字（约 1000 token）。
+    fn fill(rig: &mut Rig, count: usize) {
+        for index in 0..count {
+            rig.transcript
+                .append(EntryBody::User {
+                    content: format!("问{index}{}", "问".repeat(1_000)),
+                    message_id: None,
+                    message_seq: Some(index as i64 + 1),
+                })
+                .unwrap();
+            rig.transcript
+                .append(EntryBody::Assistant {
+                    content: format!("答{index}{}", "答".repeat(1_000)),
+                    reasoning: None,
+                    tool_calls: vec![],
+                })
+                .unwrap();
+        }
+    }
+
+    fn compact_steps(observer: &Recorder) -> Vec<String> {
+        observer
+            .log()
+            .into_iter()
+            .filter(|line| line.contains("compact-"))
+            .map(|line| match line.split(':').collect::<Vec<_>>()[..] {
+                ["start", _, tool, title] => format!("start:{tool}:{title}"),
+                ["finish", _, ok] => format!("finish:{ok}"),
+                _ => line.clone(),
+            })
+            .collect()
+    }
+
+    /// 对话超过压缩线：先让模型写摘要，再带着摘要和最近几条接着聊。
+    #[tokio::test]
+    async fn long_conversations_are_compacted_and_carry_on() {
+        let mut rig = rig();
+        // 窗口 64,000：压缩线 31,000，硬上限 44,000。记录里约 40,000。
+        rig.config.context_window = Some(64_000);
+        fill(&mut rig, 20);
+        let provider = MockProvider::scripted([
+            MockReply::text("  用户问了二十个问题。  "),
+            MockReply::text("接着说"),
+            MockReply::text("第二轮"),
+        ]);
+        let observer = Recorder::default();
+        let outcome = rig
+            .turn(
+                &provider,
+                vec![vec![says("最新的问题", 21)]],
+                &observer,
+                &CancellationToken::new(),
+            )
+            .await;
+
+        assert_eq!(outcome.end, TurnEnd::Completed);
+        // 写摘要不算一步，但用量算进去；摘要的文字不报给人看。
+        assert_eq!(outcome.steps, 1);
+        assert_eq!(outcome.usage.input_tokens, 20);
+        assert_eq!(observer.text(), "接着说");
+        assert_eq!(
+            compact_steps(&observer),
+            ["start:compact:对话太长，压缩前面的内容", "finish:true"]
+        );
+
+        let requests = provider.requests();
+        assert_eq!(requests.len(), 2);
+        // 摘要请求：专用提示词、不带工具、材料从最早的开始、不含留下的最后几条。
+        let summarise = &requests[0];
+        assert!(summarise.tools.is_empty());
+        assert_eq!(summarise.messages.len(), 2);
+        assert_eq!(summarise.messages[0].content, COMPACT_PROMPT);
+        let material = &summarise.messages[1].content;
+        assert!(
+            material.starts_with("【对话记录】\n用户：问0"),
+            "{}",
+            &material[..80]
+        );
+        assert!(!material.contains("最新的问题") && !material.contains("答19"));
+        // 之后的请求：系统提示词、摘要、最近几条原文，最后是刚发的那句。
+        let next = &requests[1].messages;
+        assert_eq!(next[0].role, Role::System);
+        assert_eq!(
+            next[1].content,
+            format!("{}用户问了二十个问题。", crate::transcript::SUMMARY_PREFIX)
+        );
+        assert_eq!(next.last().unwrap().content, "最新的问题");
+        assert!(next[next.len() - 2].content.starts_with("答19"));
+        let limits = Limits::new(64_000, None);
+        let size = compact::estimate_messages(next);
+        assert!(size < limits.threshold / 2, "压缩后还有 {size}");
+        assert!(next.len() > 3, "最近的几条应该原样留下");
+        // 留下的部分不会从一条没有调用的工具结果开始。
+        assert_ne!(next[2].role, Role::Tool);
+
+        // 原始记录一条不少，只是多了一个边界；重新打开后发给模型的内容不变。
+        assert_eq!(rig.kinds().len(), 43);
+        assert_eq!(rig.kinds()[41..], ["summary", "assistant"]);
+        assert_eq!(rig.transcript.last_message_seq(), 21);
+        let reopened = Transcript::open(rig.transcript.path()).unwrap();
+        assert_eq!(
+            reopened.to_chat_messages(),
+            rig.transcript.to_chat_messages()
+        );
+
+        // 压缩之后没到线：下一轮不再压缩。
+        let outcome = rig
+            .turn(
+                &provider,
+                vec![vec![says("再问一句", 22)]],
+                &observer,
+                &CancellationToken::new(),
+            )
+            .await;
+        assert_eq!(outcome.end, TurnEnd::Completed);
+        assert_eq!(provider.requests().len(), 3);
+        assert_eq!(rig.kinds().iter().filter(|k| **k == "summary").count(), 1);
+    }
+
+    /// 压缩失败但还放得下：照常继续；连续失败三次之后不再试。
+    #[tokio::test]
+    async fn failed_compaction_does_not_stop_the_turn_and_gives_up_after_three_tries() {
+        let mut rig = rig();
+        rig.config.context_window = Some(64_000);
+        // 约 34,000：过了压缩线，没到硬上限。
+        fill(&mut rig, 17);
+        let bad = || MockReply::Fail(LlmError::Auth("坏密钥".into()));
+        let call = |id| MockReply::tool_calls("", &[(id, "serial", r#"{"tag":"x"}"#)]);
+        let provider = MockProvider::scripted([
+            bad(),
+            call("c1"),
+            // 没写完的摘要不能用。
+            MockReply::Events(vec![
+                StreamEvent::TextDelta("写到一半".into()),
+                StreamEvent::Done {
+                    stop: StopReason::MaxTokens,
+                },
+            ]),
+            call("c2"),
+            MockReply::text(""),
+            call("c3"),
+            // 第四步不再试压缩，直接是正常回复。
+            MockReply::text("做完了"),
+        ]);
+        let observer = Recorder::default();
+        let outcome = rig
+            .turn(
+                &provider,
+                vec![vec![says("开始", 18)]],
+                &observer,
+                &CancellationToken::new(),
+            )
+            .await;
+
+        assert_eq!(outcome.end, TurnEnd::Completed);
+        assert_eq!(outcome.steps, 4);
+        assert_eq!(provider.requests().len(), 7);
+        assert_eq!(
+            compact_steps(&observer)
+                .iter()
+                .filter(|l| *l == "finish:false")
+                .count(),
+            3
+        );
+        assert!(!rig.kinds().contains(&"summary"));
+        assert_eq!(observer.text(), "做完了");
+    }
+
+    /// 压缩不了，又真的放不下：不调模型，直接说明原因。
+    #[tokio::test]
+    async fn context_limit_ends_the_turn_when_compaction_cannot_help() {
+        let mut rig = rig();
+        rig.config.context_window = Some(64_000);
+        // 约 50,000：过了硬上限。
+        fill(&mut rig, 25);
+        let provider =
+            MockProvider::scripted([MockReply::Fail(LlmError::BadRequest("太长".into()))]);
+        let observer = Recorder::default();
+        let outcome = rig
+            .turn(
+                &provider,
+                vec![vec![says("开始", 26)]],
+                &observer,
+                &CancellationToken::new(),
+            )
+            .await;
+
+        assert_eq!(outcome.end, TurnEnd::ContextLimit);
+        assert_eq!(outcome.steps, 0);
+        assert_eq!(provider.requests().len(), 1);
+        // 人说的话已经记下来了，下次不会丢。
+        assert_eq!(rig.transcript.last_message_seq(), 26);
+        assert_eq!(observer.text(), "");
+    }
+
+    /// 写摘要时点了停止：马上停，不留半截摘要。
+    #[tokio::test]
+    async fn stop_during_compaction_cancels_the_turn() {
+        let mut rig = rig();
+        rig.config.context_window = Some(64_000);
+        fill(&mut rig, 20);
+        let provider = MockProvider::scripted([MockReply::Hang(vec![StreamEvent::TextDelta(
+            "摘要写到".into(),
+        )])]);
+        let observer = Recorder::default();
+        let cancel = CancellationToken::new();
+        let stop = async {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            cancel.cancel();
+        };
+        let (outcome, ()) = tokio::join!(
+            rig.turn(&provider, vec![vec![says("开始", 21)]], &observer, &cancel),
+            stop
+        );
+
+        assert_eq!(outcome.end, TurnEnd::Cancelled);
+        assert_eq!(outcome.steps, 0);
+        assert!(!rig.kinds().contains(&"summary"));
+        assert_eq!(
+            compact_steps(&observer),
+            ["start:compact:对话太长，压缩前面的内容", "finish:false"]
+        );
+    }
+
+    /// 没有配置窗口大小：不压缩。
+    #[tokio::test]
+    async fn no_window_means_no_compaction() {
+        let mut rig = rig();
+        fill(&mut rig, 30);
+        let provider = MockProvider::scripted([MockReply::text("好")]);
+        let outcome = rig
+            .turn(
+                &provider,
+                vec![vec![says("开始", 31)]],
+                &Recorder::default(),
+                &CancellationToken::new(),
+            )
+            .await;
+        assert_eq!(outcome.end, TurnEnd::Completed);
+        assert_eq!(provider.requests().len(), 1);
+        assert_eq!(provider.requests()[0].messages.len(), 62);
     }
 
     /// 等人批准时点了停止：不再等，调用按取消收尾。

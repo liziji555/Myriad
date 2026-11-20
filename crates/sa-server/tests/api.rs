@@ -30,6 +30,7 @@ fn app() -> (Router, Arc<Engine>) {
         provider: Arc::new(MockProvider::demo().with_chunk_delay(Duration::from_millis(2))),
         model: "mock".into(),
         thinking: None,
+        context_window: None,
     });
     let settings = Settings {
         sessions_dir: dir.join("sessions"),

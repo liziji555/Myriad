@@ -201,6 +201,18 @@ fn demo_reply(request: &ChatRequest) -> MockReply {
     let Some(last) = request.messages.last() else {
         return MockReply::text("（Mock 模型）没有收到消息。");
     };
+    // 压缩请求：不带工具，系统提示词里说了要压缩。
+    let compacting = request.tools.is_empty()
+        && request
+            .messages
+            .first()
+            .is_some_and(|m| m.role == Role::System && m.content.contains("压缩"));
+    if compacting {
+        return MockReply::text(&format!(
+            "（Mock 模型的摘要）之前的对话里用户发过 {} 条消息，细节没有保留：假模型不会真的总结。",
+            last.content.matches("用户：").count()
+        ));
+    }
     if last.role == Role::Tool {
         let lines: Vec<&str> = last.content.lines().take(6).collect();
         return MockReply::text(&format!(
@@ -418,6 +430,20 @@ mod tests {
         );
         let no_shell = collect(&provider, request(vec![ChatMessage::user("运行 `ls`")])).await;
         assert!(no_shell.tool_calls.is_empty());
+
+        // 压缩请求（不带工具、系统提示词说要压缩）：回一段摘要，不去调工具。
+        let mut compact = request(vec![
+            ChatMessage::system("你的任务是压缩一段对话。"),
+            ChatMessage::user("【对话记录】\n用户：读一下 `a.md`\n助手：好\n用户：谢谢\n"),
+        ]);
+        compact.tools.clear();
+        let summary = collect(&provider, compact).await;
+        assert!(summary.tool_calls.is_empty());
+        assert!(
+            summary.text.contains("用户发过 2 条消息"),
+            "{}",
+            summary.text
+        );
 
         let plain = collect(&provider, request(vec![ChatMessage::user("你好")])).await;
         assert!(plain.text.contains("你好"));

@@ -126,6 +126,9 @@ async fn turn(
                 max_tokens: None,
                 thinking: model.thinking,
                 session_id: Some(session_id.to_string()),
+                context_window: Some(model.context_window.unwrap_or_else(|| {
+                    model.provider.capabilities(&model.model).context_window as usize
+                })),
                 spill_dir: shared
                     .settings
                     .sessions_dir
@@ -180,6 +183,13 @@ async fn turn(
                 "连续调用了 {} 次模型还没做完，先停在这里。可以让它继续，或者把问题拆小一点。",
                 shared.settings.max_steps
             )),
+        ),
+        Ok(TurnEnd::ContextLimit) => (
+            MessageState::Failed,
+            Some(
+                "对话太长，已经放不进模型的上下文窗口，自动压缩也没能把它压下来。请新建一个房间继续，或者过一会儿再试。"
+                    .into(),
+            ),
         ),
         Ok(TurnEnd::Failed(reason)) | Err(reason) => (MessageState::Failed, Some(reason)),
     };

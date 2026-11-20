@@ -37,6 +37,16 @@ fn start_with(
     working_model: bool,
     approval_timeout: Duration,
 ) -> Rig {
+    build(dir, replies, working_model, approval_timeout, None)
+}
+
+fn build(
+    dir: &Path,
+    replies: Vec<MockReply>,
+    working_model: bool,
+    approval_timeout: Duration,
+    context_window: Option<usize>,
+) -> Rig {
     let data = dir.join("data");
     let work = dir.join("work");
     std::fs::create_dir_all(&data).unwrap();
@@ -51,6 +61,7 @@ fn start_with(
             provider: provider.clone(),
             model: "mock-model".into(),
             thinking: None,
+            context_window,
         }))
     } else {
         Arc::new(NoModel)
@@ -674,4 +685,92 @@ async fn stop_while_waiting_for_approval_cancels_the_card() {
     assert_eq!(messages[1].steps[0].state, StepState::Cancelled);
     assert!(!rig.orchestrator.decide(&id, ApprovalDecision::Once));
     assert_eq!(rig.provider.requests().len(), 1);
+}
+
+/// 对话快占满窗口：自动压缩成摘要，时间线上有一步过程，之后（包括重启之后）接着聊。
+#[tokio::test]
+async fn long_conversation_is_compacted_and_survives_a_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let timeout = Duration::from_secs(600);
+    // 窗口 60,000：压缩线 27,000。
+    let window = Some(60_000);
+    let long = |tag: &str, chars: usize| format!("{tag}{}", "长".repeat(chars));
+    {
+        let replies = vec![
+            MockReply::text("一"),
+            MockReply::text("二"),
+            MockReply::text("用户发了两段很长的话。"),
+            MockReply::text("三"),
+        ];
+        let rig = build(dir.path(), replies, true, timeout, window);
+        rig.say(&long("甲", 10_000)).await;
+        rig.settled(2).await;
+        rig.say(&long("乙", 10_000)).await;
+        let all = rig.settled(4).await;
+        // 还没到线：没有压缩。
+        assert!(all.iter().all(|m| m.steps.is_empty()), "{all:#?}");
+        assert_eq!(rig.provider.requests().len(), 2);
+
+        rig.say(&long("丙", 6_000)).await;
+        let reply = rig.settled(6).await.pop().unwrap();
+        assert_eq!(reply.state, MessageState::Complete, "{reply:?}");
+        assert_eq!(reply.content, "三");
+        assert_eq!(reply.steps.len(), 1);
+        assert_eq!(reply.steps[0].tool, "compact");
+        assert_eq!(reply.steps[0].title, "对话太长，压缩前面的内容");
+        assert_eq!(reply.steps[0].state, StepState::Ok);
+
+        let requests = rig.provider.requests();
+        assert_eq!(requests.len(), 4);
+        assert!(requests[2].tools.is_empty());
+        assert!(requests[2].messages[1].content.contains("用户：甲长长"));
+        let after = &requests[3].messages;
+        assert!(after[1].content.ends_with("用户发了两段很长的话。"));
+        assert!(after.last().unwrap().content.starts_with("丙长"));
+        assert!(after.iter().all(|m| !m.content.starts_with("甲")));
+        rig.orchestrator.shutdown().await;
+    }
+
+    let rig = build(
+        dir.path(),
+        vec![MockReply::text("四")],
+        true,
+        timeout,
+        window,
+    );
+    rig.say("接着聊").await;
+    let reply = rig.settled(8).await.pop().unwrap();
+    assert_eq!(reply.content, "四");
+    assert!(reply.steps.is_empty(), "重启后不用再压缩一次：{reply:?}");
+    let messages = &rig.provider.requests()[0].messages;
+    assert!(messages[1].content.ends_with("用户发了两段很长的话。"));
+    assert_eq!(messages.last().unwrap().content, "接着聊");
+    assert!(messages.iter().all(|m| !m.content.starts_with("甲")));
+    // 房间里的消息一条没少：压缩的只是发给模型的内容。
+    assert_eq!(rig.messages().len(), 8);
+    rig.orchestrator.shutdown().await;
+}
+
+/// 压缩不了又放不下：回复标成失败，原因写清楚，房间还能继续用。
+#[tokio::test]
+async fn context_limit_is_reported_on_the_message() {
+    let dir = tempfile::tempdir().unwrap();
+    let replies = vec![MockReply::Fail(sa_llm::LlmError::BadRequest("太长".into()))];
+    let rig = build(
+        dir.path(),
+        replies,
+        true,
+        Duration::from_secs(600),
+        Some(60_000),
+    );
+    // 硬上限 40,000，这一条就超了。
+    rig.say(&"长".repeat(45_000)).await;
+    let reply = rig.settled(2).await.pop().unwrap();
+    assert_eq!(reply.state, MessageState::Failed);
+    assert!(
+        reply.error.as_deref().unwrap().contains("对话太长"),
+        "{reply:?}"
+    );
+    assert_eq!(reply.steps[0].state, StepState::Error);
+    rig.orchestrator.shutdown().await;
 }

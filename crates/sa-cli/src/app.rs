@@ -40,7 +40,8 @@ impl App {
     pub fn open(data_dir: &DataDir, args: &RunArgs) -> Result<Self> {
         Self::open_with(data_dir, args, |config| {
             if args.mock {
-                Arc::new(models::mock())
+                // 假模型也看 mid 档位的窗口大小：调小它就能演示自动压缩。
+                Arc::new(models::mock(config.tiers.mid.context_window))
             } else {
                 Arc::new(ConfigModels::new(config.clone()))
             }

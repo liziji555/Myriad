@@ -395,6 +395,7 @@ mod tests {
                 provider: Arc::new(MockProvider::demo().with_chunk_delay(Duration::from_millis(4))),
                 model: "mock".into(),
                 thinking: None,
+                context_window: None,
             }))
         })
         .unwrap()

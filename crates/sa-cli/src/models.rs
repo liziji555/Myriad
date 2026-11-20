@@ -77,16 +77,20 @@ impl ModelRouter for ConfigModels {
             provider: client,
             model: choice.model.clone(),
             thinking: choice.thinking,
+            context_window: choice.context_window,
         })
     }
 }
 
 /// `--mock`：所有档位都用不联网的假模型。
-pub fn mock() -> sa_orchestrator::SingleModel {
+///
+/// `context_window` 用来在演示时把窗口调小，几条消息就能看到自动压缩。
+pub fn mock(context_window: Option<usize>) -> sa_orchestrator::SingleModel {
     sa_orchestrator::SingleModel(ResolvedModel {
         provider: Arc::new(MockProvider::demo()),
         model: "mock".into(),
         thinking: None,
+        context_window,
     })
 }
 

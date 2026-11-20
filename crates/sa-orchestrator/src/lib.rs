@@ -25,6 +25,8 @@ pub struct ResolvedModel {
     pub provider: Arc<dyn Provider>,
     pub model: String,
     pub thinking: Option<bool>,
+    /// 这个模型的上下文窗口（token）。不填就用模型服务报的大小。
+    pub context_window: Option<usize>,
 }
 
 /// 把模型档位换成能调用的模型。失败时返回给人看的原因（比如没有配置密钥）。
