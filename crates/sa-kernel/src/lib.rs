@@ -9,4 +9,6 @@ mod transcript;
 mod turn;
 
 pub use transcript::{Entry, EntryBody, Transcript, TranscriptError};
-pub use turn::{run_turn, Inbox, Observer, TurnConfig, TurnEnd, TurnOutcome, UserInput};
+pub use turn::{
+    run_turn, ApprovalRequest, Inbox, Observer, TurnConfig, TurnEnd, TurnOutcome, UserInput,
+};

@@ -7,12 +7,14 @@ use sa_llm::{
     open_with_retry, Accumulator, ChatMessage, ChatRequest, LlmError, Provider, RetryPolicy,
     StopReason, StreamEvent, ToolCall, ToolSpec, Usage,
 };
-use sa_tools::{ToolCtx, ToolRegistry};
+use sa_tools::{Permission, ToolCtx, ToolRegistry};
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 /// 同时最多跑几个工具。
 const MAX_PARALLEL_TOOLS: usize = 10;
+const DENIED_RESULT: &str =
+    "用户没有批准这次操作，它没有执行。不要换个办法绕过去；告诉用户你原本想做什么，问他想怎么办。";
 const CANCELLED_RESULT: &str = "（用户在这个工具返回之前点了停止，结果未知。）";
 
 #[derive(Debug, Clone)]
@@ -51,6 +53,24 @@ pub trait Observer: Send + Sync {
     async fn tool_finished(&self, call_id: &str, ok: bool);
     /// 一次模型调用结束，报告用量。
     async fn usage(&self, model: &str, usage: Usage);
+    /// 这次调用要人点头才能执行。返回 `true` 表示批准。默认不批准。
+    ///
+    /// 等多久、要不要记住「总是允许」都由实现决定；这一轮被取消时这个等待会被丢弃。
+    async fn request_approval(&self, _request: ApprovalRequest<'_>) -> bool {
+        false
+    }
+}
+
+/// 一次等人批准的工具调用。
+#[derive(Debug, Clone, Copy)]
+pub struct ApprovalRequest<'a> {
+    pub call_id: &'a str,
+    pub tool: &'a str,
+    /// 给人看的一句话，例如「执行 cargo test」。
+    pub title: &'a str,
+    /// 为什么要问。
+    pub reason: &'a str,
+    pub input: &'a Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -367,14 +387,32 @@ async fn run_one(
     let result = match &prepared.runnable {
         Err(message) => Some(Err(message.clone())),
         Ok((tool, input)) => {
+            let work = async {
+                match tool.check_permission(input, ctx).await {
+                    Permission::Allow => {}
+                    Permission::Deny(reason) => return Err(reason),
+                    Permission::Ask(reason) => {
+                        let request = ApprovalRequest {
+                            call_id: &call.id,
+                            tool: &call.name,
+                            title: &prepared.title,
+                            reason: &reason,
+                            input,
+                        };
+                        if !observer.request_approval(request).await {
+                            return Err(DENIED_RESULT.to_string());
+                        }
+                    }
+                }
+                tool.call(input.clone(), ctx)
+                    .await
+                    .map(|text| clip(&text, tool.max_result_chars()))
+                    .map_err(|e| clip(&e.0, tool.max_result_chars()))
+            };
             tokio::select! {
                 biased;
                 _ = cancel.cancelled() => None,
-                result = tool.call(input.clone(), ctx) => Some(
-                    result
-                        .map(|text| clip(&text, tool.max_result_chars()))
-                        .map_err(|e| clip(&e.0, tool.max_result_chars())),
-                ),
+                result = work => Some(result),
             }
         }
     };
@@ -415,6 +453,8 @@ mod tests {
         log: Mutex<Vec<String>>,
         /// 收到第几段文字时触发取消。
         cancel_after_deltas: Option<(usize, CancellationToken)>,
+        /// 有人问要不要批准时怎么答；`None` 表示一直不答。
+        approve: Option<bool>,
     }
 
     impl Recorder {
@@ -458,6 +498,16 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(format!("usage:{model}:{}", usage.output_tokens));
+        }
+        async fn request_approval(&self, request: ApprovalRequest<'_>) -> bool {
+            self.log.lock().unwrap().push(format!(
+                "ask:{}:{}:{}:{}",
+                request.call_id, request.tool, request.title, request.reason
+            ));
+            match self.approve {
+                Some(answer) => answer,
+                None => std::future::pending().await,
+            }
         }
     }
 
@@ -510,6 +560,13 @@ mod tests {
         }
         fn max_result_chars(&self) -> usize {
             50
+        }
+        async fn check_permission(&self, input: &Value, _: &ToolCtx) -> Permission {
+            match input["permission"].as_str() {
+                Some("ask") => Permission::Ask("探针要问一下".into()),
+                Some("deny") => Permission::Deny("探针不让做".into()),
+                _ => Permission::Allow,
+            }
         }
         async fn call(&self, input: Value, ctx: &ToolCtx) -> ToolResult {
             let now = self.running.fetch_add(1, Ordering::SeqCst) + 1;
@@ -865,6 +922,77 @@ mod tests {
         let log = observer.log();
         assert!(log.contains(&"finish:c2:false".to_string()));
         assert!(!log.iter().any(|l| l.starts_with("start:c3")), "{log:?}");
+    }
+
+    /// 要问人的调用：批准了才执行；不批准或者工具自己不让做，都不执行，并把原因告诉模型。
+    #[tokio::test]
+    async fn approval_gates_execution() {
+        let calls = [
+            ("c1", "serial", r#"{"tag":"问","permission":"ask"}"#),
+            ("c2", "serial", r#"{"tag":"禁","permission":"deny"}"#),
+            ("c3", "serial", r#"{"tag":"直接"}"#),
+        ];
+        for (approve, first) in [
+            (true, ("结果 问".to_string(), false)),
+            (false, (DENIED_RESULT.to_string(), true)),
+        ] {
+            let mut rig = rig();
+            let provider =
+                MockProvider::scripted([MockReply::tool_calls("", &calls), MockReply::text("好")]);
+            let observer = Recorder {
+                approve: Some(approve),
+                ..Default::default()
+            };
+            let outcome = rig
+                .turn(
+                    &provider,
+                    vec![vec![says("跑", 1)]],
+                    &observer,
+                    &CancellationToken::new(),
+                )
+                .await;
+
+            assert_eq!(outcome.end, TurnEnd::Completed);
+            assert_eq!(
+                rig.tool_results(),
+                [
+                    first,
+                    ("探针不让做".to_string(), true),
+                    ("结果 直接".to_string(), false),
+                ]
+            );
+            let log = observer.log();
+            let asks: Vec<_> = log.iter().filter(|l| l.starts_with("ask:")).collect();
+            assert_eq!(asks, ["ask:c1:serial:探测 问:探针要问一下"]);
+            assert!(log.contains(&format!("finish:c1:{approve}")), "{log:?}");
+            // 没批准的那次，工具一次都没跑：只有 c3 跑过。
+            assert_eq!(rig.peak.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    /// 等人批准时点了停止：不再等，调用按取消收尾。
+    #[tokio::test]
+    async fn cancel_while_waiting_for_approval() {
+        let mut rig = rig();
+        let provider = MockProvider::scripted([MockReply::tool_calls(
+            "",
+            &[("c1", "serial", r#"{"permission":"ask"}"#)],
+        )]);
+        let cancel = CancellationToken::new();
+        let observer = Recorder::default();
+        let stopper = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            stopper.cancel();
+        });
+        let outcome = rig
+            .turn(&provider, vec![vec![says("跑", 1)]], &observer, &cancel)
+            .await;
+
+        assert_eq!(outcome.end, TurnEnd::Cancelled);
+        assert_eq!(rig.tool_results(), [(CANCELLED_RESULT.to_string(), true)]);
+        assert_eq!(rig.peak.load(Ordering::SeqCst), 0);
+        assert!(observer.log().contains(&"finish:c1:false".to_string()));
     }
 
     #[tokio::test]
