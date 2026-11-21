@@ -190,7 +190,10 @@ fn read_remembered(path: &Path) -> Option<PathBuf> {
 
 fn remember(shell: &Shell, dir: &Path) {
     let value = serde_json::json!({ "workdir": dir.to_string_lossy() });
-    let saved = std::fs::create_dir_all(shell.data_dir.root())
+    // 第一次启动时数据目录可能还没有：照 sa 的规矩建成只有自己能进的。
+    let saved = shell
+        .data_dir
+        .create()
         .and_then(|()| std::fs::write(shell.remembered(), format!("{value:#}\n")));
     if let Err(error) = saved {
         tracing::warn!("没能记下选的工作目录，下次启动还会再问：{error}");
