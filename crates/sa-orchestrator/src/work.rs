@@ -30,6 +30,8 @@ use tokio_util::sync::CancellationToken;
 /// 同时最多跑这么多个任务。
 pub const MAX_PARALLEL_RUNS: usize = 3;
 /// 任务说明里带上房间里最近这么多条对话。
+/// 任务的一次运行最多调多少次模型：一轮对话的上限乘以这个数。
+const WORK_STEPS_FACTOR: usize = 3;
 const BRIEF_MESSAGES: u32 = 10;
 /// 交付物里最多列这么多个文件。
 const MAX_FILE_ARTIFACTS: usize = 30;
@@ -301,7 +303,8 @@ async fn run_task(shared: &Arc<Shared>, task: Task, cancel: &CancellationToken) 
             let config = TurnConfig {
                 model: model.model.clone(),
                 system_prompt: render_work_prompt(&bot, &fence, &skills.prompt),
-                max_steps: shared.settings.max_steps,
+                // 任务比一轮对话要走的步数多得多（查、改、验证、推送、交结果）：给三倍。
+                max_steps: shared.settings.max_steps * WORK_STEPS_FACTOR,
                 max_tokens: None,
                 thinking: model.thinking,
                 session_id: Some(session_id.to_string()),
@@ -683,6 +686,8 @@ impl Tool for CreateTaskTool {
         "把一件要花些功夫的事（修 bug、加功能、整理文件、写报告）开成任务。任务在独立的目录里做，不影响用户手上的文件，\
          做完由用户验收。这个工具只是把任务派出去，不会等它做完：调用之后告诉用户任务开了就结束这一轮。\
          scope 要写清楚做什么、相关的背景和文件，干活的会话看不到这里的对话全文。\
+         任务已经有自己的分支，干活的会话里有专门的 git_push 和 open_pr 工具负责推送和开 PR（你这里没有，它那里有）：\
+         要推送、开 PR 就在 scope 里直说，不要让它另建分支，也不要让它用 git push、gh 这些命令。\
          owner 是负责的 Bot 的名字，不填就是你自己。"
             .into()
     }
@@ -827,7 +832,10 @@ impl Orchestrator {
             if note.trim().is_empty() {
                 return Err(EngineError::Invalid("打回要写明哪里不行".into()));
             }
-            engine.resume_task(&task_id, &note, None)
+            let task = engine.resume_task(&task_id, &note, None)?;
+            let said = format!("打回了任务「{}」：{}", task.title, note.trim());
+            engine.note_task(&task, &said)?;
+            Ok(task)
         })
         .await?;
         kick(&self.shared);
@@ -880,7 +888,18 @@ impl Orchestrator {
         }
         let note = if in_pr { PR_NOTE } else { "" };
         let (engine, task_id) = (shared.engine.clone(), id.clone());
-        let task = db(move || engine.move_task(&task_id, TaskState::Done, note)).await?;
+        let task = db(move || {
+            let task = engine.move_task(&task_id, TaskState::Done, note)?;
+            let how = if in_pr {
+                "改动在 PR 里，由人在 GitHub 上合并"
+            } else {
+                "改动已经带回工作目录"
+            };
+            let said = format!("验收了任务「{}」，{how}。", task.title);
+            engine.note_task(&task, &said)?;
+            Ok(task)
+        })
+        .await?;
         cleanup(shared, id).await;
         Ok(task)
     }
@@ -904,7 +923,16 @@ impl Orchestrator {
         // 验收正在把改动带回工作目录时不能取消：等它做完，结果是「已完成」就取消不了。
         let _not_while_accepting = self.shared.works.accepting.lock().await;
         let (engine, task_id) = (self.shared.engine.clone(), id.clone());
-        let task = db(move || engine.move_task(&task_id, TaskState::Cancelled, &note)).await?;
+        let task = db(move || {
+            let task = engine.move_task(&task_id, TaskState::Cancelled, &note)?;
+            let why = match note.trim() {
+                "" => String::new(),
+                note => format!("：{note}"),
+            };
+            engine.note_task(&task, &format!("取消了任务「{}」{why}", task.title))?;
+            Ok(task)
+        })
+        .await?;
         // 有运行在进行：停下它，目录由它收尾时删。没有：现在就删。
         if !self.stop_task(id) {
             cleanup(&self.shared, id).await;

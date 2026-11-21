@@ -79,7 +79,8 @@ async fn ask(
         max_tokens: Some(300),
         // 分类不需要思考，要的是快。
         thinking: Some(false),
-        session_id: None,
+        // 有的模型服务（OpenCode Go）不带会话标识的请求一律拒绝：路由也报上一个，按房间固定。
+        session_id: Some(format!("route_{room_id}")),
     };
     let mut reply = Accumulator::default();
     let provider = crate::budget::guard(shared, model.provider.clone(), None);

@@ -350,6 +350,15 @@ pub async fn apply_to_workspace(workdir: &Workdir) -> Result<(), String> {
         .map_err(|reason| format!("改动打不回工作目录（开工之后那里的文件也变了）：{reason}"))
 }
 
+/// 任务目录现在在哪个分支上。不在任何分支上（游离的 HEAD）时是 `None`。
+pub async fn current_branch(workdir: &Workdir) -> Option<String> {
+    let name = task_git(workdir, &["symbolic-ref", "--short", "-q", "HEAD"])
+        .await
+        .ok()?;
+    let name = name.trim();
+    (!name.is_empty()).then(|| name.to_string())
+}
+
 /// 任务分支现在指向哪个提交。
 pub async fn head(workdir: &Workdir) -> Result<String, String> {
     Ok(task_git(workdir, &["rev-parse", "HEAD"])

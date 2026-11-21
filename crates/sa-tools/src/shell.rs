@@ -15,6 +15,22 @@ const MAX_OUTPUT_BYTES: usize = 60_000;
 
 pub struct ShellTool;
 
+static HIDDEN_ENV: std::sync::RwLock<Vec<String>> = std::sync::RwLock::new(Vec::new());
+
+/// 这些环境变量（模型密钥、GitHub 令牌……）以后不传给 Bot 执行的命令。启动时调用一次。
+pub fn hide_env_from_commands(names: impl IntoIterator<Item = String>) {
+    let mut hidden = HIDDEN_ENV.write().unwrap();
+    for name in names {
+        if !name.trim().is_empty() && !hidden.contains(&name) {
+            hidden.push(name);
+        }
+    }
+}
+
+fn hidden_env() -> Vec<String> {
+    HIDDEN_ENV.read().unwrap().clone()
+}
+
 #[derive(Deserialize)]
 struct Input {
     command: String,
@@ -77,6 +93,10 @@ impl Tool for ShellTool {
             c.args(["-c", &input.command]);
             c
         };
+        // 密钥这类环境变量不传给命令：命令的输出会回到模型手里，别人写的内容也可能教唆它去读。
+        for name in hidden_env() {
+            command.env_remove(name);
+        }
         command
             .current_dir(ctx.fence.root())
             .stdin(Stdio::null())
@@ -200,6 +220,25 @@ mod tests {
             Permission::Ask("要执行命令：echo hi".into())
         );
         assert_eq!(ShellTool.title(&input), "执行 echo hi");
+    }
+
+    /// 用 cargo 跑测试时一定有的一个环境变量来试：别的测试都不靠它。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn hidden_environment_variables_do_not_reach_the_command() {
+        let (_dir, ctx) = rig();
+        let echo = json!({"command": "echo \"[$CARGO_PKG_NAME]\""});
+        let before = ShellTool.call(echo.clone(), &ctx).await.unwrap();
+        assert!(before.contains("[sa-tools]"), "{before}");
+        hide_env_from_commands(["CARGO_PKG_NAME".to_string(), "  ".to_string()]);
+        let after = ShellTool.call(echo, &ctx).await.unwrap();
+        assert!(after.contains("[]"), "{after}");
+        // 别的变量照常传。
+        let path = ShellTool
+            .call(json!({"command": "test -n \"$PATH\" && echo 有"}), &ctx)
+            .await
+            .unwrap();
+        assert!(path.contains("有"), "{path}");
     }
 
     #[cfg(unix)]

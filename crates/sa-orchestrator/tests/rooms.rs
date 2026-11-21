@@ -1135,6 +1135,11 @@ async fn unaddressed_messages_are_routed_and_fall_back_to_the_host() {
     let reply = t.rig.settled(2).await.pop().unwrap();
     assert_eq!(sender_of(&reply), Some(&t.reviewer));
     let asked = &t.router.requests()[0];
+    // 有的模型服务不带会话标识就拒绝请求：路由的请求也要带，按房间固定。
+    assert_eq!(
+        asked.session_id.as_deref(),
+        Some(format!("route_{}", t.rig.room).as_str())
+    );
     assert!(asked.tools.is_empty());
     assert_eq!(asked.model, "mock-cheap");
     let material = &asked.messages[1].content;

@@ -53,7 +53,11 @@ pub(crate) async fn run(
         link.active.store(true, Ordering::SeqCst);
         // 出错就停下等下一次唤醒，避免原地打转。
         if let Err(error) = work(&shared, &room_id, &link, &mut sessions).await {
-            tracing::error!(room = %room_id, "这一轮没跑成：{error}");
+            if error.ends_with(STOPPED) {
+                tracing::info!(room = %room_id, "这一轮停下了：{error}");
+            } else {
+                tracing::error!(room = %room_id, "这一轮没跑成：{error}");
+            }
         }
         announce(&shared, &room_id, &link, None).await;
         link.active.store(false, Ordering::SeqCst);
@@ -143,6 +147,9 @@ async fn work(
 
 /// 这个工具会不会在外面留下痕迹（改文件、执行命令、推送、叫外部服务、派活）。会的要记进审计日志；
 /// 只是读和查的不记。
+/// 一轮是被人停下的（不是出错）时，原因的结尾。
+const STOPPED: &str = "被停下了";
+
 fn leaves_a_mark(tool: &str) -> bool {
     const READ_ONLY: [&str; 9] = [
         "compact",
@@ -496,6 +503,10 @@ async fn turn(
     } else {
         // 没正常说完（出错、被停下）：这一轮交流到此为止，排着队的也不再说。
         link.episode().clear_queue();
+        if state == MessageState::Cancelled {
+            // 人点了「停止」：不是出了错，日志里不按错误记。
+            return Err(format!("{} 的回复{STOPPED}", bot.name));
+        }
         Err(format!("{} 的回复没有正常结束", bot.name))
     }
 }
