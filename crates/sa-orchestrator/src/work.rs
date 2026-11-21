@@ -832,7 +832,10 @@ impl Orchestrator {
             if note.trim().is_empty() {
                 return Err(EngineError::Invalid("打回要写明哪里不行".into()));
             }
-            engine.resume_task(&task_id, &note, None)
+            let task = engine.resume_task(&task_id, &note, None)?;
+            let said = format!("打回了任务「{}」：{}", task.title, note.trim());
+            engine.note_task(&task, &said)?;
+            Ok(task)
         })
         .await?;
         kick(&self.shared);
@@ -885,7 +888,18 @@ impl Orchestrator {
         }
         let note = if in_pr { PR_NOTE } else { "" };
         let (engine, task_id) = (shared.engine.clone(), id.clone());
-        let task = db(move || engine.move_task(&task_id, TaskState::Done, note)).await?;
+        let task = db(move || {
+            let task = engine.move_task(&task_id, TaskState::Done, note)?;
+            let how = if in_pr {
+                "改动在 PR 里，由人在 GitHub 上合并"
+            } else {
+                "改动已经带回工作目录"
+            };
+            let said = format!("验收了任务「{}」，{how}。", task.title);
+            engine.note_task(&task, &said)?;
+            Ok(task)
+        })
+        .await?;
         cleanup(shared, id).await;
         Ok(task)
     }
@@ -909,7 +923,16 @@ impl Orchestrator {
         // 验收正在把改动带回工作目录时不能取消：等它做完，结果是「已完成」就取消不了。
         let _not_while_accepting = self.shared.works.accepting.lock().await;
         let (engine, task_id) = (self.shared.engine.clone(), id.clone());
-        let task = db(move || engine.move_task(&task_id, TaskState::Cancelled, &note)).await?;
+        let task = db(move || {
+            let task = engine.move_task(&task_id, TaskState::Cancelled, &note)?;
+            let why = match note.trim() {
+                "" => String::new(),
+                note => format!("：{note}"),
+            };
+            engine.note_task(&task, &format!("取消了任务「{}」{why}", task.title))?;
+            Ok(task)
+        })
+        .await?;
         // 有运行在进行：停下它，目录由它收尾时删。没有：现在就删。
         if !self.stop_task(id) {
             cleanup(&self.shared, id).await;

@@ -446,6 +446,22 @@ async fn a_question_waits_for_the_answer_and_a_rejection_sends_it_back() {
         std::fs::read_to_string(rig.workspace.join("a.txt")).unwrap(),
         "二\n"
     );
+    // 人打回、验收都在房间里留一句话：界面上看得到，房间里的 Bot 下次说话时也读得到。
+    let said: Vec<String> = rig
+        .messages()
+        .into_iter()
+        .filter(|m| m.kind == MessageKind::Task && m.sender == sa_protocol::Sender::User)
+        .map(|m| m.content)
+        .collect();
+    let title = &task.title;
+    assert!(
+        said.contains(&format!("打回了任务「{title}」：还是用简体吧")),
+        "{said:?}"
+    );
+    assert!(
+        said.contains(&format!("验收了任务「{title}」，改动已经带回工作目录。")),
+        "{said:?}"
+    );
     // 三次运行各有一张交付卡。
     let deliveries = rig
         .messages()

@@ -185,6 +185,27 @@ impl Engine {
     }
 
     /// 把任务挪到另一个状态。`note` 是对新状态的一句说明。不允许的走法会被拒绝。
+    /// 人对任务做了决定（验收、打回、取消）：在房间里留一句话。
+    /// 界面上看得到；房间里的 Bot 下一次说话时也会读到，知道任务后来怎么样了。不叫任何 Bot。
+    pub fn note_task(&self, task: &Task, text: &str) -> Result<()> {
+        let now = now_ms();
+        let seq = self.store.write(|tx| {
+            let note = card(
+                task,
+                Sender::User,
+                MessageKind::Task,
+                None,
+                text.to_string(),
+                MessageState::Complete,
+                now,
+            );
+            let (_, seq) = add_message(tx, note)?;
+            Ok(seq)
+        })?;
+        self.publish(seq);
+        Ok(())
+    }
+
     pub fn move_task(&self, id: &TaskId, to: TaskState, note: &str) -> Result<Task> {
         let task = self.change_task(id, |_, task| {
             check_move(task, to)?;
