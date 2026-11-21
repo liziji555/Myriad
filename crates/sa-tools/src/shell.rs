@@ -223,6 +223,25 @@ mod tests {
     }
 
     #[cfg(unix)]
+    /// 用 cargo 跑测试时一定有的一个环境变量来试：别的测试都不靠它。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn hidden_environment_variables_do_not_reach_the_command() {
+        let (_dir, ctx) = rig();
+        let echo = json!({"command": "echo \"[$CARGO_PKG_NAME]\""});
+        let before = ShellTool.call(echo.clone(), &ctx).await.unwrap();
+        assert!(before.contains("[sa-tools]"), "{before}");
+        hide_env_from_commands(["CARGO_PKG_NAME".to_string(), "  ".to_string()]);
+        let after = ShellTool.call(echo, &ctx).await.unwrap();
+        assert!(after.contains("[]"), "{after}");
+        // 别的变量照常传。
+        let path = ShellTool
+            .call(json!({"command": "test -n \"$PATH\" && echo 有"}), &ctx)
+            .await
+            .unwrap();
+        assert!(path.contains("有"), "{path}");
+    }
+
     #[tokio::test]
     async fn runs_in_the_workdir_and_reports_exit_code_and_both_streams() {
         let (dir, ctx) = rig();
