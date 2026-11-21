@@ -1,4 +1,4 @@
-//! SuperAgent 的桌面外壳。
+//! 苦乐的桌面外壳。
 //!
 //! 它不是另一套程序：启动时在本进程里起和 `sa serve` 一样的本机服务，再开一个窗口去看它。
 //! 界面、数据目录、配置都和命令行版是同一份，所以两边不能同时开着。
@@ -23,7 +23,7 @@ use tauri_plugin_opener::OpenerExt;
 const SHUTDOWN_WAIT: Duration = Duration::from_secs(10);
 
 #[derive(Parser, Clone)]
-#[command(name = "superagent-desktop", version, about = "SuperAgent 桌面版")]
+#[command(name = "superagent-desktop", version, about = "苦乐桌面版")]
 struct Args {
     /// 数据目录（配置、数据库、会话记录都在这里），和 sa 用的是同一个
     #[arg(long, env = "SA_DATA_DIR", value_name = "目录")]
@@ -165,7 +165,7 @@ fn workdir(handle: &AppHandle, shell: &Shell) -> Option<PathBuf> {
             "Bot 只能读写一个你指定的文件夹（通常是你的项目文件夹）。\n\n\
              接下来请选这个文件夹。以后可以在菜单「文件 → 更换工作目录」里改。",
         )
-        .title("SuperAgent")
+        .title("苦乐")
         .blocking_show();
     let dir = pick_folder(handle)
         .blocking_pick_folder()?
@@ -206,10 +206,10 @@ fn open_main(handle: &AppHandle, url: &str) -> tauri::Result<()> {
     let home = url.origin();
     let (links, popups, downloads) = (handle.clone(), handle.clone(), handle.clone());
     WebviewWindowBuilder::new(handle, "main", WebviewUrl::External(url))
-        .title("SuperAgent")
+        .title("苦乐")
         .inner_size(1280.0, 820.0)
         .min_inner_size(720.0, 480.0)
-        // 窗口里只看 SuperAgent 自己的页面；别的网址（PR 链接之类）交给系统的浏览器。
+        // 窗口里只看苦乐自己的页面；别的网址（PR 链接之类）交给系统的浏览器。
         .on_navigation(move |to| {
             if to.origin() == home || matches!(to.scheme(), "about" | "blob" | "data") {
                 return true;
@@ -248,7 +248,7 @@ fn open_main(handle: &AppHandle, url: &str) -> tauri::Result<()> {
                     downloads
                         .dialog()
                         .message(text)
-                        .title("SuperAgent")
+                        .title("苦乐")
                         .kind(kind)
                         .show(|_| {});
                 }
@@ -293,7 +293,7 @@ fn open_failed(handle: &AppHandle, shell: &Shell, reason: &str) -> tauri::Result
         "dataDir": shell.data_dir.root().to_string_lossy(),
     });
     WebviewWindowBuilder::new(handle, "main", WebviewUrl::App("index.html".into()))
-        .title("SuperAgent")
+        .title("苦乐")
         .inner_size(760.0, 480.0)
         .initialization_script(format!("window.__SA_START__ = {details};"))
         .build()

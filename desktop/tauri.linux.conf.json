@@ -1,0 +1,10 @@
+{
+  "productName": "kule",
+  "bundle": {
+    "linux": {
+      "deb": {
+        "desktopTemplate": "linux/kule.desktop"
+      }
+    }
+  }
+}

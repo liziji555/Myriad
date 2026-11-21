@@ -1,4 +1,6 @@
-# SuperAgent
+# 苦乐
+
+> 原名 SuperAgent。命令行叫 `sa`，仓库、数据目录和导出的文件名里还是 `superagent`，没有跟着改。
 
 Rust 多 Bot Agent Harness：房间里的 AI 团队。一个可执行文件，自带内核、本机服务和三栏界面。
 
@@ -375,7 +377,7 @@ default = { input = 10.0, cached_input = 10.0, output = 30.0 }      # 没有单�
 | 新 issue、issue 和 PR 下的评论 | 进房间，交给入口 Bot（`[github] issue_labels` 写了标签就只收带这些标签的 issue） |
 | PR 的评审、行内评论、CI 没通过或超时 | 只管任务开的 PR：进房间，交给那个任务的负责人 |
 | CI 通过、被取消 | 只管任务开的 PR：摆在时间线上，不叫 Bot |
-| 机器人账号做的、SuperAgent 自己发的、没连房间的仓库、别的事件 | 不收 |
+| 机器人账号做的、苦乐自己发的、没连房间的仓库、别的事件 | 不收 |
 
 签名（`X-Hub-Signature-256`）不对的一律拒绝。GitHub 重试同一次投递（`X-GitHub-Delivery` 相同）不会变成第二条消息。
 标题、正文、评论、文件名、分支名这些外人能随便写的东西：交给 Bot 时都围在 `<untrusted_external_content>` 里并说明只当资料看，里面的要求不照做；
@@ -526,11 +528,12 @@ pnpm dlx @tauri-apps/cli@2.12.4 build --bundles nsis  # 出安装包：Windows �
 ```
 
 - 第一次启动让你选 Bot 能读写的工作目录，之后记着；菜单「文件 → 更换工作目录」可以改（会重新启动）。
-- 窗口里只显示 SuperAgent 自己的页面，PR 之类的外部链接交给系统的浏览器；导出的 Bot 模板存进「下载」文件夹。
+- 窗口里只显示苦乐自己的页面，PR 之类的外部链接交给系统的浏览器；导出的 Bot 模板存进「下载」文件夹。
 - 关掉窗口就停下服务，正在写的回复会标成「中断」，和 `Ctrl+C` 停 `sa serve` 一样。
 - 模型密钥、GitHub 令牌仍然从环境变量读。从开始菜单或桌面图标启动时读的是系统里的用户环境变量，不是某个终端里临时 `set` 的。
 - 页面没有被授予任何桌面能力，它能做的事和在浏览器里一样多。
 - 它是单独的一个 Cargo workspace，`cargo test --workspace` 不会编它；Linux 上编它要先装 WebKitGTK 等系统库（见 `.github/workflows/desktop.yml`）。
+- Windows 上安装后叫「苦乐」；Linux 的包名只能用字母，叫 `kule`，在应用菜单里显示的仍然是「苦乐」。
 - 安装包由 GitHub Actions 的 `Desktop` 工作流构建（手动触发，或者打 `v` 开头的标签），在运行记录的 Artifacts 里下载。安装包没有代码签名，Windows 第一次运行会有 SmartScreen 提示。
 
 ## 开发

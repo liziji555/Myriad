@@ -56,7 +56,7 @@ export function Sidebar({
   return (
     <nav className="sa-sidebar" aria-label="导航">
       <header className="sa-sidebar-head">
-        <span className="sa-brand">SuperAgent</span>
+        <span className="sa-brand">苦乐</span>
         <button
           type="button"
           className="sa-icon-button"
