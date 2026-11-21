@@ -260,6 +260,12 @@ fn check_name(name: &str, existing: &[Bot], except: Option<&BotId>) -> Result<St
     Ok(name.to_string())
 }
 
+/// 一个新 Bot 的名字和人设合不合规矩（不看有没有重名）。
+pub(crate) fn check_bot(name: &str, persona: &str) -> Result<()> {
+    check_name(name, &[], None)?;
+    check_persona(persona).map(drop)
+}
+
 fn check_persona(persona: &str) -> Result<String> {
     let persona = persona.trim();
     if persona.chars().count() > MAX_PERSONA_CHARS {

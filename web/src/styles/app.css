@@ -59,6 +59,16 @@ code {
 .sa-shell[data-panel-open="false"] .sa-panel {
   display: none;
 }
+/* 左栏收起：这一列整个不要，中间自动变宽。 */
+.sa-shell[data-sidebar="collapsed"] {
+  grid-template-columns: minmax(0, 1fr) var(--sa-panel-width);
+}
+.sa-shell[data-sidebar="collapsed"][data-panel-open="false"] {
+  grid-template-columns: minmax(0, 1fr);
+}
+.sa-shell[data-sidebar="collapsed"] .sa-sidebar {
+  display: none;
+}
 
 .sa-gate {
   display: grid;
@@ -472,11 +482,25 @@ button.sa-row:hover {
 
 /* ---- 右栏 ---------------------------------------------------------------- */
 .sa-panel {
+  position: relative;
   display: flex;
   flex-direction: column;
   min-height: 0;
   background: var(--sa-bg);
   border-left: 1px solid var(--sa-border);
+}
+/* 右栏左边那条可以拖的线。 */
+.sa-panel-resizer {
+  position: absolute;
+  inset: 0 auto 0 -3px;
+  width: 6px;
+  cursor: col-resize;
+  touch-action: none;
+  z-index: 1;
+}
+.sa-panel-resizer:hover,
+.sa-panel-resizer:focus-visible {
+  background: color-mix(in srgb, var(--sa-accent) 40%, transparent);
 }
 .sa-tabs {
   display: flex;
@@ -539,6 +563,14 @@ button.sa-row:hover {
   .sa-shell[data-panel-open="false"] {
     grid-template-columns: var(--sa-sidebar-width) minmax(0, 1fr);
   }
+  .sa-shell[data-sidebar="collapsed"],
+  .sa-shell[data-sidebar="collapsed"][data-panel-open="false"] {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  /* 抽屉的宽度跟着屏幕走，不让拖。 */
+  .sa-panel-resizer {
+    display: none;
+  }
   .sa-panel {
     position: fixed;
     inset: 0 0 0 auto;
@@ -573,6 +605,72 @@ button.sa-row:hover {
 }
 .sa-mention-menu li[aria-selected="true"] {
   background: var(--sa-active);
+}
+/* 一步交回来的结果：默认只露出开头几行，展开后自己滚，不把时间线撑开。 */
+.sa-step-output {
+  display: grid;
+  justify-items: start;
+  gap: 2px;
+  min-width: 0;
+  padding: 2px 0 var(--sa-space-1) 16px;
+}
+.sa-step-output pre {
+  box-sizing: border-box;
+  width: 100%;
+  max-height: 320px;
+  margin: 0;
+  padding: var(--sa-space-1) var(--sa-space-2);
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  border-radius: var(--sa-radius-sm);
+  background: var(--sa-hover);
+  color: var(--sa-fg-muted);
+  font-family: var(--sa-font-mono);
+  font-size: var(--sa-text-xs);
+}
+/* 往上翻走之后浮在时间线底部的「回到最新」。 */
+.sa-to-latest {
+  position: sticky;
+  bottom: var(--sa-space-2);
+  display: block;
+  margin: 0 auto;
+  background: var(--sa-bg);
+  box-shadow: 0 2px 8px color-mix(in srgb, #000 14%, transparent);
+}
+.sa-menu-group {
+  margin: 0;
+  padding: var(--sa-space-1) var(--sa-space-2) 0;
+  color: var(--sa-fg-faint);
+  font-size: var(--sa-text-xs);
+}
+.sa-menu-item {
+  padding: var(--sa-space-1) var(--sa-space-2);
+  border-radius: var(--sa-radius-sm);
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+.sa-menu-item[aria-selected="true"] {
+  background: var(--sa-hover);
+}
+.sa-menu-empty {
+  padding: var(--sa-space-2);
+  color: var(--sa-fg-muted);
+  font-size: var(--sa-text-sm);
+}
+.sa-examples {
+  display: grid;
+  gap: var(--sa-space-2);
+  justify-items: center;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.sa-examples .sa-chip {
+  height: auto;
+  min-height: 28px;
+  white-space: normal;
+  text-align: left;
 }
 .sa-mention-name {
   font-weight: 600;
@@ -615,6 +713,23 @@ button.sa-row:hover {
   font-size: var(--sa-text-sm);
   font-weight: 600;
   color: var(--sa-fg-muted);
+}
+.sa-panel-note {
+  margin: 0;
+  padding: 0 var(--sa-space-2);
+  color: var(--sa-fg-faint);
+  font-size: var(--sa-text-xs);
+  overflow-wrap: anywhere;
+}
+.sa-check {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sa-space-1);
+  cursor: pointer;
+}
+.sa-check input {
+  flex: none;
+  margin: 2px 0 0;
 }
 .sa-link {
   padding: 0;

@@ -60,7 +60,8 @@ pub trait Observer: Send + Sync {
     async fn text_delta(&self, text: &str);
     /// 一步开始了。`arguments` 是模型给这个工具的参数原文（JSON），内部的步骤（压缩）是空的。
     async fn tool_started(&self, call_id: &str, tool: &str, title: &str, arguments: &str);
-    async fn tool_finished(&self, call_id: &str, ok: bool);
+    /// 一步结束了。`output` 是工具交回来的结果（失败时是原因）；被停下的、内部的步骤是空的。
+    async fn tool_finished(&self, call_id: &str, ok: bool, output: &str);
     /// 一次模型调用结束，报告用量。
     async fn usage(&self, model: &str, usage: Usage);
     /// 这次调用要人点头才能执行。返回 `true` 表示批准。默认不批准。
@@ -332,7 +333,7 @@ impl Turn {
             let summary = self
                 .summarise(provider, config, plan.text, observer, cancel)
                 .await;
-            observer.tool_finished(&step, summary.is_ok()).await;
+            observer.tool_finished(&step, summary.is_ok(), "").await;
             match summary {
                 Ok(content) => {
                     transcript.append(EntryBody::Summary {
@@ -613,8 +614,12 @@ async fn run_one(
             }
         }
     };
+    let output = match &result {
+        Some(Ok(text)) | Some(Err(text)) => text.as_str(),
+        None => "",
+    };
     observer
-        .tool_finished(&call.id, matches!(result, Some(Ok(_))))
+        .tool_finished(&call.id, matches!(result, Some(Ok(_))), output)
         .await;
     result
 }
@@ -720,7 +725,7 @@ mod tests {
                 .unwrap()
                 .push(format!("start:{call_id}:{tool}:{title}"));
         }
-        async fn tool_finished(&self, call_id: &str, ok: bool) {
+        async fn tool_finished(&self, call_id: &str, ok: bool, _output: &str) {
             self.log
                 .lock()
                 .unwrap()

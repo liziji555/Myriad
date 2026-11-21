@@ -13,4 +13,8 @@ title: string, state: StepState,
 /**
  * 这一步要人批准时才有。批准或拒绝之后仍然留着，方便回看当时问的是什么。
  */
-approval?: StepApproval, };
+approval?: StepApproval, 
+/**
+ * 这一步交回来的结果（失败时是原因），截短过，给人展开看。没有结果、被停下的步骤没有。
+ */
+output?: string, };

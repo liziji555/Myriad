@@ -50,6 +50,25 @@ pub enum BotCommand {
         /// Bot 的名字或 ID
         bot: String,
     },
+    /// 把 Bot 导出成一份模板（TOML），可以拿到别的机器上导入。里面没有密钥和聊天记录
+    Export {
+        /// 要导出的 Bot（名字或 ID）。不写就是全部
+        bots: Vec<String>,
+        /// 导出这个房间的团队：成员、谁是入口、房间叫什么
+        #[arg(long, value_name = "房间", conflicts_with = "bots")]
+        room: Option<String>,
+        /// 写到这个文件里。不写就打印出来
+        #[arg(short, long, value_name = "文件")]
+        output: Option<std::path::PathBuf>,
+    },
+    /// 导入一份模板：新建里面的 Bot（已经有同名的跳过），模板带了房间就新建那个房间
+    Import {
+        /// 模板文件
+        file: std::path::PathBuf,
+        /// 已经有同名的 Bot 时，照模板改它的档位、分工、是否启用（默认不动它）
+        #[arg(long)]
+        update: bool,
+    },
 }
 
 #[derive(clap::Subcommand)]
@@ -151,6 +170,63 @@ fn bot(engine: &Engine, command: BotCommand, out: &mut impl Write) -> Result<()>
             let target = find_bot(engine, &bot)?;
             engine.delete_bot(&target.id)?;
             writeln!(out, "已删除 {}", target.name)?;
+        }
+        BotCommand::Export { bots, room, output } => {
+            let team = match room {
+                Some(room) => engine.export_room(&find_room(engine, &room)?.id)?,
+                None => {
+                    let ids = bots
+                        .iter()
+                        .map(|bot| find_bot(engine, bot).map(|bot| bot.id));
+                    engine.export_bots(&ids.collect::<Result<Vec<_>>>()?)?
+                }
+            };
+            let text = sa_engine::template_text(&team);
+            match output {
+                Some(path) => {
+                    std::fs::write(&path, text)
+                        .with_context(|| format!("写不了 {}", path.display()))?;
+                    writeln!(
+                        out,
+                        "已导出 {} 个 Bot 到 {}",
+                        team.bots.len(),
+                        path.display()
+                    )?;
+                }
+                None => out.write_all(text.as_bytes())?,
+            }
+        }
+        BotCommand::Import { file, update } => {
+            let text = std::fs::read_to_string(&file)
+                .with_context(|| format!("读不了 {}", file.display()))?;
+            let team = sa_engine::parse_template(&text)
+                .with_context(|| format!("读不懂 {}", file.display()))?;
+            let report = engine.import_team(&team, update)?;
+            for bot in &report.created {
+                writeln!(out, "已新建 {}（{}）", bot.name, bot.tier.as_str())?;
+            }
+            for bot in &report.updated {
+                writeln!(out, "已照模板改了 {}（{}）", bot.name, bot.tier.as_str())?;
+            }
+            for name in &report.skipped {
+                writeln!(out, "已经有 {name}，没有动它")?;
+            }
+            if !update && !report.skipped.is_empty() {
+                // 模板带了房间时再导一次会多出一个同名的房间，所以不劝人重来。
+                let how = if report.room.is_some() {
+                    "想让已有的同名 Bot 也照模板改，用 sa bot set 改它们；\
+                     再导一次会多建一个同名的房间。下次导入时可以直接加 --update。"
+                } else {
+                    "想让已有的同名 Bot 也照模板改，加上 --update 再导一次。"
+                };
+                writeln!(out, "{how}")?;
+            }
+            if let Some(room) = &report.room {
+                writeln!(out, "已新建房间「{}」（{}）", room.name, room.id)?;
+            }
+            if report.created.is_empty() && report.updated.is_empty() && report.room.is_none() {
+                writeln!(out, "没有新建任何东西。")?;
+            }
         }
     }
     Ok(())
@@ -277,6 +353,110 @@ mod tests {
             other => panic!("不认识的命令 {other}"),
         }
         Ok(String::from_utf8(out).unwrap())
+    }
+
+    #[test]
+    fn a_team_is_exported_to_a_file_and_imported_somewhere_else() {
+        let here = engine();
+        sa(&here, "room add 修bug").unwrap();
+        here.create_bot(
+            "Coder",
+            ModelTier::Strong,
+            "写代码\n改完跑测试，\"引号\" 和 # 井号都留着",
+        )
+        .unwrap();
+        sa(&here, "bot add Reviewer --tier cheap --persona 看改动").unwrap();
+        sa(&here, "room invite 修bug Coder").unwrap();
+        sa(&here, "room invite 修bug Reviewer").unwrap();
+        sa(&here, "room host 修bug Reviewer").unwrap();
+        // 新房间自动带上的「助手」请出去：模板里只该有房间里的成员。
+        sa(&here, "room kick 修bug 助手").unwrap();
+        sa(&here, "bot set Coder --disable").unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("team.toml");
+        let out = sa(
+            &here,
+            &format!("bot export --room 修bug -o {}", file.display()),
+        )
+        .unwrap();
+        assert!(out.contains("已导出"), "{out}");
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(
+            text.contains("version = 1") && text.contains("[[bots]]"),
+            "{text}"
+        );
+        assert!(
+            text.contains("[room]") && text.contains(r#"host = "Reviewer""#),
+            "{text}"
+        );
+        // 不写文件就打印出来；可以只挑几个 Bot，这时不带房间。
+        let printed = sa(&here, "bot export Coder").unwrap();
+        assert!(printed.contains(r#"name = "Coder""#) && !printed.contains("[room]"));
+        assert!(!printed.contains("Reviewer"), "{printed}");
+        assert!(sa(&here, "bot export Coder --room 修bug").is_err());
+        assert!(sa(&here, "bot export 没有这个").is_err());
+
+        let there = Engine::new(Store::open_in_memory().unwrap()).unwrap();
+        let out = sa(&there, &format!("bot import {}", file.display())).unwrap();
+        assert!(
+            out.contains("已新建 Coder") && out.contains("已新建房间「修bug」"),
+            "{out}"
+        );
+        let bots = there.list_bots().unwrap();
+        let coder = bots.iter().find(|bot| bot.name == "Coder").unwrap();
+        assert_eq!(
+            coder.persona,
+            "写代码\n改完跑测试，\"引号\" 和 # 井号都留着"
+        );
+        assert_eq!((coder.tier, coder.enabled), (ModelTier::Strong, false));
+        let listed = sa(&there, "room list").unwrap();
+        assert!(
+            listed.contains("Reviewer（入口）") && listed.contains("Coder"),
+            "{listed}"
+        );
+        // 再导一次不会多出 Bot。
+        let out = sa(&there, &format!("bot import {}", file.display())).unwrap();
+        // 这份模板带着房间：不劝人「再导一次」，那样会多出一个同名的房间。
+        assert!(
+            out.contains("已经有 Coder，没有动它") && out.contains("sa bot set"),
+            "{out}"
+        );
+        assert!(!out.contains("再导一次。"), "{out}");
+        // 不带房间的模板可以放心重来。
+        let bots_only = dir.path().join("bots.toml");
+        sa(
+            &here,
+            &format!("bot export Coder -o {}", bots_only.display()),
+        )
+        .unwrap();
+        let out = sa(&there, &format!("bot import {}", bots_only.display())).unwrap();
+        assert!(out.contains("加上 --update 再导一次。"), "{out}");
+        assert_eq!(there.list_bots().unwrap().len(), 2);
+        // 已有的同名 Bot 默认不动；加上 --update 才照模板改。
+        sa(&there, "bot set Coder --tier cheap --enable").unwrap();
+        sa(&there, &format!("bot import {}", file.display())).unwrap();
+        let coder = find_bot(&there, "Coder").unwrap();
+        assert_eq!((coder.tier, coder.enabled), (ModelTier::Cheap, true));
+        let out = sa(&there, &format!("bot import {} --update", file.display())).unwrap();
+        assert!(out.contains("已照模板改了 Coder（strong）"), "{out}");
+        assert!(!out.contains("--update"), "{out}");
+        let coder = find_bot(&there, "Coder").unwrap();
+        assert_eq!((coder.tier, coder.enabled), (ModelTier::Strong, false));
+        assert_eq!(there.list_bots().unwrap().len(), 2);
+
+        // 不是模板的文件、没有的文件：说清楚，不动数据。
+        let bad = dir.path().join("bad.toml");
+        std::fs::write(&bad, "这不是 TOML = = =").unwrap();
+        let error = sa(&there, &format!("bot import {}", bad.display())).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("不是一份能认的模板"),
+            "{error:#}"
+        );
+        std::fs::write(&bad, "version = 9\n").unwrap();
+        let error = sa(&there, &format!("bot import {}", bad.display())).unwrap_err();
+        assert!(format!("{error:#}").contains("版本"), "{error:#}");
+        assert!(sa(&there, "bot import /没有/这个文件.toml").is_err());
     }
 
     #[test]

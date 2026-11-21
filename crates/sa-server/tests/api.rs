@@ -933,6 +933,104 @@ async fn a_task_runs_is_rejected_then_accepted_over_http() {
 }
 
 #[tokio::test]
+async fn a_team_is_exported_and_imported_over_the_api() {
+    let (app, engine) = app();
+    let room = engine.list_rooms().unwrap().remove(0);
+    let coder = engine
+        .create_bot("Coder", sa_protocol::ModelTier::Strong, "写代码")
+        .unwrap();
+    engine.add_room_member(&room.id, &coder.id).unwrap();
+    engine.update_room(&room.id, None, Some(&coder.id)).unwrap();
+    let import = |text: &str| {
+        let body = serde_json::json!({ "text": text }).to_string();
+        app.clone().oneshot(post("/api/templates/import", &body))
+    };
+
+    let path = format!("/api/templates/rooms/{}", room.id);
+    let file: sa_protocol::TemplateFile =
+        json(app.clone().oneshot(get(&path)).await.unwrap()).await;
+    assert!(file.name.starts_with("superagent-") && file.name.ends_with(".toml"));
+    let team = sa_engine::parse_template(&file.text).unwrap();
+    assert_eq!(team.bots.len(), 2);
+    assert_eq!(team.room.clone().unwrap().host.as_deref(), Some("Coder"));
+    let everyone: sa_protocol::TemplateFile = json(
+        app.clone()
+            .oneshot(get("/api/templates/bots"))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(everyone.name, "superagent-bots.toml");
+    let everyone = sa_engine::parse_template(&everyone.text).unwrap();
+    assert_eq!((everyone.bots.len(), everyone.room), (2, None));
+
+    // 导回同一个地方：Bot 都在，只多一个房间。
+    let response = import(&file.text).await.unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let report: sa_protocol::ImportReport = json(response).await;
+    assert!(report.created.is_empty());
+    assert_eq!(report.skipped.len(), 2);
+    let made = report.room.unwrap();
+    assert_eq!(made.host_bot_id.as_ref(), Some(&coder.id));
+    assert_eq!(engine.list_rooms().unwrap().len(), 2);
+
+    // 已有的同名 Bot 默认不动；明说了才照模板改。
+    let stronger =
+        "version = 1\n[[bots]]\nname = \"Coder\"\ntier = \"cheap\"\npersona = \"改过的\"\n";
+    let report: sa_protocol::ImportReport = json(import(stronger).await.unwrap()).await;
+    assert!(report.updated.is_empty());
+    assert_eq!(engine.get_bot(&coder.id).unwrap().persona, "写代码");
+    let body = serde_json::json!({ "text": stronger, "update_existing": true }).to_string();
+    let response = app
+        .clone()
+        .oneshot(post("/api/templates/import", &body))
+        .await
+        .unwrap();
+    let report: sa_protocol::ImportReport = json(response).await;
+    assert_eq!(report.updated.len(), 1);
+    assert!(report.skipped.is_empty());
+    let changed = engine.get_bot(&coder.id).unwrap();
+    assert_eq!(changed.persona, "改过的");
+    assert_eq!(changed.tier, sa_protocol::ModelTier::Cheap);
+
+    // 加一个新的 Bot 再导：只建这一个。
+    let more = "version = 1\n[[bots]]\nname = \"Tester\"\ntier = \"cheap\"\n";
+    let report: sa_protocol::ImportReport = json(import(more).await.unwrap()).await;
+    assert_eq!(report.created.len(), 1);
+    assert!(report.created[0].enabled && report.created[0].persona.is_empty());
+
+    // 版本不对、读不懂、成员对不上：都是 400，什么都不建。
+    for bad in [
+        "version = 2\n",
+        "这不是模板",
+        "version = 1\n[room]\nname = \"x\"\nmembers = [\"没有这个\"]\n",
+    ] {
+        let response = import(bad).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{bad}");
+    }
+    let response = app
+        .clone()
+        .oneshot(post("/api/templates/import", "{}"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(engine.list_bots().unwrap().len(), 3);
+    assert_eq!(engine.list_rooms().unwrap().len(), 2);
+    let missing = format!("/api/templates/rooms/{}", sa_protocol::RoomId::new());
+    let response = app.clone().oneshot(get(&missing)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let response = app
+        .oneshot(
+            Request::get("/api/templates/bots")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
 async fn the_audit_log_is_served_filtered_and_paged() {
     let (app, engine) = app();
     let room = engine.list_rooms().unwrap().remove(0);

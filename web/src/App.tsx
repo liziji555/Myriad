@@ -1,4 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type CSSProperties } from "react";
+import { loadLayout, saveLayout, type Layout } from "./api/layout";
+import type { SlashCommand } from "./api/slash";
 import { STATE_LABEL } from "./api/tasks";
 import { api } from "./api/client";
 import type { RoomId, TaskId } from "./api/types";
@@ -27,6 +29,14 @@ function Shell() {
   const [selected, setSelected] = useState<RoomId | null>(null);
   const [tab, setTab] = useState<PanelTab>("tasks");
   const [panelOpen, setPanelOpen] = useState(true);
+  const [prefill, setPrefill] = useState<string | null>(null);
+  const [layout, setLayout] = useState(loadLayout);
+  const changeLayout = (patch: Partial<Layout>) =>
+    setLayout((current) => {
+      const next = { ...current, ...patch };
+      saveLayout(next);
+      return next;
+    });
   const [focusTask, setFocusTask] = useState<TaskId | null>(null);
   const [demoNodes, setDemoNodes] = useState<ActivityNode[]>([]);
   const [version, setVersion] = useState("");
@@ -172,7 +182,11 @@ function Shell() {
       id: "action:new-room",
       group: "action",
       title: "新建房间",
-      run: () => setCreateSignal((n) => n + 1),
+      run: () => {
+        // 填名字的地方在左栏里：左栏收着就先展开。
+        changeLayout({ sidebarCollapsed: false });
+        setCreateSignal((n) => n + 1);
+      },
     },
     ...(room
       ? [
@@ -184,6 +198,12 @@ function Shell() {
           tabAction("usage", "看用量和花费"),
           tabAction("audit", "看审计日志：谁批准了什么、做了什么"),
           tabAction("activity", "看任务图"),
+          {
+            id: "action:toggle-sidebar",
+            group: "action" as const,
+            title: layout.sidebarCollapsed ? "展开左边的房间列表" : "收起左边的房间列表",
+            run: () => changeLayout({ sidebarCollapsed: !layout.sidebarCollapsed }),
+          },
           {
             id: "action:toggle-panel",
             group: "action" as const,
@@ -204,8 +224,25 @@ function Shell() {
       : []),
   ];
 
+  // 输入框里 `/` 列出来的命令：就是命令面板里的那些动作，分成「面板」和「动作」两组。
+  const slashCommands: SlashCommand[] = paletteEntries
+    .filter((entry) => entry.group === "action")
+    .map((entry) => ({
+      id: entry.id,
+      group: entry.id.startsWith("action:tab-") ? "面板" : "动作",
+      title: entry.title,
+      run: entry.run,
+    }))
+    .sort((a, b) => Number(b.group === "面板") - Number(a.group === "面板"));
+
   return (
-    <div className="sa-shell" data-panel-open={panelOpen}>
+    <div
+      className="sa-shell"
+      data-panel-open={panelOpen}
+      // 没有房间时左栏总是开着：新建房间的入口在那里。
+      data-sidebar={layout.sidebarCollapsed && room ? "collapsed" : "open"}
+      style={{ "--sa-panel-width": `${layout.panelWidth}px` } as CSSProperties}
+    >
       {paletteOpen && <CommandPalette entries={paletteEntries} onClose={() => setPaletteOpen(false)} />}
       <Sidebar
         rooms={workspace.rooms}
@@ -225,6 +262,8 @@ function Shell() {
               room={room}
               memberCount={members.length}
               panelOpen={panelOpen}
+              sidebarCollapsed={layout.sidebarCollapsed}
+              onToggleSidebar={() => changeLayout({ sidebarCollapsed: !layout.sidebarCollapsed })}
               onShowMembers={() => showPanel("members")}
               onTogglePanel={() => setPanelOpen((open) => !open)}
             />
@@ -254,6 +293,7 @@ function Shell() {
               onLoadOlder={() => workspace.loadOlder(room.id)}
               onDecide={workspace.decideApproval}
               onLightDemo={runLightDemo}
+              onExample={setPrefill}
             />
             {roomChat?.activity?.routing ? (
               <p className="sa-room-status" role="status">
@@ -268,6 +308,10 @@ function Shell() {
             )}
             <Composer
               key={`composer-${room.id}`}
+              roomId={room.id}
+              prefill={prefill}
+              onPrefilled={() => setPrefill(null)}
+              commands={slashCommands}
               disabledReason={room.host_bot_id ? null : "这个房间里还没有 Bot，发了也没人回应"}
               replying={replying}
               members={members.filter((bot) => bot.enabled)}
@@ -287,6 +331,8 @@ function Shell() {
           tab={tab}
           onTab={setTab}
           onClose={() => setPanelOpen(false)}
+          width={layout.panelWidth}
+          onResize={(panelWidth) => changeLayout({ panelWidth })}
           room={room}
           members={members}
           bots={workspace.bots}

@@ -254,6 +254,44 @@ async fn hello_gets_a_streamed_reply_from_the_host_bot() {
 }
 
 #[tokio::test]
+async fn steps_that_finish_together_all_keep_their_results() {
+    let dir = tempfile::tempdir().unwrap();
+    let names: Vec<String> = (0..12).map(|n| format!("f{n}.txt")).collect();
+    let args: Vec<String> = names
+        .iter()
+        .map(|name| format!(r#"{{"path":"{name}"}}"#))
+        .collect();
+    let ids: Vec<String> = (0..names.len()).map(|n| format!("c{n}")).collect();
+    let calls: Vec<(&str, &str, &str)> = ids
+        .iter()
+        .zip(&args)
+        .map(|(id, args)| (id.as_str(), "read", args.as_str()))
+        .collect();
+    let rig = start(
+        dir.path(),
+        vec![
+            MockReply::tool_calls("一起读。", &calls),
+            MockReply::text("读完了。"),
+        ],
+        true,
+    );
+    for name in &names {
+        std::fs::write(dir.path().join("work").join(name), format!("内容 {name}\n")).unwrap();
+    }
+    rig.say("都读一下").await;
+    let reply = rig.settled(2).await.pop().unwrap();
+    assert_eq!(reply.state, MessageState::Complete);
+    assert_eq!(reply.steps.len(), names.len());
+    // 只读的工具是同时跑的：谁先结束都不能让别人的结果从存下来的回复里消失。
+    for (step, name) in reply.steps.iter().zip(&names) {
+        assert_eq!(step.state, StepState::Ok, "{step:?}");
+        let output = step.output.as_deref().unwrap_or_default();
+        assert!(output.contains(&format!("内容 {name}")), "{step:?}");
+    }
+    rig.orchestrator.shutdown().await;
+}
+
+#[tokio::test]
 async fn reads_a_workspace_file_and_shows_the_step() {
     let dir = tempfile::tempdir().unwrap();
     let rig = start(
@@ -288,6 +326,14 @@ async fn reads_a_workspace_file_and_shows_the_step() {
             ("read", "读取 说明.md", StepState::Ok),
             ("read", "读取 ../data/token", StepState::Error),
         ]
+    );
+    // 每一步交回来的结果留在消息里，给人展开看：读到了什么、为什么没做成。
+    let read = reply.steps[0].output.as_deref().unwrap();
+    assert!(read.contains("项目代号：海豚"), "{read}");
+    let refused = reply.steps[1].output.as_deref().unwrap();
+    assert!(
+        !refused.is_empty() && !refused.contains("机密令牌"),
+        "{refused}"
     );
 
     let second = &rig.provider.requests()[1];

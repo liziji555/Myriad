@@ -312,6 +312,7 @@ mod tests {
             title: "读取 a.txt".into(),
             state: StepState::Ok,
             approval: None,
+            output: None,
         }];
         store.write(|tx| update(tx, &reply)).unwrap();
         let stored = store.read(|c| get(c, &reply.id)).unwrap().unwrap();

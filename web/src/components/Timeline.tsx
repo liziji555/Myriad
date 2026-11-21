@@ -1,3 +1,4 @@
+import { outputPreview } from "../api/steps";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { RoomChat } from "../api/chat";
 import { safeUrl, sourceName, splitEvent } from "../api/links";
@@ -28,10 +29,19 @@ interface Props {
   /** 答复一张审批卡。 */
   onDecide: Decide;
   onLightDemo(source: HTMLElement): void;
+  /** 空房间里点了一句示例：把它填进输入框，由人自己决定发不发。 */
+  onExample(text: string): void;
 }
 
 /** 离底部这么近就算「在看最新的」，新内容来了自动跟着滚。 */
 const STICK_PX = 80;
+
+/** 空房间里给人点的几句话：各自用到读文件、开任务、点名这几样本事。 */
+const EXAMPLES = [
+  "看一下工作目录里有什么，用三句话告诉我这是个什么项目",
+  "把 README 里写错的地方找出来，开一个任务去改",
+  "这个房间里有哪些 Bot，各自负责什么？",
+];
 
 export function Timeline({
   chat,
@@ -46,9 +56,17 @@ export function Timeline({
   onLoadOlder,
   onDecide,
   onLightDemo,
+  onExample,
 }: Props) {
   const scroller = useRef<HTMLElement>(null);
   const stick = useRef(true);
+  /** 人往上翻走了：不再跟着新内容滚，给一个「回到最新」。 */
+  const [away, setAway] = useState(false);
+  const toLatest = () => {
+    stick.current = true;
+    setAway(false);
+    scroller.current?.scrollTo({ top: scroller.current.scrollHeight });
+  };
   /** 往前翻页之前的内容高度，用来在新内容插到上面之后保持视线位置。 */
   const heightBeforeOlder = useRef<number | null>(null);
   const [loadingOlder, setLoadingOlder] = useState(false);
@@ -120,7 +138,17 @@ export function Timeline({
     body = (
       <div className="sa-empty">
         <h2>这个房间还没有消息</h2>
-        <p>在下面输入内容，回车发送。也可以先看看「过程连到结果」的光线效果：</p>
+        <p>在下面输入内容，回车发送。不知道说什么的话，点一句试试（会填进输入框，不会直接发出去）：</p>
+        <ul className="sa-examples" aria-label="示例">
+          {EXAMPLES.map((example) => (
+            <li key={example}>
+              <button type="button" className="sa-chip" onClick={() => onExample(example)}>
+                {example}
+              </button>
+            </li>
+          ))}
+        </ul>
+        <p>也可以先看看「过程连到结果」的光线效果：</p>
         <button type="button" className="sa-button" onClick={(event) => onLightDemo(event.currentTarget)}>
           演示光线
         </button>
@@ -194,9 +222,15 @@ export function Timeline({
       onScroll={(event) => {
         const el = event.currentTarget;
         stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < STICK_PX;
+        setAway(!stick.current);
       }}
     >
       {body}
+      {away && messages.length > 0 && (
+        <button type="button" className="sa-chip sa-to-latest" onClick={toLatest}>
+          回到最新 ↓
+        </button>
+      )}
     </section>
   );
 }
@@ -443,6 +477,8 @@ function Steps({ steps, onDecide }: { steps: readonly ToolStep[]; onDecide: Deci
 }
 
 function StepItem({ step, onDecide }: { step: ToolStep; onDecide: Decide }) {
+  const [full, setFull] = useState(false);
+  const preview = step.output ? outputPreview(step.output) : null;
   return (
     <li className="sa-step" data-state={step.state}>
       <div className="sa-step-line">
@@ -452,6 +488,16 @@ function StepItem({ step, onDecide }: { step: ToolStep; onDecide: Decide }) {
         </span>
         <span className="sa-step-state">{STEP_LABEL[step.state]}</span>
       </div>
+      {preview && (
+        <div className="sa-step-output">
+          <pre tabIndex={full ? 0 : undefined}>{full ? step.output : preview.text}</pre>
+          {preview.cut && (
+            <button type="button" className="sa-link" aria-expanded={full} onClick={() => setFull(!full)}>
+              {full ? "收起" : "查看完整"}
+            </button>
+          )}
+        </div>
+      )}
       {step.state === "waiting" && step.approval && (
         <ApprovalCard
           id={step.approval.id}

@@ -1,3 +1,4 @@
+import { clampPanelWidth, panelWidthAt, PANEL_MAX, PANEL_MIN, PANEL_STEP } from "../api/layout";
 import type { TaskBoard } from "../api/tasks";
 import type { LinkActions, RoutineActions, TaskActions, Team } from "../api/useWorkspace";
 import type { Bot, Link, Room, Routine, TaskId } from "../api/types";
@@ -43,6 +44,9 @@ interface Props {
   tab: PanelTab;
   onTab(tab: PanelTab): void;
   onClose(): void;
+  /** 右栏现在多宽（像素）。 */
+  width: number;
+  onResize(width: number): void;
   room: Room;
   members: readonly Bot[];
   bots: readonly Bot[];
@@ -67,6 +71,8 @@ export function ContextPanel({
   tab,
   onTab,
   onClose,
+  width,
+  onResize,
   room,
   members,
   bots,
@@ -84,6 +90,40 @@ export function ContextPanel({
 }: Props) {
   return (
     <aside className="sa-panel" aria-label="上下文面板">
+      <div
+        className="sa-panel-resizer"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="调整右栏宽度，可以拖，也可以用左右方向键"
+        aria-valuemin={PANEL_MIN}
+        aria-valuemax={PANEL_MAX}
+        aria-valuenow={width}
+        tabIndex={0}
+        onPointerDown={(event) => {
+          event.preventDefault();
+          event.currentTarget.setPointerCapture(event.pointerId);
+        }}
+        onPointerMove={(event) => {
+          if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
+          onResize(panelWidthAt(event.clientX, window.innerWidth));
+        }}
+        onPointerUp={(event) => event.currentTarget.releasePointerCapture(event.pointerId)}
+        onKeyDown={(event) => {
+          const next =
+            event.key === "ArrowLeft"
+              ? width + PANEL_STEP
+              : event.key === "ArrowRight"
+                ? width - PANEL_STEP
+                : event.key === "Home"
+                  ? PANEL_MAX
+                  : event.key === "End"
+                    ? PANEL_MIN
+                    : null;
+          if (next === null) return;
+          event.preventDefault();
+          onResize(clampPanelWidth(next));
+        }}
+      />
       <div className="sa-tabs" role="tablist">
         {TABS.map(({ id, label }) => (
           <button

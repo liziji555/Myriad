@@ -462,6 +462,7 @@ mod tests {
             title: "读取 a.txt".into(),
             state: StepState::Running,
             approval: None,
+            output: None,
         };
         let updated = engine.set_steps(&draft.id, vec![step.clone()]).unwrap();
         assert_eq!(updated.rev, 3);
@@ -529,6 +530,7 @@ mod tests {
                 title: "执行 ls".into(),
                 state,
                 approval: None,
+                output: None,
             };
             let steps = vec![
                 step("a", StepState::Ok),
