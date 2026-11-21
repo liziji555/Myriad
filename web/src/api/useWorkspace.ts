@@ -70,7 +70,8 @@ export interface TaskActions {
   accept(taskId: TaskId): Promise<void>;
   reject(taskId: TaskId, note: string): Promise<void>;
   stop(taskId: TaskId): Promise<void>;
-  cancel(taskId: TaskId): Promise<void>;
+  /** 取消任务。`note` 是原因，可以为空。 */
+  cancel(taskId: TaskId, note: string): Promise<void>;
   /** 拉一个任务的执行历史。 */
   loadRuns(taskId: TaskId): Promise<void>;
 }
@@ -315,7 +316,7 @@ export function useWorkspace(): WorkspaceView {
       stop: async (taskId) => {
         await api.stopTask(taskId);
       },
-      cancel: async (taskId) => put(await api.cancelTask(taskId)),
+      cancel: async (taskId, note) => put(await api.cancelTask(taskId, note)),
       loadRuns: async (taskId) => {
         const detail = await api.getTask(taskId);
         setBoard((current) => upsertRuns(upsertTask(current, detail.task), detail.runs));
