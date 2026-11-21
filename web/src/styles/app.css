@@ -47,27 +47,170 @@ code {
   background: var(--sa-hover);
 }
 
-/* ---- 三栏 ---------------------------------------------------------------- */
+/* ---- 现场栏 + 主线 + 面板 ------------------------------------------------ */
 .sa-shell {
+  --sa-stage-height: 48px;
   display: grid;
-  grid-template-columns: var(--sa-sidebar-width) minmax(0, 1fr) var(--sa-panel-width);
+  grid-template-columns: minmax(0, 1fr) var(--sa-panel-width);
+  grid-template-rows: var(--sa-stage-height) minmax(0, 1fr);
   height: 100%;
 }
 .sa-shell[data-panel-open="false"] {
-  grid-template-columns: var(--sa-sidebar-width) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
 }
 .sa-shell[data-panel-open="false"] .sa-panel {
   display: none;
 }
-/* 左栏收起：这一列整个不要，中间自动变宽。 */
-.sa-shell[data-sidebar="collapsed"] {
-  grid-template-columns: minmax(0, 1fr) var(--sa-panel-width);
+.sa-stage {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: var(--sa-space-3);
+  min-width: 0;
+  padding: 0 var(--sa-space-3);
+  border-bottom: 1px solid var(--sa-border);
+  background: var(--sa-bg-side);
 }
-.sa-shell[data-sidebar="collapsed"][data-panel-open="false"] {
-  grid-template-columns: minmax(0, 1fr);
+.sa-stage-room {
+  display: flex;
+  align-items: center;
+  gap: var(--sa-space-2);
+  min-width: 0;
+  max-width: 40%;
+  height: 32px;
+  padding: 0 var(--sa-space-2);
+  border: 0;
+  border-radius: var(--sa-radius-md);
+  background: none;
 }
-.sa-shell[data-sidebar="collapsed"] .sa-sidebar {
-  display: none;
+.sa-stage-room:hover,
+.sa-stage-room[aria-expanded="true"] {
+  background: var(--sa-hover);
+}
+.sa-stage-sep {
+  color: var(--sa-fg-faint);
+}
+.sa-stage-caret {
+  flex: none;
+  border: 4px solid transparent;
+  border-top-color: var(--sa-fg-muted);
+  border-bottom-width: 0;
+}
+.sa-stage-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sa-space-2);
+  margin-left: auto;
+  flex: none;
+}
+.sa-stage-offline {
+  font-size: var(--sa-text-sm);
+  color: var(--sa-warn);
+}
+.sa-stage .sa-chip[data-alert="true"] {
+  border-color: var(--sa-warn);
+  color: var(--sa-warn);
+}
+
+/* 现场：每个 Bot 一块牌子，写着它此刻在做什么。 */
+.sa-presence {
+  display: flex;
+  gap: var(--sa-space-2);
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.sa-presence li {
+  flex: none;
+  min-width: 0;
+}
+.sa-presence-chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 320px;
+  height: 28px;
+  padding: 0 var(--sa-space-3) 0 var(--sa-space-2);
+  border: 1px solid var(--sa-border);
+  border-radius: var(--sa-radius-pill);
+  background: var(--sa-bg);
+  font-size: var(--sa-text-sm);
+}
+.sa-presence-chip:disabled {
+  cursor: default;
+}
+.sa-presence-chip:not(:disabled):hover {
+  border-color: var(--sa-fg-faint);
+}
+.sa-presence-name {
+  font-weight: 600;
+  white-space: nowrap;
+}
+.sa-presence-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--sa-fg-muted);
+}
+.sa-presence-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--sa-ok);
+}
+.sa-presence-chip[data-state="off"] .sa-presence-dot,
+.sa-presence-chip[data-state="queued"] .sa-presence-dot {
+  background: var(--sa-fg-faint);
+}
+.sa-presence-chip[data-state="tool"] .sa-presence-dot,
+.sa-presence-chip[data-state="writing"] .sa-presence-dot,
+.sa-presence-chip[data-state="working"] .sa-presence-dot {
+  background: var(--sa-accent);
+  animation: sa-pulse 1.2s ease-in-out infinite;
+}
+.sa-presence-chip[data-state="approval"],
+.sa-presence-chip[data-state="asking"] {
+  border-color: var(--sa-warn);
+  background: color-mix(in srgb, var(--sa-warn) 10%, var(--sa-bg));
+}
+.sa-presence-chip[data-state="approval"] .sa-presence-dot,
+.sa-presence-chip[data-state="asking"] .sa-presence-dot {
+  background: var(--sa-warn);
+}
+.sa-presence-chip[data-state="approval"] .sa-presence-text,
+.sa-presence-chip[data-state="asking"] .sa-presence-text {
+  color: var(--sa-fg);
+}
+@keyframes sa-pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+/* 房间列表：平时收着，点左上角的房间名才出来，盖在主线上面。 */
+.sa-scrim {
+  position: fixed;
+  inset: var(--sa-stage-height) 0 0 0;
+  z-index: 5;
+  background: color-mix(in srgb, #000 12%, transparent);
+}
+.sa-shell .sa-sidebar {
+  position: fixed;
+  inset: var(--sa-stage-height) auto 0 0;
+  width: var(--sa-sidebar-width);
+  z-index: 6;
+  box-shadow: 8px 0 24px color-mix(in srgb, #000 12%, transparent);
+}
+.sa-shell .sa-main {
+  grid-row: 2;
+  grid-column: 1;
+}
+.sa-shell .sa-panel {
+  grid-row: 2;
+  grid-column: 2;
 }
 
 .sa-gate {
@@ -557,31 +700,40 @@ button.sa-row:hover {
   border-radius: var(--sa-radius-md);
 }
 
-/* ---- 窄屏：右栏变成盖在上面的抽屉，左栏收窄 ------------------------------ */
+/* ---- 窄屏：面板变成盖在上面的抽屉，牌子只留名字 -------------------------- */
 @media (max-width: 1100px) {
   .sa-shell,
   .sa-shell[data-panel-open="false"] {
-    grid-template-columns: var(--sa-sidebar-width) minmax(0, 1fr);
-  }
-  .sa-shell[data-sidebar="collapsed"],
-  .sa-shell[data-sidebar="collapsed"][data-panel-open="false"] {
     grid-template-columns: minmax(0, 1fr);
   }
   /* 抽屉的宽度跟着屏幕走，不让拖。 */
   .sa-panel-resizer {
     display: none;
   }
-  .sa-panel {
+  .sa-shell .sa-panel {
     position: fixed;
-    inset: 0 0 0 auto;
+    inset: var(--sa-stage-height) 0 0 auto;
     width: min(var(--sa-panel-width), 100vw);
     z-index: 5;
     box-shadow: -8px 0 24px color-mix(in srgb, #000 16%, transparent);
   }
 }
-@media (max-width: 720px) {
-  :root {
-    --sa-sidebar-width: 180px;
+@media (max-width: 820px) {
+  .sa-presence-text,
+  .sa-stage .sa-kbd,
+  .sa-stage .sa-brand,
+  .sa-stage-sep {
+    display: none;
+  }
+  .sa-presence-chip[data-state="approval"] .sa-presence-text,
+  .sa-presence-chip[data-state="asking"] .sa-presence-text {
+    display: inline;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .sa-presence-dot,
+  .sa-messages > li::before {
+    animation: none !important;
   }
 }
 .sa-mention-menu {
@@ -1521,4 +1673,111 @@ button.sa-row:hover {
   display: flex;
   flex-wrap: wrap;
   gap: var(--sa-space-2);
+}
+
+/* ---- 主线：所有的事按时间排在一条线上 -------------------------------------- */
+.sa-messages {
+  position: relative;
+  padding-left: calc(var(--sa-space-4) + 28px);
+}
+.sa-messages::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: calc(var(--sa-space-4) + 9px);
+  width: 2px;
+  background: var(--sa-border);
+}
+.sa-messages > li {
+  position: relative;
+}
+/* 线上的节点。人说的话是空心的，Bot 的是实心的，正在进行的会跳。 */
+.sa-messages > li::before {
+  content: "";
+  position: absolute;
+  top: 5px;
+  left: -24px;
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--sa-fg-faint);
+  border-radius: 50%;
+  background: var(--sa-bg);
+}
+.sa-messages > .sa-older::before {
+  display: none;
+}
+.sa-messages > .sa-msg[data-sender="bot"]::before {
+  border-color: var(--sa-fg-muted);
+  background: var(--sa-fg-muted);
+}
+.sa-messages > .sa-msg[data-sender="user"]::before {
+  top: 12px;
+  border-color: var(--sa-accent);
+}
+.sa-messages > .sa-msg[data-state="streaming"]::before {
+  border-color: var(--sa-accent);
+  background: var(--sa-accent);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--sa-accent) 22%, transparent);
+  animation: sa-pulse 1.2s ease-in-out infinite;
+}
+.sa-messages > .sa-msg[data-state="failed"]::before {
+  border-color: var(--sa-danger);
+  background: var(--sa-danger);
+}
+.sa-messages > .sa-msg[data-state="cancelled"]::before,
+.sa-messages > .sa-msg[data-state="interrupted"]::before {
+  border-color: var(--sa-fg-faint);
+  background: var(--sa-bg);
+}
+/* 任务的事是方的：开任务、交结果、运行过程。 */
+.sa-messages > .sa-msg[data-kind="task"]::before,
+.sa-messages > .sa-msg[data-kind="delivery"]::before,
+.sa-messages > .sa-msg[data-kind="run"]::before {
+  border-radius: 3px;
+}
+.sa-messages > .sa-msg[data-kind="delivery"]::before {
+  border-color: var(--sa-ok);
+  background: var(--sa-ok);
+}
+/* 外面来的事和定时任务是斜着的小方块。 */
+.sa-messages > .sa-msg-event::before,
+.sa-messages > .sa-msg-trigger::before {
+  top: 9px;
+  left: -22px;
+  width: 8px;
+  height: 8px;
+  border-radius: 1px;
+  transform: rotate(45deg);
+}
+/* 人说的话不再靠右：都挂在同一条线上，用底色区分。 */
+.sa-messages > .sa-msg[data-sender="user"] {
+  justify-self: start;
+  max-width: 100%;
+}
+.sa-messages > .sa-msg-trigger {
+  justify-self: start;
+}
+/* 正在进行的那一段：整块托起来，一眼看得到。 */
+.sa-messages > .sa-msg[data-state="streaming"] {
+  margin-left: calc(-1 * var(--sa-space-2));
+  padding: var(--sa-space-2);
+  border-radius: var(--sa-radius-md);
+  background: color-mix(in srgb, var(--sa-accent) 6%, transparent);
+}
+.sa-messages > .sa-msg[data-state="streaming"]::before {
+  left: calc(-24px + var(--sa-space-2));
+  top: calc(5px + var(--sa-space-2));
+}
+/* 从现场栏跳过来的那条闪一下。 */
+.sa-messages > li[data-flash="true"] {
+  animation: sa-flash 1.6s ease-out;
+}
+@keyframes sa-flash {
+  from {
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--sa-accent) 60%, transparent);
+  }
+  to {
+    box-shadow: 0 0 0 3px transparent;
+  }
 }

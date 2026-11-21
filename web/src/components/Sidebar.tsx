@@ -11,7 +11,6 @@ interface Props {
   onCreateRoom(name: string): Promise<void>;
   /** 每加一就打开「新建房间」的输入框（命令面板里点的）。 */
   createSignal: number;
-  onOpenPalette(): void;
 }
 
 export function Sidebar({
@@ -23,7 +22,6 @@ export function Sidebar({
   onSelect,
   onCreateRoom,
   createSignal,
-  onOpenPalette,
 }: Props) {
   const [creating, setCreating] = useState(false);
   useEffect(() => {
@@ -54,9 +52,9 @@ export function Sidebar({
   };
 
   return (
-    <nav className="sa-sidebar" aria-label="导航">
+    <nav className="sa-sidebar" aria-label="房间列表">
       <header className="sa-sidebar-head">
-        <span className="sa-brand">苦乐</span>
+        <span className="sa-section-title">房间和 Bot</span>
         <button
           type="button"
           className="sa-icon-button"
@@ -67,11 +65,6 @@ export function Sidebar({
           +
         </button>
       </header>
-      <button type="button" className="sa-search" onClick={onOpenPalette}>
-        <span>搜索、跳转…</span>
-        <kbd className="sa-kbd">{/Mac|iPhone|iPad/.test(navigator.platform) ? "⌘ K" : "Ctrl K"}</kbd>
-      </button>
-
       <section className="sa-section">
         <h2 className="sa-section-title">房间</h2>
         {creating && (

@@ -1,6 +1,7 @@
 import { useEffect, useState, type CSSProperties } from "react";
 import { loadLayout, saveLayout, type Layout } from "./api/layout";
 import type { SlashCommand } from "./api/slash";
+import { presenceOf, type Presence } from "./api/presence";
 import { STATE_LABEL } from "./api/tasks";
 import { api } from "./api/client";
 import type { RoomId, TaskId } from "./api/types";
@@ -10,8 +11,8 @@ import { CommandPalette, type PaletteEntry } from "./components/CommandPalette";
 import { Composer } from "./components/Composer";
 import { ContextPanel, type ActivityNode, type PanelTab } from "./components/ContextPanel";
 import { Notices } from "./components/Notices";
-import { RoomHeader } from "./components/RoomHeader";
 import { Sidebar } from "./components/Sidebar";
+import { StageBar } from "./components/StageBar";
 import { Timeline } from "./components/Timeline";
 import { LightProvider, useLight } from "./light/LightProvider";
 
@@ -28,9 +29,10 @@ function Shell() {
   const emit = useLight();
   const [selected, setSelected] = useState<RoomId | null>(null);
   const [tab, setTab] = useState<PanelTab>("tasks");
-  const [panelOpen, setPanelOpen] = useState(true);
+  const [roomsOpen, setRoomsOpen] = useState(false);
   const [prefill, setPrefill] = useState<string | null>(null);
   const [layout, setLayout] = useState(loadLayout);
+  const panelOpen = layout.panelOpen;
   const changeLayout = (patch: Partial<Layout>) =>
     setLayout((current) => {
       const next = { ...current, ...patch };
@@ -110,9 +112,25 @@ function Shell() {
   const queued = (roomChat?.activity?.queued ?? []).flatMap(
     (id) => workspace.bots.find((bot) => bot.id === id)?.name ?? [],
   );
+  const setPanelOpen = (open: boolean) => changeLayout({ panelOpen: open });
   const showPanel = (next: PanelTab) => {
     setTab(next);
     setPanelOpen(true);
+  };
+  const roomTasks = room ? (workspace.board.rooms[room.id] ?? []) : [];
+  const presence = presenceOf(members, roomChat, roomTasks);
+  const pendingTasks = roomTasks.filter((task) => ["review", "waiting", "blocked"].includes(task.state)).length;
+  // 点了现场栏上的牌子：主线上有那条消息就滚过去闪一下，否则打开那个任务。
+  const jumpTo = (row: Presence) => {
+    const target = row.messageId && document.querySelector(`[data-message-id="${row.messageId}"]`);
+    if (target) {
+      target.scrollIntoView({ block: "center", behavior: "smooth" });
+      target.setAttribute("data-flash", "true");
+      window.setTimeout(() => target.removeAttribute("data-flash"), 1600);
+    } else if (row.taskId) {
+      setFocusTask(row.taskId);
+      showPanel("tasks");
+    }
   };
 
   // 演示：先把节点放进右栏，再让光线从按钮飞到这个节点。
@@ -183,8 +201,8 @@ function Shell() {
       group: "action",
       title: "新建房间",
       run: () => {
-        // 填名字的地方在左栏里：左栏收着就先展开。
-        changeLayout({ sidebarCollapsed: false });
+        // 填名字的地方在房间列表里：先把它打开。
+        setRoomsOpen(true);
         setCreateSignal((n) => n + 1);
       },
     },
@@ -201,14 +219,14 @@ function Shell() {
           {
             id: "action:toggle-sidebar",
             group: "action" as const,
-            title: layout.sidebarCollapsed ? "展开左边的房间列表" : "收起左边的房间列表",
-            run: () => changeLayout({ sidebarCollapsed: !layout.sidebarCollapsed }),
+            title: roomsOpen ? "收起房间列表" : "打开房间列表",
+            run: () => setRoomsOpen((open) => !open),
           },
           {
             id: "action:toggle-panel",
             group: "action" as const,
-            title: panelOpen ? "收起右侧栏" : "展开右侧栏",
-            run: () => setPanelOpen((open) => !open),
+            title: panelOpen ? "收起面板" : "打开面板",
+            run: () => setPanelOpen(!panelOpen),
           },
         ]
       : []),
@@ -239,34 +257,48 @@ function Shell() {
     <div
       className="sa-shell"
       data-panel-open={panelOpen}
-      // 没有房间时左栏总是开着：新建房间的入口在那里。
-      data-sidebar={layout.sidebarCollapsed && room ? "collapsed" : "open"}
+      // 没有房间时房间列表总是开着：新建房间的入口在那里。
+      data-rooms={roomsOpen || !room ? "open" : "closed"}
       style={{ "--sa-panel-width": `${layout.panelWidth}px` } as CSSProperties}
     >
       {paletteOpen && <CommandPalette entries={paletteEntries} onClose={() => setPaletteOpen(false)} />}
-      <Sidebar
-        rooms={workspace.rooms}
-        bots={workspace.bots}
-        selectedRoomId={room?.id ?? null}
+      <StageBar
+        room={room}
+        presence={presence}
         connected={workspace.connected}
-        version={version}
-        onSelect={setSelected}
-        onCreateRoom={async (name) => setSelected((await workspace.createRoom(name)).id)}
-        createSignal={createSignal}
+        pendingTasks={pendingTasks}
+        roomsOpen={roomsOpen || !room}
+        drawerOpen={panelOpen}
+        onToggleRooms={() => setRoomsOpen((open) => !open)}
+        onToggleDrawer={() => setPanelOpen(!panelOpen)}
+        onShowTasks={() => showPanel("tasks")}
         onOpenPalette={() => setPaletteOpen(true)}
+        onPick={jumpTo}
       />
+      {(roomsOpen || !room) && (
+        <>
+          {room && <div className="sa-scrim" onClick={() => setRoomsOpen(false)} />}
+          <Sidebar
+            rooms={workspace.rooms}
+            bots={workspace.bots}
+            selectedRoomId={room?.id ?? null}
+            connected={workspace.connected}
+            version={version}
+            onSelect={(id) => {
+              setSelected(id);
+              setRoomsOpen(false);
+            }}
+            onCreateRoom={async (name) => {
+              setSelected((await workspace.createRoom(name)).id);
+              setRoomsOpen(false);
+            }}
+            createSignal={createSignal}
+          />
+        </>
+      )}
       <main className="sa-main">
         {room ? (
           <>
-            <RoomHeader
-              room={room}
-              memberCount={members.length}
-              panelOpen={panelOpen}
-              sidebarCollapsed={layout.sidebarCollapsed}
-              onToggleSidebar={() => changeLayout({ sidebarCollapsed: !layout.sidebarCollapsed })}
-              onShowMembers={() => showPanel("members")}
-              onTogglePanel={() => setPanelOpen((open) => !open)}
-            />
             <Notices
               notices={noticesFor(workspace.notices, room.id)}
               onDismiss={workspace.dismissNotice}
@@ -280,7 +312,7 @@ function Shell() {
               key={room.id}
               chat={roomChat}
               bots={workspace.bots}
-              tasks={workspace.board.rooms[room.id] ?? []}
+              tasks={roomTasks}
               runs={workspace.board.runs}
               taskActions={workspace.tasks}
               members={members.filter((bot) => bot.enabled)}
@@ -322,7 +354,7 @@ function Shell() {
         ) : (
           <div className="sa-empty">
             <h2>还没有房间</h2>
-            <p>点左上角的 + 新建一个。</p>
+            <p>在左边的房间列表里点 + 新建一个。</p>
           </div>
         )}
       </main>
