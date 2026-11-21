@@ -3,6 +3,7 @@ use crate::paths::DataDir;
 use anyhow::{Context, Result};
 use sa_engine::Audit;
 use sa_server::AppState;
+use std::future::Future;
 use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::path::Path;
@@ -22,18 +23,46 @@ pub struct ServeArgs {
 
 pub fn run(data_dir: &DataDir, args: ServeArgs) -> Result<()> {
     init_logging(tracing::Level::INFO);
-    let app = App::open(data_dir, &args.run)?;
+    let open = args.open;
+    serve_until(
+        data_dir,
+        &args.run,
+        args.port,
+        move |url| {
+            println!("在浏览器里打开：{url}");
+            println!("按 Ctrl+C 停止。");
+            if open {
+                if let Err(e) = open_browser(url) {
+                    tracing::warn!("无法自动打开浏览器：{e}");
+                }
+            }
+        },
+        stop_signal(),
+    )
+}
+
+/// 启动服务，一直到 `stop` 完成才返回。开始监听之后把带令牌的地址交给 `ready`。
+///
+/// `sa serve` 和桌面外壳走的都是这里：同一个服务，只是一个等 Ctrl+C，一个等窗口关掉。
+pub fn serve_until(
+    data_dir: &DataDir,
+    run: &RunArgs,
+    port: Option<u16>,
+    ready: impl FnOnce(&str),
+    stop: impl Future<Output = ()> + Send + 'static,
+) -> Result<()> {
+    let app = App::open(data_dir, run)?;
     let token = load_or_create_token(&data_dir.token())?;
 
     let server = &app.config.server;
-    let addr = SocketAddr::new(server.host, args.port.unwrap_or(server.port));
+    let addr = SocketAddr::new(server.host, port.unwrap_or(server.port));
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
         .block_on(async move {
             let listener = TcpListener::bind(addr).await.map_err(|e| match e.kind() {
                 ErrorKind::AddrInUse => anyhow::anyhow!(
-                    "端口 {addr} 已被占用：可能已有一个 sa serve 在运行，或用 --port 换一个端口"
+                    "端口 {addr} 已被占用：可能已有一个 SuperAgent 在运行，或者换一个端口（sa serve --port，或改 config.toml 里的 port）"
                 ),
                 _ => anyhow::Error::new(e).context(format!("无法监听 {addr}")),
             })?;
@@ -45,8 +74,6 @@ pub fn run(data_dir: &DataDir, args: ServeArgs) -> Result<()> {
             } else {
                 println!("{}", app.config.budget_notice());
             }
-            println!("在浏览器里打开：{url}");
-            println!("按 Ctrl+C 停止。");
             // 留底：服务是什么时候、在哪个工作目录、用什么模型起来的。地址里的令牌不记。
             let models = if app.mock {
                 "假模型"
@@ -61,11 +88,6 @@ pub fn run(data_dir: &DataDir, args: ServeArgs) -> Result<()> {
             let workdir = format!("工作目录：{}", app.workdir);
             app.engine
                 .audit(Audit::system("server.started", summary).detail(workdir));
-            if args.open {
-                if let Err(e) = open_browser(&url) {
-                    tracing::warn!("无法自动打开浏览器：{e}");
-                }
-            }
             // 上次退出时没做完的任务接着排队。
             app.orchestrator.resume_tasks();
             // 上次退出时还没有 Bot 接的话，现在接着回应。
@@ -99,12 +121,14 @@ pub fn run(data_dir: &DataDir, args: ServeArgs) -> Result<()> {
                 println!("正在连接 Telegram。");
             }
             let orchestrator = app.orchestrator.clone();
-            sa_server::serve(listener, state, async move {
-                stop_signal().await;
+            // 到这里才算能用了：页面一打开就能连上。
+            let serving = sa_server::serve(listener, state, async move {
+                stop.await;
                 // 先让 Bot 停笔、把没写完的回复标成「中断」，再关连接：浏览器还来得及收到这个状态。
                 orchestrator.shutdown().await;
-            })
-            .await?;
+            });
+            ready(&url);
+            serving.await?;
             // 有「启动了」没有「停下了」，就是那一次没有正常退出。
             app.engine
                 .audit(Audit::system("server.stopped", "sa serve 正常停下了"));
