@@ -4,3 +4,5 @@
 /.sa-data
 *.log
 .DS_Store
+/desktop/target
+/desktop/gen

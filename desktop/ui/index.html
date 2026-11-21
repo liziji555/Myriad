@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="color-scheme" content="light dark" />
+    <title>SuperAgent</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <main>
+      <h1>SuperAgent 没能启动</h1>
+      <pre id="reason"></pre>
+      <h2>常见原因</h2>
+      <ul>
+        <li>已经开着一个 SuperAgent（包括终端里的 <code>sa serve</code>、<code>sa chat</code>）：关掉它再打开。</li>
+        <li><code>config.toml</code> 写错了：按上面的提示改好再打开。</li>
+        <li>选的工作目录打不开：在菜单「文件 → 更换工作目录」里重新选。</li>
+      </ul>
+      <p>数据目录：<code id="data-dir"></code>（菜单「文件 → 打开数据目录」）</p>
+    </main>
+    <script src="main.js"></script>
+  </body>
+</html>

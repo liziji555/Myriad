@@ -506,6 +506,26 @@ auto_approve = ["read_file"]          # 这些工具不用问；别的每次调�
 `prompts/chat.md`（可选）替换内置的系统提示词。里面可以用 `{bot_name}`、`{workspace}`、`{persona}`（这个 Bot 的分工）、`{team}`（房间里别的 Bot 和协作规则）；
 没写后两个时，它们会接在提示词最后。
 
+## 桌面版
+
+`desktop/` 是一个 Tauri 外壳：一个窗口，里面起的是和 `sa serve` 同一个本机服务、同一个界面，数据目录和配置也是同一份。
+它不是另一套程序，所以和 `sa serve`、`sa chat` 不能同时开着（同一个数据目录只能有一个在用）。
+
+```sh
+pnpm --dir web build                                  # 界面先构建好
+cd desktop
+cargo run -- --mock                                   # 直接运行
+pnpm dlx @tauri-apps/cli@2.12.4 build --bundles nsis  # 出安装包：Windows 用 nsis，Linux 用 deb
+```
+
+- 第一次启动让你选 Bot 能读写的工作目录，之后记着；菜单「文件 → 更换工作目录」可以改（会重新启动）。
+- 窗口里只显示 SuperAgent 自己的页面，PR 之类的外部链接交给系统的浏览器；导出的 Bot 模板存进「下载」文件夹。
+- 关掉窗口就停下服务，正在写的回复会标成「中断」，和 `Ctrl+C` 停 `sa serve` 一样。
+- 模型密钥、GitHub 令牌仍然从环境变量读。从开始菜单或桌面图标启动时读的是系统里的用户环境变量，不是某个终端里临时 `set` 的。
+- 页面没有被授予任何桌面能力，它能做的事和在浏览器里一样多。
+- 它是单独的一个 Cargo workspace，`cargo test --workspace` 不会编它；Linux 上编它要先装 WebKitGTK 等系统库（见 `.github/workflows/desktop.yml`）。
+- 安装包由 GitHub Actions 的 `Desktop` 工作流构建（手动触发，或者打 `v` 开头的标签），在运行记录的 Artifacts 里下载。安装包没有代码签名，Windows 第一次运行会有 SmartScreen 提示。
+
 ## 开发
 
 ```sh
@@ -530,6 +550,7 @@ pnpm --dir web dev              # 前端热更新，/api 转发到 127.0.0.1:451
 | `crates/sa-adapters` | 和外面的接口：GitHub Webhook 的验签和解析、Telegram Bot API |
 | `crates/sa-server` | HTTP 接口、事件流、内嵌前端 |
 | `crates/sa-cli` | 可执行文件 `sa` |
+| `desktop` | 桌面外壳（Tauri），单独的 workspace |
 | `web` | React 前端 |
 
 ## 许可
