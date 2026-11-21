@@ -190,7 +190,10 @@ fn read_remembered(path: &Path) -> Option<PathBuf> {
 
 fn remember(shell: &Shell, dir: &Path) {
     let value = serde_json::json!({ "workdir": dir.to_string_lossy() });
-    let saved = std::fs::create_dir_all(shell.data_dir.root())
+    // 第一次启动时数据目录可能还没有：照 sa 的规矩建成只有自己能进的。
+    let saved = shell
+        .data_dir
+        .create()
         .and_then(|()| std::fs::write(shell.remembered(), format!("{value:#}\n")));
     if let Err(error) = saved {
         tracing::warn!("没能记下选的工作目录，下次启动还会再问：{error}");
@@ -223,8 +226,11 @@ fn open_main(handle: &AppHandle, url: &str) -> tauri::Result<()> {
             match event {
                 // 页面给的位置各个系统不一样（Linux 上是程序启动时所在的目录），一律改放「下载」文件夹。
                 DownloadEvent::Requested { destination, .. } => {
-                    let Ok(folder) = downloads.path().download_dir() else {
-                        return false;
+                    // 系统没有「下载」文件夹的（有些 Linux 桌面没配）退到用户的主目录；
+                    // 两个都没有就不动页面给的位置，总比存不了强。
+                    let path = downloads.path();
+                    let Ok(folder) = path.download_dir().or_else(|_| path.home_dir()) else {
+                        return true;
                     };
                     let name = destination
                         .file_name()

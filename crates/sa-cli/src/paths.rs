@@ -23,6 +23,16 @@ impl DataDir {
         &self.root
     }
 
+    /// 建数据目录（连同缺的上级）。新建出来的目录只有当前用户能进：里面有令牌、数据库和会话记录。
+    /// 已经存在的目录不动它的权限。
+    pub fn create(&self) -> std::io::Result<()> {
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+        builder.create(&self.root)
+    }
+
     pub fn config(&self) -> PathBuf {
         self.root.join("config.toml")
     }
