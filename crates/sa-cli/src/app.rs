@@ -159,7 +159,8 @@ impl App {
 
 /// 锁住数据目录并打开状态库。返回的文件持有期间，别的 `sa` 进程不能用这个数据目录。
 pub fn open_state(data_dir: &DataDir) -> Result<(Arc<Engine>, std::fs::File)> {
-    create_private_dir(data_dir.root())
+    data_dir
+        .create()
         .with_context(|| format!("无法创建数据目录 {}", data_dir.root().display()))?;
     let lock = lock_data_dir(&data_dir.lock())?;
     let store = Store::open(&data_dir.database())
@@ -218,16 +219,6 @@ fn lock_data_dir(path: &Path) -> Result<std::fs::File> {
             Err(e).with_context(|| format!("无法锁定 {}", path.display()))
         }
     }
-}
-
-/// 建目录（连同缺的上级）。新建出来的目录只有当前用户能进：里面有令牌、数据库和会话记录。
-/// 已经存在的目录不动它的权限。
-fn create_private_dir(path: &Path) -> std::io::Result<()> {
-    let mut builder = std::fs::DirBuilder::new();
-    builder.recursive(true);
-    #[cfg(unix)]
-    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
-    builder.create(path)
 }
 
 /// 文件不存在时写入 `contents`；返回是否新建了文件。已有的文件不动。
