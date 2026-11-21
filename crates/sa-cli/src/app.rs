@@ -88,6 +88,18 @@ impl App {
             }
         };
 
+        // Bot 执行的命令拿不到这些密钥：只有 sa 自己用它们。
+        sa_tools::hide_env_from_commands(
+            config
+                .providers
+                .values()
+                .map(|provider| provider.api_key_env.clone())
+                .chain([
+                    config.github.token_env.clone(),
+                    config.github.webhook_secret_env.clone(),
+                    config.telegram.token_env.clone(),
+                ]),
+        );
         let models = models(&config);
         let mut settings = Settings {
             sessions_dir: data_dir.sessions(),
