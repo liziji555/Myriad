@@ -1,6 +1,6 @@
 [package]
 name = "sa-kernel"
-description = "SuperAgent 的内核：一个会话的对话记录和「模型—工具」循环"
+description = "苦乐的内核：一个会话的对话记录和「模型—工具」循环"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
