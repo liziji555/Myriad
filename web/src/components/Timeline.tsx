@@ -1,3 +1,4 @@
+import { taskDecision } from "../api/taskNotes";
 import { outputPreview } from "../api/steps";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { RoomChat } from "../api/chat";
@@ -305,6 +306,8 @@ function TaskMessage({
       : (bots.find((bot) => bot.id === sender.bot_id)?.name ?? "Bot");
   const owner = bots.find((bot) => bot.id === task?.owner_bot_id)?.name;
   const delivery = message.kind === "delivery";
+  // 人验收、打回、取消任务时留下的那句话：照原话显示，不当成又开了一个任务。
+  const decision = delivery ? null : taskDecision(message.content);
   // 这张卡上要不要放操作：最新的交付卡，而且任务正等着人（验收、回答、卡住）。
   const actionable = delivery && latest && task && ["review", "waiting", "blocked"].includes(task.state);
   return (
@@ -318,11 +321,13 @@ function TaskMessage({
       </div>
       <div className="sa-card" data-kind={message.kind} data-latest={latest}>
         <div className="sa-card-head">
-          <span className="sa-card-kicker">{delivery ? deliveryHeading(task, latest) : "开了一个任务"}</span>
-          {task && (!delivery || latest) && <StateBadge state={task.state} />}
+          <span className="sa-card-kicker">
+            {delivery ? deliveryHeading(task, latest) : decision ? "对任务的决定" : "开了一个任务"}
+          </span>
+          {task && !decision && (!delivery || latest) && <StateBadge state={task.state} />}
         </div>
         <p className="sa-card-title">{task?.title ?? "任务"}</p>
-        {delivery ? (
+        {delivery || decision ? (
           <div className="sa-msg-body">{message.content}</div>
         ) : (
           <p className="sa-card-scope">{task?.scope ?? message.content}</p>
@@ -330,7 +335,7 @@ function TaskMessage({
         {delivery && latest && task && <Artifacts artifacts={task.artifacts} />}
         {actionable && <TaskActionBar key={task.state} task={task} actions={actions} members={members} />}
         <div className="sa-card-foot">
-          {!delivery && <span className="sa-row-meta">负责：{owner ?? "还没有负责人"}</span>}
+          {!delivery && !decision && <span className="sa-row-meta">负责：{owner ?? "还没有负责人"}</span>}
           {message.task_id && (
             <button type="button" className="sa-link" onClick={() => message.task_id && onShowTask(message.task_id)}>
               查看任务

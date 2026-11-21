@@ -120,6 +120,8 @@ impl Engine {
                 task.created_by.clone(),
                 MessageKind::Task,
                 None,
+                // 界面靠「开了任务「」这个开头认出这是开任务的卡片（web/src/api/taskNotes.ts）；
+                // `note_task` 留的话不能用这个开头。
                 format!("开了任务「{}」：{}", task.title, task.scope),
                 MessageState::Complete,
                 now,
