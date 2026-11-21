@@ -222,7 +222,6 @@ mod tests {
         assert_eq!(ShellTool.title(&input), "执行 echo hi");
     }
 
-    #[cfg(unix)]
     /// 用 cargo 跑测试时一定有的一个环境变量来试：别的测试都不靠它。
     #[cfg(unix)]
     #[tokio::test]
@@ -242,6 +241,7 @@ mod tests {
         assert!(path.contains("有"), "{path}");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn runs_in_the_workdir_and_reports_exit_code_and_both_streams() {
         let (dir, ctx) = rig();
