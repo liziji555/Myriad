@@ -160,6 +160,9 @@ pub struct StepApproval {
     /// 到这个时间还没人处理就按拒绝算。
     #[ts(type = "number")]
     pub expires_at: Millis,
+    /// 这张卡能不能选「这个任务里的命令都允许」：只有任务里的命令能，而且还没选过。
+    #[serde(default)]
+    pub can_allow_task: bool,
 }
 
 /// 人对一次审批的答复。
@@ -171,6 +174,8 @@ pub enum ApprovalDecision {
     Once,
     /// 允许，并且这个房间里以后同样的操作不再问。
     Always,
+    /// 允许，并且这个任务之后的命令都不再问。只对任务里的命令有意义，用在别处等于只允许这一次。
+    Task,
     Deny,
 }
 

@@ -1,3 +1,4 @@
+import { approvalChoices, type ApprovalChoice } from "../api/approvals";
 import { taskDecision } from "../api/taskNotes";
 import { outputPreview } from "../api/steps";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
@@ -508,8 +509,7 @@ function StepItem({ step, onDecide }: { step: ToolStep; onDecide: Decide }) {
           id={step.approval.id}
           reason={step.approval.reason}
           expiresAt={step.approval.expires_at}
-          // 只有命令和写文件能记住「总是允许」。
-          canRemember={["shell", "write", "edit"].includes(step.tool)}
+          choices={approvalChoices(step.tool, step.approval)}
           onDecide={onDecide}
         />
       )}
@@ -517,23 +517,17 @@ function StepItem({ step, onDecide }: { step: ToolStep; onDecide: Decide }) {
   );
 }
 
-const DECISIONS: { decision: ApprovalDecision; label: string; hint: string }[] = [
-  { decision: "once", label: "允许一次", hint: "只允许这一次" },
-  { decision: "always", label: "总是允许", hint: "这个房间里以后同样的操作不再问" },
-  { decision: "deny", label: "拒绝", hint: "不执行，Bot 会被告知" },
-];
-
 function ApprovalCard({
   id,
   reason,
   expiresAt,
-  canRemember,
+  choices,
   onDecide,
 }: {
   id: ApprovalId;
   reason: string;
   expiresAt: number;
-  canRemember: boolean;
+  choices: ApprovalChoice[];
   onDecide: Decide;
 }) {
   const [sending, setSending] = useState<ApprovalDecision | null>(null);
@@ -555,21 +549,19 @@ function ApprovalCard({
     <div className="sa-approval" role="group" aria-label="需要你批准">
       <p className="sa-approval-reason">{reason}</p>
       <div className="sa-approval-actions">
-        {DECISIONS.filter(({ decision }) => canRemember || decision !== "always").map(
-          ({ decision, label, hint }) => (
-            <button
-              key={decision}
-              type="button"
-              className="sa-button"
-              data-decision={decision}
-              title={hint}
-              disabled={sending !== null}
-              onClick={() => void decide(decision)}
-            >
-              {sending === decision ? "正在提交…" : label}
-            </button>
-          ),
-        )}
+        {choices.map(({ decision, label, hint }) => (
+          <button
+            key={decision}
+            type="button"
+            className="sa-button"
+            data-decision={decision}
+            title={hint}
+            disabled={sending !== null}
+            onClick={() => void decide(decision)}
+          >
+            {sending === decision ? "正在提交…" : label}
+          </button>
+        ))}
         <span className="sa-approval-expiry">{formatTime(expiresAt)} 前不处理按拒绝算</span>
       </div>
       {error && (

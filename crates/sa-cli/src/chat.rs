@@ -157,11 +157,22 @@ pub(crate) fn stdin_lines() -> Lines {
 pub(crate) type Lines = tokio::sync::mpsc::Receiver<String>;
 
 /// 人对审批卡的回答：y 允许一次，a 总是允许，其他（包括没有输入）都算拒绝。
-pub(crate) fn parse_decision(answer: Option<&str>) -> ApprovalDecision {
+/// 卡上有「这个任务里的命令都允许」时（`can_allow_task`），t 选它。
+pub(crate) fn parse_decision(answer: Option<&str>, can_allow_task: bool) -> ApprovalDecision {
     match answer.map(|a| a.trim().to_lowercase()).as_deref() {
         Some("y" | "yes") => ApprovalDecision::Once,
         Some("a" | "always") => ApprovalDecision::Always,
+        Some("t" | "task") if can_allow_task => ApprovalDecision::Task,
         _ => ApprovalDecision::Deny,
+    }
+}
+
+/// 审批卡下面那一行提示。
+pub(crate) fn decision_prompt(can_allow_task: bool) -> &'static str {
+    if can_allow_task {
+        "  [y] 允许一次  [a] 总是允许  [t] 这个任务里的命令都允许  [n] 拒绝 > "
+    } else {
+        "  [y] 允许一次  [a] 总是允许  [n] 拒绝 > "
     }
 }
 
@@ -310,7 +321,7 @@ async fn exchange<F: Future<Output = ()>>(
                             // 提示出现之前敲的回车不算数：那不是对这张卡的回答，不能拿它来批准。
                             while answers.try_recv().is_ok() {}
                             printer.line(out, &format!("  需要你批准：{}", approval.reason), true)?;
-                            write!(out, "  [y] 允许一次  [a] 总是允许  [n] 拒绝 > ")?;
+                            write!(out, "{}", decision_prompt(approval.can_allow_task))?;
                             out.flush()?;
                             printer.at_line_start = false;
                             let left = (approval.expires_at - sa_engine::now_ms()).max(0) as u64;
@@ -318,7 +329,7 @@ async fn exchange<F: Future<Output = ()>>(
                                 answer = answers.recv() => {
                                     // 人按了回车，光标已经在新的一行。
                                     printer.at_line_start = answer.is_some();
-                                    parse_decision(answer.as_deref())
+                                    parse_decision(answer.as_deref(), approval.can_allow_task)
                                 }
                                 _ = &mut interrupt => {
                                     interrupted = true;
