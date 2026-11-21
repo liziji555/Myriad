@@ -30,6 +30,8 @@ use tokio_util::sync::CancellationToken;
 /// 同时最多跑这么多个任务。
 pub const MAX_PARALLEL_RUNS: usize = 3;
 /// 任务说明里带上房间里最近这么多条对话。
+/// 任务的一次运行最多调多少次模型：一轮对话的上限乘以这个数。
+const WORK_STEPS_FACTOR: usize = 3;
 const BRIEF_MESSAGES: u32 = 10;
 /// 交付物里最多列这么多个文件。
 const MAX_FILE_ARTIFACTS: usize = 30;
@@ -301,7 +303,8 @@ async fn run_task(shared: &Arc<Shared>, task: Task, cancel: &CancellationToken) 
             let config = TurnConfig {
                 model: model.model.clone(),
                 system_prompt: render_work_prompt(&bot, &fence, &skills.prompt),
-                max_steps: shared.settings.max_steps,
+                // 任务比一轮对话要走的步数多得多（查、改、验证、推送、交结果）：给三倍。
+                max_steps: shared.settings.max_steps * WORK_STEPS_FACTOR,
                 max_tokens: None,
                 thinking: model.thinking,
                 session_id: Some(session_id.to_string()),
