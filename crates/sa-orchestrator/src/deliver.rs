@@ -97,6 +97,20 @@ impl Tool for GitPushTool {
 
     async fn call(&self, _input: Value, ctx: &ToolCtx) -> ToolResult {
         let delivery = &self.0;
+        // 推的是任务分支。任务目录被切到了别的分支上的话，改动不在任务分支里：
+        // 这时推上去的是没更新的任务分支，却会报成推好了。所以先拦下，说清楚怎么回来。
+        if let Some(expected) = &delivery.workdir.branch {
+            let current = workdir::current_branch(&delivery.workdir).await;
+            if current.as_deref() != Some(expected.as_str()) {
+                let now = current.map_or("不在任何分支上".to_string(), |b| {
+                    format!("在分支 {b} 上")
+                });
+                return Err(ToolError(format!(
+                    "没有推送：任务目录现在{now}，不是任务分支 {expected}。任务已经有自己的分支，不用另建。\
+                     先执行 git checkout {expected}，把别的分支上的提交合过来（git merge <那个分支>），再调用 git_push。"
+                )));
+            }
+        }
         workdir::commit_and_diff(&delivery.workdir, &delivery.task.title)
             .await
             .map_err(|reason| ToolError(format!("任务目录里的改动没能提交：{reason}")))?;
