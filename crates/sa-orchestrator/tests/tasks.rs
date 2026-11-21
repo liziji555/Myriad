@@ -861,6 +861,53 @@ fn has_ref(repo: &Path, name: &str) -> bool {
         .success()
 }
 
+/// Bot 在任务目录里自己另建了分支：推送工具推的是任务分支，这时不能假装推好了。
+#[tokio::test]
+async fn pushing_from_another_branch_is_refused_not_reported_as_done() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fake = FakeGitHub::default();
+    let github = GitHub {
+        api_base: fake.serve().await,
+        token: Some("t0ken".into()),
+        repo: Some("me/proj".into()),
+    };
+    let checkout = r#"{"command":"git checkout -q -b other"}"#;
+    let rig = start_full(
+        tmp.path(),
+        "ws",
+        vec![],
+        vec![
+            MockReply::tool_calls("另开一个分支。", &[("s1", "shell", checkout)]),
+            write("b.txt", "新文件\n"),
+            MockReply::tool_calls("推上去。", &[("p1", "git_push", "{}")]),
+            report("blocked", "没推上去"),
+            MockReply::text("交完了。"),
+        ],
+        true,
+        Some(github),
+    );
+    let origin = repo_with_origin(&rig, tmp.path());
+    let task = rig.open_task("加 b.txt").await;
+    let branch = format!("sa/{}", task.id.as_str().replace('_', "-"));
+
+    let (shell, _) = rig.next_approval(&[]).await;
+    assert!(rig.orchestrator.decide(&shell, ApprovalDecision::Once));
+    let (push, _) = rig.next_approval(std::slice::from_ref(&shell)).await;
+    assert!(rig.orchestrator.decide(&push, ApprovalDecision::Once));
+    rig.task_in(&task.id, TaskState::Blocked).await;
+
+    // 工具说清楚为什么没推、怎么回到任务分支；远端上什么都没有。
+    let result = last_result(&rig, 3);
+    assert!(
+        result.contains("不是任务分支") && result.contains(&branch),
+        "{result}"
+    );
+    assert!(result.contains("other"), "{result}");
+    assert!(!has_ref(&origin, &format!("refs/heads/{branch}")));
+    assert!(!has_ref(&origin, "refs/heads/other"));
+    rig.orchestrator.shutdown().await;
+}
+
 fn open_pr(id: &str, title: &str) -> MockReply {
     let input = serde_json::json!({ "title": title, "body": "加了 b.txt。" }).to_string();
     MockReply::tool_calls("开 PR。", &[(id, "open_pr", &input)])
