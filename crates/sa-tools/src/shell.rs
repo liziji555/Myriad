@@ -15,6 +15,22 @@ const MAX_OUTPUT_BYTES: usize = 60_000;
 
 pub struct ShellTool;
 
+static HIDDEN_ENV: std::sync::RwLock<Vec<String>> = std::sync::RwLock::new(Vec::new());
+
+/// 这些环境变量（模型密钥、GitHub 令牌……）以后不传给 Bot 执行的命令。启动时调用一次。
+pub fn hide_env_from_commands(names: impl IntoIterator<Item = String>) {
+    let mut hidden = HIDDEN_ENV.write().unwrap();
+    for name in names {
+        if !name.trim().is_empty() && !hidden.contains(&name) {
+            hidden.push(name);
+        }
+    }
+}
+
+fn hidden_env() -> Vec<String> {
+    HIDDEN_ENV.read().unwrap().clone()
+}
+
 #[derive(Deserialize)]
 struct Input {
     command: String,
@@ -77,6 +93,10 @@ impl Tool for ShellTool {
             c.args(["-c", &input.command]);
             c
         };
+        // 密钥这类环境变量不传给命令：命令的输出会回到模型手里，别人写的内容也可能教唆它去读。
+        for name in hidden_env() {
+            command.env_remove(name);
+        }
         command
             .current_dir(ctx.fence.root())
             .stdin(Stdio::null())
