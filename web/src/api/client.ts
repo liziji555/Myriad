@@ -126,7 +126,9 @@ export const api = {
   rejectTask: (taskId: TaskId, note: string) =>
     postJson<Task>(taskPath(taskId, "reject"), { note }),
   stopTask: (taskId: TaskId) => postJson<StopResponse>(taskPath(taskId, "stop"), {}),
-  cancelTask: (taskId: TaskId) => postJson<Task>(taskPath(taskId, "cancel"), {}),
+  /** 取消任务。`note` 是原因，可以为空。 */
+  cancelTask: (taskId: TaskId, note: string) =>
+    postJson<Task>(taskPath(taskId, "cancel"), { note }),
   /** 今天和最近几天花了多少。 */
   usage: () => request<UsageSummary>("/api/usage"),
   /** 还没收起来的提醒，新的在前。 */

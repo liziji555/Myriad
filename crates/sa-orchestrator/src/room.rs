@@ -899,6 +899,22 @@ impl Observer for RoomObserver {
                 Err(error) => tracing::error!(room = %self.room_id, "查不了已保存的许可：{error}"),
             }
         }
+        // 「这个任务里的命令都允许」：记在任务名下的另一本账里，和一条条记的命令分开。
+        let task_rule = match (&self.rule_scope, &key) {
+            (Some(scope), Some(_)) if request.tool == "shell" => Some(format!("shell*@{scope}")),
+            _ => None,
+        };
+        let mut can_allow_task = task_rule.is_some();
+        if let (Some(tool), Some(command)) = (task_rule.clone(), key.as_deref()) {
+            let (engine, room) = (engine.clone(), self.room_id.clone());
+            match db(move || engine.is_always_allowed(&room, &tool, ALL_COMMANDS)).await {
+                // 往外发东西的命令不在「都允许」里面：照样问。
+                Ok(true) if !publishes(command) => return true,
+                Ok(true) => can_allow_task = false,
+                Ok(false) => {}
+                Err(error) => tracing::error!(room = %self.room_id, "查不了已保存的许可：{error}"),
+            }
+        }
 
         let id = ApprovalId::new();
         let (reply, answer) = tokio::sync::oneshot::channel();
@@ -917,6 +933,7 @@ impl Observer for RoomObserver {
             id,
             reason: request.reason.to_string(),
             expires_at: sa_engine::now_ms() + timeout.as_millis() as i64,
+            can_allow_task,
         };
         self.update_step(request.call_id, |step| {
             step.state = StepState::Waiting;
@@ -945,6 +962,9 @@ impl Observer for RoomObserver {
             answer = answer => match answer {
                 Ok(ApprovalDecision::Once) => (ApprovalDecision::Once, ("approval.allowed", "允许一次")),
                 Ok(ApprovalDecision::Always) => (ApprovalDecision::Always, ("approval.allowed_always", "总是允许")),
+                // 这张卡上没有这个选项（不是任务里的命令，或者已经选过）：只算允许这一次。
+                Ok(ApprovalDecision::Task) if can_allow_task => (ApprovalDecision::Task, ("approval.allowed_task", "这个任务里的命令都允许")),
+                Ok(ApprovalDecision::Task) => (ApprovalDecision::Once, ("approval.allowed", "允许一次")),
                 Ok(ApprovalDecision::Deny) => (ApprovalDecision::Deny, ("approval.denied", "拒绝")),
                 Err(_) => (ApprovalDecision::Deny, ("approval.dropped", "没等到答复就停下了，按拒绝算")),
             },
@@ -956,7 +976,10 @@ impl Observer for RoomObserver {
         let summary = format!("{} 要「{}」：{label}", self.bot.name, request.title);
         let by_person = matches!(
             action,
-            "approval.allowed" | "approval.allowed_always" | "approval.denied"
+            "approval.allowed"
+                | "approval.allowed_always"
+                | "approval.allowed_task"
+                | "approval.denied"
         );
         let entry = if by_person {
             Audit::user(action, summary)
@@ -970,6 +993,14 @@ impl Observer for RoomObserver {
             if let Err(error) = db(move || engine.allow_always(&room, &tool, &key).map(drop)).await
             {
                 tracing::error!(room = %self.room_id, "「总是允许」没记上：{error}");
+            }
+        }
+        if let (ApprovalDecision::Task, Some(tool)) = (decision, task_rule) {
+            let (engine, room) = (engine.clone(), self.room_id.clone());
+            if let Err(error) =
+                db(move || engine.allow_always(&room, &tool, ALL_COMMANDS).map(drop)).await
+            {
+                tracing::error!(room = %self.room_id, "「这个任务里的命令都允许」没记上：{error}");
             }
         }
         self.update_step(request.call_id, |step| {
@@ -1029,6 +1060,23 @@ impl Drop for Unanswered {
     }
 }
 
+/// 「这个任务里的命令都允许」在许可表里记成什么。
+const ALL_COMMANDS: &str = "*";
+
+/// 这条命令是不是往外发东西（推送、用 `gh` 操作 GitHub）。这类命令不在「这个任务里的命令都允许」里面，
+/// 每次照样问。只看命令里的词，换个写法就能躲过去——是多一道提醒，不是保证。
+fn publishes(command: &str) -> bool {
+    let lower = command.to_lowercase();
+    let mut words = lower
+        .split(|c: char| !(c.is_alphanumeric() || c == '-' || c == '_'))
+        .filter(|word| !word.is_empty());
+    let mut after_git = false;
+    words.any(|word| {
+        after_git |= word == "git";
+        word == "gh" || (after_git && word == "push")
+    })
+}
+
 /// 「总是允许」记的是什么：命令记原文，写文件记文件的完整路径。其他工具不能记。
 fn rule_key(tool: &str, input: &Value, fence: &Fence) -> Option<String> {
     match tool {
@@ -1047,6 +1095,29 @@ fn rule_key(tool: &str, input: &Value, fence: &Fence) -> Option<String> {
 #[cfg(test)]
 mod output_tests {
     use super::*;
+
+    #[test]
+    fn commands_that_send_things_out_are_told_apart() {
+        for command in [
+            "git push",
+            "cd repo && git -C . push origin HEAD",
+            "/usr/bin/git push --force",
+            "GIT.EXE push",
+            "gh pr create --fill",
+            "ls; gh api repos/a/b",
+        ] {
+            assert!(publishes(command), "{command}");
+        }
+        for command in [
+            "git status",
+            "cargo test",
+            "echo push",
+            "ls ghost",
+            "git log --oneline",
+        ] {
+            assert!(!publishes(command), "{command}");
+        }
+    }
 
     fn step(output: Option<String>) -> ToolStep {
         ToolStep {

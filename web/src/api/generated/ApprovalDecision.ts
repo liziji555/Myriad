@@ -3,4 +3,4 @@
 /**
  * 人对一次审批的答复。
  */
-export type ApprovalDecision = "once" | "always" | "deny";
+export type ApprovalDecision = "once" | "always" | "task" | "deny";

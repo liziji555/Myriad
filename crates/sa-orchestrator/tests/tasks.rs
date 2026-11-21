@@ -222,16 +222,27 @@ impl Rig {
         &self,
         seen: &[sa_protocol::ApprovalId],
     ) -> (sa_protocol::ApprovalId, String) {
+        let card = self.next_card(MessageKind::Run, seen).await;
+        (card.id, card.reason)
+    }
+
+    /// 等 `kind` 这种消息上的下一张审批卡（不是 `seen` 里的）。
+    async fn next_card(
+        &self,
+        kind: MessageKind,
+        seen: &[sa_protocol::ApprovalId],
+    ) -> sa_protocol::StepApproval {
         for _ in 0..1000 {
-            let waiting = self.messages().into_iter().find_map(|m| {
-                (m.kind == MessageKind::Run)
-                    .then(|| m.steps.into_iter().find(|s| s.state == StepState::Waiting))
-                    .flatten()
-            });
-            if let Some(approval) = waiting.and_then(|step| step.approval) {
-                if !seen.contains(&approval.id) {
-                    return (approval.id, approval.reason);
-                }
+            let waiting = self
+                .messages()
+                .into_iter()
+                .filter(|m| m.kind == kind)
+                .flat_map(|m| m.steps)
+                .filter(|s| s.state == StepState::Waiting)
+                .filter_map(|s| s.approval)
+                .find(|approval| !seen.contains(&approval.id));
+            if let Some(approval) = waiting {
+                return approval;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
@@ -551,6 +562,100 @@ async fn in_a_git_repo_the_task_works_on_its_own_branch_and_commands_need_approv
     rig.orchestrator.accept_task(&task.id).await.unwrap();
     assert!(rig.workspace.join("b.txt").exists());
     assert!(!rig.task_dir(&task.id).exists());
+    rig.orchestrator.shutdown().await;
+}
+
+fn shell(id: &str, command: &str) -> MockReply {
+    let input = serde_json::json!({ "command": command }).to_string();
+    MockReply::tool_calls("", &[(id, "shell", &input)])
+}
+
+#[tokio::test]
+async fn allowing_all_commands_covers_that_task_only_and_not_pushing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let rig = start(
+        tmp.path(),
+        vec![shell("f1", "echo two"), MockReply::text("看完了。")],
+        vec![
+            shell("s1", "echo one"),
+            shell("s2", "echo two"),
+            shell("s3", "echo git push"),
+            report("done", "跑完了"),
+            MockReply::text("交完了。"),
+            shell("s4", "echo one"),
+            report("done", "也跑完了"),
+            MockReply::text("交完了。"),
+        ],
+    );
+    std::fs::write(rig.workspace.join("a.txt"), "一\n").unwrap();
+    let task = rig.open_task("跑几条命令").await;
+
+    // 第一条命令照样问，卡上多一个选项。
+    let first = rig.next_card(MessageKind::Run, &[]).await;
+    assert!(first.reason.contains("echo one"), "{}", first.reason);
+    assert!(first.can_allow_task);
+    assert!(rig.orchestrator.decide(&first.id, ApprovalDecision::Task));
+
+    // 第二条不问了；往外推送的那条不在「都允许」里面，照样问，卡上也不再有这个选项。
+    let push = rig
+        .next_card(MessageKind::Run, std::slice::from_ref(&first.id))
+        .await;
+    assert!(push.reason.contains("echo git push"), "{}", push.reason);
+    assert!(!push.can_allow_task);
+    assert!(rig.orchestrator.decide(&push.id, ApprovalDecision::Deny));
+    rig.task_in(&task.id, TaskState::Review).await;
+    let run = rig
+        .messages()
+        .into_iter()
+        .find(|m| m.kind == MessageKind::Run)
+        .unwrap();
+    let states: Vec<_> = run
+        .steps
+        .iter()
+        .filter(|s| s.tool == "shell")
+        .map(|s| s.state)
+        .collect();
+    assert_eq!(states, [StepState::Ok, StepState::Ok, StepState::Denied]);
+    let audit = rig
+        .engine
+        .list_audit(&sa_engine::AuditFilter::default(), 200)
+        .unwrap()
+        .entries;
+    assert!(
+        audit
+            .iter()
+            .any(|entry| entry.action == "approval.allowed_task"),
+        "{audit:#?}"
+    );
+
+    // 对话里（在人的工作目录里跑）同一条命令照样问，卡上没有这个选项；硬选它只算允许这一次。
+    rig.orchestrator
+        .post_message(&rig.room, "你也跑一下".into())
+        .await
+        .unwrap();
+    let chat = rig.next_card(MessageKind::Chat, &[]).await;
+    assert!(!chat.can_allow_task);
+    assert!(rig.orchestrator.decide(&chat.id, ApprovalDecision::Task));
+    for _ in 0..1000 {
+        if rig.front.requests().len() >= 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    // 别的任务也照样问。
+    let other = rig.open_task("再跑一条").await;
+    let again = rig.next_card(MessageKind::Run, &[first.id, push.id]).await;
+    assert!(again.reason.contains("echo one"), "{}", again.reason);
+    assert!(again.can_allow_task);
+    assert!(rig.orchestrator.decide(&again.id, ApprovalDecision::Once));
+    rig.task_in(&other.id, TaskState::Review).await;
+    let rules = rig.engine.list_rules(&rig.room).unwrap();
+    let kept: Vec<_> = rules
+        .iter()
+        .map(|rule| (rule.tool.clone(), rule.pattern.clone()))
+        .collect();
+    assert_eq!(kept, [(format!("shell*@{}", task.id), "*".to_string())]);
     rig.orchestrator.shutdown().await;
 }
 

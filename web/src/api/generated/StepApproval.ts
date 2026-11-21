@@ -12,4 +12,8 @@ reason: string,
 /**
  * 到这个时间还没人处理就按拒绝算。
  */
-expires_at: number, };
+expires_at: number, 
+/**
+ * 这张卡能不能选「这个任务里的命令都允许」：只有任务里的命令能，而且还没选过。
+ */
+can_allow_task: boolean, };

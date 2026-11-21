@@ -149,8 +149,10 @@ export function TaskActionBar({ task, actions, members }: ActionProps) {
           className="sa-link sa-link-danger"
           disabled={busy !== null}
           onClick={() => {
-            if (window.confirm(`取消任务「${task.title}」？它的改动不会保留。`)) {
-              void run("cancel", () => actions.cancel(task.id));
+            // 上面写了话的，当作取消的原因带上，而不是悄悄丢掉。
+            const why = written ? `\n原因：${note.trim()}` : "";
+            if (window.confirm(`取消任务「${task.title}」？它的改动不会保留。${why}`)) {
+              void run("cancel", () => actions.cancel(task.id, note.trim()));
             }
           }}
         >

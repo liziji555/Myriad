@@ -2,7 +2,7 @@
 //! 和 `sa chat` 一样直接用数据目录，所以不能和 `sa serve` 同时运行；服务开着时请在界面里操作。
 
 use crate::app::{init_logging, App, RunArgs};
-use crate::chat::{ctrl_c, parse_decision, pick_room, stdin_lines, Lines};
+use crate::chat::{ctrl_c, decision_prompt, parse_decision, pick_room, stdin_lines, Lines};
 use crate::paths::DataDir;
 use crate::team::find_bot;
 use anyhow::{bail, Result};
@@ -263,7 +263,7 @@ pub(crate) async fn wait<F: Future<Output = ()>>(
                     "  需要你批准：{}",
                     crate::chat::printable(&approval.reason)
                 )?;
-                write!(out, "  [y] 允许一次  [a] 总是允许  [n] 拒绝 > ")?;
+                write!(out, "{}", decision_prompt(approval.can_allow_task))?;
                 out.flush()?;
                 let left = (approval.expires_at - sa_engine::now_ms()).max(0) as u64;
                 let decision = tokio::select! {
@@ -272,7 +272,7 @@ pub(crate) async fn wait<F: Future<Output = ()>>(
                         if answer.is_none() {
                             writeln!(out)?;
                         }
-                        parse_decision(answer.as_deref())
+                        parse_decision(answer.as_deref(), approval.can_allow_task)
                     }
                     _ = &mut interrupt => {
                         interrupted = true;
