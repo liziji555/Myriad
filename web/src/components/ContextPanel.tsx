@@ -94,7 +94,7 @@ export function ContextPanel({
         className="sa-panel-resizer"
         role="separator"
         aria-orientation="vertical"
-        aria-label="调整右栏宽度，可以拖，也可以用左右方向键"
+        aria-label="调整面板宽度，可以拖，也可以用左右方向键"
         aria-valuemin={PANEL_MIN}
         aria-valuemax={PANEL_MAX}
         aria-valuenow={width}

@@ -11,6 +11,7 @@ import { CommandPalette, type PaletteEntry } from "./components/CommandPalette";
 import { Composer } from "./components/Composer";
 import { ContextPanel, type ActivityNode, type PanelTab } from "./components/ContextPanel";
 import { Notices } from "./components/Notices";
+import { applyTheme, loadTheme, nextTheme } from "./api/theme";
 import { Sidebar } from "./components/Sidebar";
 import { StageBar } from "./components/StageBar";
 import { Timeline } from "./components/Timeline";
@@ -45,6 +46,7 @@ function Shell() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [retry, setRetry] = useState(0);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [theme, setTheme] = useState(loadTheme);
   const [createSignal, setCreateSignal] = useState(0);
 
   useEffect(() => {
@@ -273,6 +275,12 @@ function Shell() {
         onToggleDrawer={() => setPanelOpen(!panelOpen)}
         onShowTasks={() => showPanel("tasks")}
         onOpenPalette={() => setPaletteOpen(true)}
+        theme={theme}
+        onCycleTheme={() => {
+          const next = nextTheme(theme);
+          applyTheme(next);
+          setTheme(next);
+        }}
         onPick={jumpTo}
       />
       {(roomsOpen || !room) && (

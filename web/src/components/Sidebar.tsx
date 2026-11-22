@@ -1,5 +1,6 @@
 import { useEffect, useState, type FormEvent } from "react";
 import type { Bot, Room, RoomId } from "../api/types";
+import { BotAvatar } from "./BotAvatar";
 
 interface Props {
   rooms: readonly Room[];
@@ -111,7 +112,7 @@ export function Sidebar({
         <ul className="sa-list">
           {bots.map((bot) => (
             <li key={bot.id} className="sa-row sa-row-static">
-              <span className="sa-dot" data-state={bot.enabled ? "idle" : "off"} aria-hidden="true" />
+              <BotAvatar id={bot.id} name={bot.name} state={bot.enabled ? undefined : "off"} className="sa-row-avatar" />
               <span className="sa-row-label">{bot.name}</span>
               <span className="sa-row-meta">{bot.enabled ? "空闲" : "已停用"}</span>
             </li>

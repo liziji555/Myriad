@@ -1,6 +1,11 @@
 import type { Presence } from "../api/presence";
 import { presenceSummary } from "../api/presence";
+import { THEME_LABEL, type Theme } from "../api/theme";
 import type { Room } from "../api/types";
+import { BotAvatar } from "./BotAvatar";
+import { Icon } from "./Icon";
+
+const THEME_ICON = { system: "auto", light: "sun", dark: "moon" } as const;
 
 interface Props {
   room: Room | undefined;
@@ -14,6 +19,9 @@ interface Props {
   onToggleDrawer(): void;
   onShowTasks(): void;
   onOpenPalette(): void;
+  theme: Theme;
+  /** 换一种明暗：跟随系统 → 浅色 → 深色。 */
+  onCycleTheme(): void;
   /** 点了一个 Bot 的牌子：跳到它正在做的那件事。 */
   onPick(row: Presence): void;
 }
@@ -33,8 +41,11 @@ export function StageBar({
   onToggleDrawer,
   onShowTasks,
   onOpenPalette,
+  theme,
+  onCycleTheme,
   onPick,
 }: Props) {
+  const mac = /Mac|iPhone|iPad/.test(navigator.platform);
   return (
     <header className="sa-stage">
       <button
@@ -44,6 +55,7 @@ export function StageBar({
         title="换房间、新建房间"
         onClick={onToggleRooms}
       >
+        <span className="sa-brand-mark" aria-hidden="true" />
         <span className="sa-brand">苦乐</span>
         <span className="sa-stage-sep" aria-hidden="true">
           /
@@ -65,7 +77,7 @@ export function StageBar({
                 title={jumps ? `${row.name}：${row.text}（点一下去看）` : `${row.name}：${row.text}`}
                 onClick={() => onPick(row)}
               >
-                <span className="sa-presence-dot" aria-hidden="true" />
+                <BotAvatar id={row.botId} name={row.name} state={row.state} />
                 <span className="sa-presence-name">{row.name}</span>
                 <span className="sa-presence-text">{row.text}</span>
               </button>
@@ -80,18 +92,44 @@ export function StageBar({
             连接中断，正在重连…
           </span>
         )}
-        <button type="button" className="sa-chip" onClick={onOpenPalette} title="搜索、跳转">
-          搜索 <kbd className="sa-kbd">{/Mac|iPhone|iPad/.test(navigator.platform) ? "⌘ K" : "Ctrl K"}</kbd>
+        <button type="button" className="sa-stage-search" onClick={onOpenPalette} title="搜索、跳转">
+          <Icon name="search" />
+          <span className="sa-stage-search-text">搜索、跳转</span>
+          <kbd className="sa-kbd">{mac ? "⌘ K" : "Ctrl K"}</kbd>
         </button>
         {room && (
-          <>
-            <button type="button" className="sa-chip" data-alert={pendingTasks > 0} onClick={onShowTasks}>
-              任务{pendingTasks > 0 ? ` · ${pendingTasks} 个等你` : ""}
-            </button>
-            <button type="button" className="sa-chip" aria-pressed={drawerOpen} onClick={onToggleDrawer}>
-              {drawerOpen ? "收起面板" : "面板"}
-            </button>
-          </>
+          <button
+            type="button"
+            className="sa-stage-button"
+            data-alert={pendingTasks > 0}
+            title="这个房间的任务"
+            onClick={onShowTasks}
+          >
+            <Icon name="tasks" />
+            <span>任务</span>
+            {pendingTasks > 0 && <span className="sa-count">{pendingTasks} 个等你</span>}
+          </button>
+        )}
+        <button
+          type="button"
+          className="sa-icon-button"
+          title={`${THEME_LABEL[theme]}（点一下换）`}
+          aria-label={`明暗：${THEME_LABEL[theme]}，点一下换`}
+          onClick={onCycleTheme}
+        >
+          <Icon name={THEME_ICON[theme]} />
+        </button>
+        {room && (
+          <button
+            type="button"
+            className="sa-icon-button"
+            aria-pressed={drawerOpen}
+            title={drawerOpen ? "收起面板" : "打开面板：任务、成员、用量、审计…"}
+            aria-label={drawerOpen ? "收起面板" : "打开面板"}
+            onClick={onToggleDrawer}
+          >
+            <Icon name="panel" />
+          </button>
         )}
       </div>
     </header>
