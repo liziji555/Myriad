@@ -82,7 +82,7 @@ export function Composer({
   };
 
   // 输入框跟着内容长高。
-  useLayoutEffect(() => {
+  const fit = () => {
     const el = input.current;
     if (!el) return;
     el.style.height = "auto";
@@ -90,7 +90,21 @@ export function Composer({
     el.style.height = `${Math.min(wanted, MAX_INPUT_PX)}px`;
     // 没到顶之前不出滚动条。
     el.style.overflowY = wanted > MAX_INPUT_PX ? "auto" : "hidden";
-  }, [text]);
+  };
+  useLayoutEffect(fit, [text]);
+  // 框变窄（面板打开、窗口缩小）时字会多折几行：宽度一变就重新量。
+  useEffect(() => {
+    const el = input.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    let width = el.clientWidth;
+    const observer = new ResizeObserver(() => {
+      if (el.clientWidth === width) return;
+      width = el.clientWidth;
+      fit();
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
 
   useEffect(() => {
     if (prefill === null) return;
