@@ -48,6 +48,10 @@ function Shell() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [theme, setTheme] = useState(loadTheme);
   const [createSignal, setCreateSignal] = useState(0);
+  // 房间列表收起后把「新建房间」的信号清掉，不然下次打开列表又弹出填名字的框。
+  useEffect(() => {
+    if (!roomsOpen) setCreateSignal(0);
+  }, [roomsOpen]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
