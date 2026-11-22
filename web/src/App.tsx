@@ -126,7 +126,11 @@ function Shell() {
   const jumpTo = (row: Presence) => {
     const target = row.messageId && document.querySelector(`[data-message-id="${row.messageId}"]`);
     if (target) {
-      target.scrollIntoView({ block: "center", behavior: "smooth" });
+      // 窗口窄的时候面板盖在主线上面：先收起来，不然要看的东西被挡着。
+      if (window.matchMedia("(max-width: 1100px)").matches) setPanelOpen(false);
+      // 回复很长时审批卡可能在它的最下面：有卡就对着卡滚，不对着整条回复。
+      const card = row.state === "approval" ? target.querySelector(".sa-approval") : null;
+      (card ?? target).scrollIntoView({ block: "center", behavior: "smooth" });
       target.setAttribute("data-flash", "true");
       window.setTimeout(() => target.removeAttribute("data-flash"), 1600);
     } else if (row.taskId) {
