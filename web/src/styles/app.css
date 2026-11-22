@@ -288,6 +288,11 @@ code {
   white-space: nowrap;
   color: var(--sa-fg-muted);
 }
+.sa-presence-short {
+  display: none;
+  font-weight: 600;
+  white-space: nowrap;
+}
 .sa-presence-chip[data-state="idle"],
 .sa-presence-chip[data-state="off"] {
   background: none;
@@ -1191,7 +1196,7 @@ button.sa-row:hover {
 .sa-panel-empty {
   padding: var(--sa-space-6) var(--sa-space-2);
   text-align: center;
-  color: var(--sa-fg-faint);
+  color: var(--sa-fg-muted);
 }
 .sa-nodes {
   display: grid;
@@ -1236,6 +1241,8 @@ button.sa-row:hover {
   }
 }
 @media (max-width: 820px) {
+  /* 现场牌子只剩头像；有事等人的多留「等你」两个字。说的是什么在提示和读屏里还有。 */
+  .sa-presence-name,
   .sa-presence-text,
   .sa-stage .sa-brand,
   .sa-stage-sep,
@@ -1243,7 +1250,11 @@ button.sa-row:hover {
     display: none;
   }
   .sa-presence-chip {
-    padding-right: 10px;
+    padding: 0 4px;
+  }
+  .sa-presence-short {
+    display: inline;
+    padding-right: 6px;
   }
   .sa-messages {
     --sa-gutter: 36px;
@@ -1268,10 +1279,6 @@ button.sa-row:hover {
   }
   .sa-approval-actions .sa-button[data-decision="deny"] {
     margin-left: 0;
-  }
-  .sa-presence-chip[data-state="approval"] .sa-presence-text,
-  .sa-presence-chip[data-state="asking"] .sa-presence-text {
-    display: inline;
   }
 }
 /* 不想看动画的人：会动的都停下，状态还是靠颜色和字看得出来。 */
@@ -1430,7 +1437,7 @@ button.sa-row:hover {
 .sa-panel-note {
   margin: 0;
   padding: 0 var(--sa-space-2);
-  color: var(--sa-fg-faint);
+  color: var(--sa-fg-muted);
   font-size: var(--sa-text-xs);
   overflow-wrap: anywhere;
 }
@@ -1882,7 +1889,7 @@ button.sa-row:hover {
 }
 .sa-links-hint {
   margin: 0;
-  color: var(--sa-fg-faint);
+  color: var(--sa-fg-muted);
   font-size: var(--sa-text-xs);
 }
 .sa-links-hint code,
@@ -1962,7 +1969,7 @@ button.sa-row:hover {
 }
 .sa-msg-trigger {
   justify-self: start;
-  color: var(--sa-fg-faint);
+  color: var(--sa-fg-muted);
   font-size: var(--sa-text-sm);
 }
 

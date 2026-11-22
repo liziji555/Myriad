@@ -41,7 +41,7 @@
   --sa-avatar-mix: 18%;
 
   --sa-fg-muted: color-mix(in srgb, var(--sa-fg) 62%, transparent);
-  --sa-fg-faint: color-mix(in srgb, var(--sa-fg) 40%, transparent);
+  --sa-fg-faint: color-mix(in srgb, var(--sa-fg) 50%, transparent);
   --sa-border: color-mix(in srgb, var(--sa-fg) 12%, transparent);
   --sa-border-strong: color-mix(in srgb, var(--sa-fg) 22%, transparent);
   --sa-hover: color-mix(in srgb, var(--sa-fg) 6%, transparent);

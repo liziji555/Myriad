@@ -75,11 +75,18 @@ export function StageBar({
                 data-state={row.state}
                 disabled={!jumps}
                 title={jumps ? `${row.name}：${row.text}（点一下去看）` : `${row.name}：${row.text}`}
+                aria-label={`${row.name}：${row.text}`}
                 onClick={() => onPick(row)}
               >
                 <BotAvatar id={row.botId} name={row.name} state={row.state} />
                 <span className="sa-presence-name">{row.name}</span>
                 <span className="sa-presence-text">{row.text}</span>
+                {/* 窗口窄的时候只剩头像；有事等人时多留两个字。 */}
+                {(row.state === "approval" || row.state === "asking") && (
+                  <span className="sa-presence-short" aria-hidden="true">
+                    等你
+                  </span>
+                )}
               </button>
             </li>
           );
