@@ -8,15 +8,50 @@
   </head>
   <body>
     <main>
-      <h1>苦乐没能启动</h1>
-      <pre id="reason"></pre>
-      <h2>常见原因</h2>
-      <ul>
-        <li>已经开着一个苦乐（包括终端里的 <code>sa serve</code>、<code>sa chat</code>）：关掉它再打开。</li>
-        <li><code>config.toml</code> 写错了：按上面的提示改好再打开。</li>
-        <li>选的工作目录打不开：在菜单「文件 → 更换工作目录」里重新选。</li>
-      </ul>
-      <p>数据目录：<code id="data-dir"></code>（菜单「文件 → 打开数据目录」）</p>
+      <section id="choose" hidden>
+        <h1>苦乐在哪台机器上跑？</h1>
+        <div class="choices">
+          <div class="choice">
+            <h2>本机</h2>
+            <p>服务和任务都在这台电脑上，关掉窗口就停下。Bot 读写你选的一个文件夹。</p>
+            <button id="local" type="button">选文件夹，用本机</button>
+          </div>
+          <form id="server-form" class="choice">
+            <h2>服务器</h2>
+            <p>连你自己的云服务器或 VPS 上常驻的苦乐，关掉电脑任务也不断。要先能用 SSH 密钥登录。</p>
+            <label>SSH 地址<input id="host" placeholder="ubuntu@1.2.3.4" autocomplete="off" spellcheck="false" required /></label>
+            <label>SSH 端口<input id="port" type="number" min="1" max="65535" placeholder="22" /></label>
+            <button type="submit">连接</button>
+          </form>
+        </div>
+        <p id="choose-error" class="error" hidden></p>
+      </section>
+
+      <section id="connecting" hidden>
+        <h1>正在连接 <span class="server"></span>……</h1>
+        <p>通过 SSH 连服务器上的苦乐，第一次可能要十几秒。</p>
+      </section>
+
+      <section id="failed" hidden>
+        <h1 id="failed-title">苦乐没能启动</h1>
+        <pre id="reason"></pre>
+        <div class="actions">
+          <button id="retry" type="button">重试</button>
+          <button id="switch" type="button" class="secondary">换成本机或别的服务器</button>
+        </div>
+        <h2>常见原因</h2>
+        <ul id="local-hints">
+          <li>已经开着一个苦乐（包括终端里的 <code>sa serve</code>、<code>sa chat</code>）：关掉它再打开。</li>
+          <li><code>config.toml</code> 写错了：按上面的提示改好再打开。</li>
+          <li>选的工作目录打不开：在菜单「文件 → 更换工作目录」里重新选。</li>
+        </ul>
+        <ul id="server-hints">
+          <li>先在终端里 <code>ssh <span class="server"></span></code> 试试，要能不输密码就登录（用密钥）。</li>
+          <li>服务器上要有 <code>sa</code>，并且在 PATH 里（比如 <code>~/.local/bin</code>）。</li>
+          <li>服务器上的苦乐要开着：在服务器上运行 <code>sa service install --workdir 项目目录</code>，它就会常驻。</li>
+        </ul>
+        <p>数据目录：<code id="data-dir"></code>（菜单「文件 → 打开数据目录」）</p>
+      </section>
     </main>
     <script src="main.js"></script>
   </body>

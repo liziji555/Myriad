@@ -25,3 +25,61 @@ pre {
 code {
   font: 13px ui-monospace, Consolas, monospace;
 }
+[hidden] {
+  display: none !important;
+}
+.choices {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+.choice {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 16px;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, currentColor 20%, transparent);
+}
+.choice h2 {
+  margin: 0;
+}
+.choice p {
+  margin: 0;
+  flex: 1;
+  opacity: 0.8;
+}
+label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+}
+input,
+button {
+  font: inherit;
+  padding: 6px 10px;
+  border-radius: 6px;
+}
+input {
+  border: 1px solid color-mix(in srgb, currentColor 30%, transparent);
+  background: transparent;
+  color: inherit;
+}
+button {
+  border: 0;
+  background: #3b6ef5;
+  color: white;
+  cursor: pointer;
+}
+button.secondary {
+  background: color-mix(in srgb, currentColor 12%, transparent);
+  color: inherit;
+}
+.actions {
+  display: flex;
+  gap: 8px;
+}
+.error {
+  color: #d33;
+}
