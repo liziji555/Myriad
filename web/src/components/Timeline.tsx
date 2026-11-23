@@ -179,7 +179,7 @@ export function Timeline({
   } else {
     body = (
       <ol className="sa-messages">
-        {handoffs.length > 0 && <HandoffLinks handoffs={handoffs} />}
+        <HandoffLinks handoffs={handoffs} />
         {chat?.hasMore && (
           <li className="sa-older">
             <button type="button" className="sa-chip" disabled={loadingOlder} onClick={() => void loadOlder()}>
