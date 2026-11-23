@@ -6,12 +6,26 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { RoomChat } from "../api/chat";
 import { safeUrl, sourceName, splitEvent } from "../api/links";
 import { shownTriggers, triggerTitle } from "../api/routines";
+import { hueOf } from "../api/avatar";
 import { repliesOf, type Reply } from "../api/replies";
 import { steersOf, type Steer } from "../api/steer";
 import { isLatestDelivery, type TaskBoard } from "../api/tasks";
 import type { TaskActions } from "../api/useWorkspace";
-import type { ApprovalDecision, ApprovalId, Bot, Message, Task, TaskId, ToolStep } from "../api/types";
-import { Artifacts, StateBadge, TaskActionBar, deliveryHeading } from "./TaskCards";
+import type {
+  ApprovalDecision,
+  ApprovalId,
+  Bot,
+  Message,
+  Task,
+  TaskId,
+  ToolStep,
+} from "../api/types";
+import {
+  Artifacts,
+  StateBadge,
+  TaskActionBar,
+  deliveryHeading,
+} from "./TaskCards";
 import { BotAvatar } from "./BotAvatar";
 import { Icon } from "./Icon";
 import { splitMentions } from "./mentions";
@@ -38,6 +52,8 @@ interface Props {
   onLightDemo(source: HTMLElement): void;
   /** 空房间里点了一句示例：把它填进输入框，由人自己决定发不发。 */
   onExample(text: string): void;
+  /** 切到协作视图时主线藏起来；藏着的时候滚不动，回来时补滚一次。 */
+  hidden?: boolean;
 }
 
 /** 离底部这么近就算「在看最新的」，新内容来了自动跟着滚。 */
@@ -64,6 +80,7 @@ export function Timeline({
   onDecide,
   onLightDemo,
   onExample,
+  hidden = false,
 }: Props) {
   const scroller = useRef<HTMLElement>(null);
   const stick = useRef(true);
@@ -92,6 +109,11 @@ export function Timeline({
     }
   }, [messages.length, messages[0]?.id, last?.rev, last?.content.length]);
 
+  useLayoutEffect(() => {
+    const el = scroller.current;
+    if (!hidden && el && stick.current) el.scrollTop = el.scrollHeight;
+  }, [hidden]);
+
   // 最后一条消息里有没有在等批准的步骤：卡片出现时要滚到看得见。
   const asking = last?.steps.some((step) => step.state === "waiting") ?? false;
   useEffect(() => {
@@ -112,12 +134,22 @@ export function Timeline({
   const triggers = useMemo(() => shownTriggers(messages), [messages]);
   const steers = useMemo(() => steersOf(messages), [messages]);
   const replies = useMemo(
-    () => repliesOf(messages, chat?.activity ?? undefined, (id) => steers.get(id)?.botIds ?? []),
+    () =>
+      repliesOf(
+        messages,
+        chat?.activity ?? undefined,
+        (id) => steers.get(id)?.botIds ?? [],
+      ),
     [messages, chat?.activity, steers],
   );
   // 开任务、做的过程、交结果挨在一起时连成一串，看得出哪个是哪个引出来的。
   const chain = useMemo(
-    () => chainParts(messages.filter((message) => message.kind !== "routine" || triggers.has(message.id))),
+    () =>
+      chainParts(
+        messages.filter(
+          (message) => message.kind !== "routine" || triggers.has(message.id),
+        ),
+      ),
     [messages, triggers],
   );
 
@@ -155,18 +187,28 @@ export function Timeline({
     body = (
       <div className="sa-empty">
         <h2>这个房间还没有消息</h2>
-        <p>在下面输入内容，回车发送。不知道说什么的话，点一句试试（会填进输入框，不会直接发出去）：</p>
+        <p>
+          在下面输入内容，回车发送。不知道说什么的话，点一句试试（会填进输入框，不会直接发出去）：
+        </p>
         <ul className="sa-examples" aria-label="示例">
           {EXAMPLES.map((example) => (
             <li key={example}>
-              <button type="button" className="sa-chip" onClick={() => onExample(example)}>
+              <button
+                type="button"
+                className="sa-chip"
+                onClick={() => onExample(example)}
+              >
                 {example}
               </button>
             </li>
           ))}
         </ul>
         <p>也可以先看看「过程连到结果」的光线效果：</p>
-        <button type="button" className="sa-button" onClick={(event) => onLightDemo(event.currentTarget)}>
+        <button
+          type="button"
+          className="sa-button"
+          onClick={(event) => onLightDemo(event.currentTarget)}
+        >
           演示光线
         </button>
       </div>
@@ -176,7 +218,12 @@ export function Timeline({
       <ol className="sa-messages">
         {chat?.hasMore && (
           <li className="sa-older">
-            <button type="button" className="sa-chip" disabled={loadingOlder} onClick={() => void loadOlder()}>
+            <button
+              type="button"
+              className="sa-chip"
+              disabled={loadingOlder}
+              onClick={() => void loadOlder()}
+            >
               {loadingOlder ? "正在加载…" : "加载更早的消息"}
             </button>
             {olderError && <span className="sa-msg-error">{olderError}</span>}
@@ -187,11 +234,13 @@ export function Timeline({
             // Bot 没什么可说时什么都不留，这一行也不显示。
             return triggers.has(message.id) ? (
               <li key={message.id} className="sa-msg-trigger">
-                定时任务「{triggerTitle(message.content)}」到点了 · {formatTime(message.created_at)}
+                定时任务「{triggerTitle(message.content)}」到点了 ·{" "}
+                {formatTime(message.created_at)}
               </li>
             ) : null;
           }
-          if (message.kind === "event") return <EventItem key={message.id} message={message} />;
+          if (message.kind === "event")
+            return <EventItem key={message.id} message={message} />;
           const task = tasks.find((t) => t.id === message.task_id);
           if (message.kind === "task" || message.kind === "delivery") {
             return (
@@ -200,7 +249,10 @@ export function Timeline({
                 message={message}
                 task={task}
                 chain={chain.get(message.id)}
-                latest={message.kind === "delivery" && isLatestDelivery(messages, message)}
+                latest={
+                  message.kind === "delivery" &&
+                  isLatestDelivery(messages, message)
+                }
                 bots={bots}
                 members={members}
                 actions={taskActions}
@@ -223,8 +275,12 @@ export function Timeline({
                   ? {
                       title: task?.title,
                       attempt: run?.attempt,
-                      onShow: () => message.task_id && onShowTask(message.task_id),
-                      onStop: () => (message.task_id ? taskActions.stop(message.task_id) : Promise.resolve()),
+                      onShow: () =>
+                        message.task_id && onShowTask(message.task_id),
+                      onStop: () =>
+                        message.task_id
+                          ? taskActions.stop(message.task_id)
+                          : Promise.resolve(),
                     }
                   : undefined
               }
@@ -242,13 +298,18 @@ export function Timeline({
       aria-label="时间线"
       onScroll={(event) => {
         const el = event.currentTarget;
-        stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < STICK_PX;
+        stick.current =
+          el.scrollHeight - el.scrollTop - el.clientHeight < STICK_PX;
         setAway(!stick.current);
       }}
     >
       {body}
       {away && messages.length > 0 && (
-        <button type="button" className="sa-chip sa-to-latest" onClick={toLatest}>
+        <button
+          type="button"
+          className="sa-chip sa-to-latest"
+          onClick={toLatest}
+        >
           回到最新 ↓
         </button>
       )}
@@ -273,7 +334,10 @@ function EventItem({ message }: { message: Message }) {
           ) : (
             <span>{origin.label}</span>
           ))}
-        <time className="sa-msg-time" dateTime={new Date(message.created_at).toISOString()}>
+        <time
+          className="sa-msg-time"
+          dateTime={new Date(message.created_at).toISOString()}
+        >
           {formatTime(message.created_at)}
         </time>
       </div>
@@ -310,8 +374,12 @@ function Node({
   const { sender } = message;
   if (sender.kind === "user") {
     return (
-      <span className="sa-avatar sa-line-node" data-who="user" aria-hidden="true">
-        {message.origin ? [...name.trim()][0] ?? "·" : "你"}
+      <span
+        className="sa-avatar sa-line-node"
+        data-who="user"
+        aria-hidden="true"
+      >
+        {message.origin ? ([...name.trim()][0] ?? "·") : "你"}
       </span>
     );
   }
@@ -321,7 +389,13 @@ function Node({
       className="sa-line-node"
       id={sender.bot_id}
       name={bot?.name ?? name}
-      state={message.state !== "streaming" ? undefined : asking ? "approval" : "streaming"}
+      state={
+        message.state !== "streaming"
+          ? undefined
+          : asking
+            ? "approval"
+            : "streaming"
+      }
     />
   );
 }
@@ -366,7 +440,11 @@ function TaskMessage({
   // 人验收、打回、取消任务时留下的那句话：照原话显示，不当成又开了一个任务。
   const decision = delivery ? null : taskDecision(message.content);
   // 这张卡上要不要放操作：最新的交付卡，而且任务正等着人（验收、回答、卡住）。
-  const actionable = delivery && latest && task && ["review", "waiting", "blocked"].includes(task.state);
+  const actionable =
+    delivery &&
+    latest &&
+    task &&
+    ["review", "waiting", "blocked"].includes(task.state);
   return (
     <li
       className="sa-msg"
@@ -380,16 +458,25 @@ function TaskMessage({
       <div className="sa-msg-head">
         <span className="sa-msg-name">{name}</span>
         {origin && <span className="sa-tag">{sourceName(origin.source)}</span>}
-        <time className="sa-msg-time" dateTime={new Date(message.created_at).toISOString()}>
+        <time
+          className="sa-msg-time"
+          dateTime={new Date(message.created_at).toISOString()}
+        >
           {formatTime(message.created_at)}
         </time>
       </div>
       <div className="sa-card" data-kind={message.kind} data-latest={latest}>
         <div className="sa-card-head">
           <span className="sa-card-kicker">
-            {delivery ? deliveryHeading(task, latest) : decision ? "对任务的决定" : "开了一个任务"}
+            {delivery
+              ? deliveryHeading(task, latest)
+              : decision
+                ? "对任务的决定"
+                : "开了一个任务"}
           </span>
-          {task && !decision && (!delivery || latest) && <StateBadge state={task.state} />}
+          {task && !decision && (!delivery || latest) && (
+            <StateBadge state={task.state} />
+          )}
         </div>
         <p className="sa-card-title">{task?.title ?? "任务"}</p>
         {delivery || decision ? (
@@ -398,11 +485,24 @@ function TaskMessage({
           <p className="sa-card-scope">{task?.scope ?? message.content}</p>
         )}
         {delivery && latest && task && <Artifacts artifacts={task.artifacts} />}
-        {actionable && <TaskActionBar key={task.state} task={task} actions={actions} members={members} />}
+        {actionable && (
+          <TaskActionBar
+            key={task.state}
+            task={task}
+            actions={actions}
+            members={members}
+          />
+        )}
         <div className="sa-card-foot">
-          {!delivery && !decision && <span className="sa-row-meta">负责：{owner ?? "还没有负责人"}</span>}
+          {!delivery && !decision && (
+            <span className="sa-row-meta">负责：{owner ?? "还没有负责人"}</span>
+          )}
           {message.task_id && (
-            <button type="button" className="sa-link" onClick={() => message.task_id && onShowTask(message.task_id)}>
+            <button
+              type="button"
+              className="sa-link"
+              onClick={() => message.task_id && onShowTask(message.task_id)}
+            >
               查看任务
             </button>
           )}
@@ -439,17 +539,28 @@ function MessageItem({
       ? (origin?.label ?? "你")
       : (bots.find((bot) => bot.id === sender.bot_id)?.name ?? "Bot");
   const steeredBot = steer
-    ? steer.botIds.map((id) => bots.find((bot) => bot.id === id)?.name ?? "Bot").join("、")
+    ? steer.botIds
+        .map((id) => bots.find((bot) => bot.id === id)?.name ?? "Bot")
+        .join("、")
     : "";
-  const waiting = state === "streaming" && message.content === "" && message.steps.length === 0;
+  const waiting =
+    state === "streaming" &&
+    message.content === "" &&
+    message.steps.length === 0;
   // 这条消息里有一步在等人批准：它不是在写，是在等你。
   const asking = message.steps.some((step) => step.state === "waiting");
-  const mentioned = message.mentions.flatMap((id) => bots.find((bot) => bot.id === id)?.name ?? []);
+  const mentioned = message.mentions.flatMap(
+    (id) => bots.find((bot) => bot.id === id)?.name ?? [],
+  );
+  // Bot 用 `ask_bot` 找别人的那句话：标出交给了谁。
+  const handedTo =
+    sender.kind === "bot" && message.kind === "chat" ? mentioned : [];
   return (
     <li
       className="sa-msg"
       data-message-id={message.id}
       data-sender={sender.kind}
+      data-hue={sender.kind === "bot" ? hueOf(sender.bot_id) : undefined}
       // 自己在界面里发的话靠右；Bot 和从 Telegram 进来的别人的话靠左。
       data-mine={sender.kind === "user" && !origin}
       data-state={state}
@@ -460,6 +571,9 @@ function MessageItem({
       <div className="sa-msg-head">
         <span className="sa-msg-name">{name}</span>
         {origin && <span className="sa-tag">{sourceName(origin.source)}</span>}
+        {handedTo.length > 0 && (
+          <span className="sa-handoff">交给 {handedTo.join("、")}</span>
+        )}
         {steer && (
           <span
             className="sa-steer"
@@ -482,7 +596,10 @@ function MessageItem({
           ) : (
             <span className="sa-live">{work ? "正在做" : "正在回复"}</span>
           ))}
-        <time className="sa-msg-time" dateTime={new Date(message.created_at).toISOString()}>
+        <time
+          className="sa-msg-time"
+          dateTime={new Date(message.created_at).toISOString()}
+        >
           {formatTime(message.created_at)}
         </time>
       </div>
@@ -509,7 +626,9 @@ function MessageItem({
           )}
         </div>
       )}
-      {message.steps.length > 0 && <Steps steps={message.steps} onDecide={onDecide} />}
+      {message.steps.length > 0 && (
+        <Steps steps={message.steps} onDecide={onDecide} />
+      )}
       {message.content !== "" && (
         <div className="sa-msg-body">
           {splitMentions(message.content, mentioned).map((piece, index) =>
@@ -521,7 +640,9 @@ function MessageItem({
               piece.text
             ),
           )}
-          {state === "streaming" && <span className="sa-caret" aria-hidden="true" />}
+          {state === "streaming" && (
+            <span className="sa-caret" aria-hidden="true" />
+          )}
         </div>
       )}
       {waiting && (
@@ -557,20 +678,36 @@ function MessageItem({
 }
 
 /** 需要人看一眼的步骤：还在进行、等批准，或者没做成。 */
-const NEEDS_ATTENTION: readonly ToolStep["state"][] = ["waiting", "running", "error", "denied"];
+const NEEDS_ATTENTION: readonly ToolStep["state"][] = [
+  "waiting",
+  "running",
+  "error",
+  "denied",
+];
 
 /**
  * 一条消息的工具步骤。都顺利做完时折成一行，点开才看细节；
  * 有步骤在进行、等批准或者失败时自动展开。人手动点过之后以人的选择为准。
  */
-function Steps({ steps, onDecide }: { steps: readonly ToolStep[]; onDecide: Decide }) {
+function Steps({
+  steps,
+  onDecide,
+}: {
+  steps: readonly ToolStep[];
+  onDecide: Decide;
+}) {
   const [chosen, setChosen] = useState<boolean | null>(null);
   const attention = steps.some((step) => NEEDS_ATTENTION.includes(step.state));
   // 等批准的卡片必须看得到，不能被折起来。
   const mustShow = steps.some((step) => step.state === "waiting");
   const open = mustShow || (chosen ?? attention);
-  const failed = steps.filter((step) => step.state === "error" || step.state === "denied").length;
-  const summary = failed > 0 ? `${steps.length} 步操作，${failed} 步没做成` : `${steps.length} 步操作`;
+  const failed = steps.filter(
+    (step) => step.state === "error" || step.state === "denied",
+  ).length;
+  const summary =
+    failed > 0
+      ? `${steps.length} 步操作，${failed} 步没做成`
+      : `${steps.length} 步操作`;
   return (
     <div className="sa-steps-box" data-open={open}>
       <button
@@ -593,7 +730,11 @@ function Steps({ steps, onDecide }: { steps: readonly ToolStep[]; onDecide: Deci
       {open && (
         <ul className="sa-steps" aria-label="工具调用">
           {steps.map((step, index) => (
-            <StepItem key={`${step.id}-${index}`} step={step} onDecide={onDecide} />
+            <StepItem
+              key={`${step.id}-${index}`}
+              step={step}
+              onDecide={onDecide}
+            />
           ))}
         </ul>
       )}
@@ -620,9 +761,16 @@ function StepItem({ step, onDecide }: { step: ToolStep; onDecide: Decide }) {
       </div>
       {preview && (
         <div className="sa-step-output">
-          <pre tabIndex={full ? 0 : undefined}>{full ? step.output : preview.text}</pre>
+          <pre tabIndex={full ? 0 : undefined}>
+            {full ? step.output : preview.text}
+          </pre>
           {preview.cut && (
-            <button type="button" className="sa-link" aria-expanded={full} onClick={() => setFull(!full)}>
+            <button
+              type="button"
+              className="sa-link"
+              aria-expanded={full}
+              onClick={() => setFull(!full)}
+            >
               {full ? "收起" : "查看完整"}
             </button>
           )}
@@ -674,7 +822,9 @@ function ApprovalCard({
       <div className="sa-approval-head">
         <Icon name="alert" />
         <span className="sa-approval-title">需要你批准</span>
-        <span className="sa-approval-expiry">{formatTime(expiresAt)} 前不处理按拒绝算</span>
+        <span className="sa-approval-expiry">
+          {formatTime(expiresAt)} 前不处理按拒绝算
+        </span>
       </div>
       <p className="sa-approval-reason">{reason}</p>
       <div className="sa-approval-actions">
