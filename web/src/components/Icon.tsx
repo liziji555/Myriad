@@ -26,7 +26,8 @@ export type IconName =
   | "chart"
   | "shield"
   | "file"
-  | "graph";
+  | "graph"
+  | "server";
 
 /** 16×16 的线条图标，颜色跟着文字走。 */
 const PATHS: Record<IconName, ReactNode> = {
@@ -150,6 +151,13 @@ const PATHS: Record<IconName, ReactNode> = {
   file: (
     <>
       <path d="M2.5 4.5a1.5 1.5 0 0 1 1.5-1.5h2.5l1.5 1.5h4a1.5 1.5 0 0 1 1.5 1.5v5.5a1.5 1.5 0 0 1-1.5 1.5H4a1.5 1.5 0 0 1-1.5-1.5v-7Z" />
+    </>
+  ),
+  server: (
+    <>
+      <rect x="2.5" y="2.75" width="11" height="4.5" rx="1.25" />
+      <rect x="2.5" y="8.75" width="11" height="4.5" rx="1.25" />
+      <path d="M5 5h.01M5 11h.01" />
     </>
   ),
   graph: (

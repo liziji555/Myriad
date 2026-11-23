@@ -41,7 +41,7 @@ const MAX_BACKOFF: Duration = Duration::from_secs(300);
 const STALE_MS: i64 = 60 * 60 * 1000;
 
 const HINT_PAIR: &str =
-    "这个聊天还没有连到房间。请在苦乐的「连接」页里生成配对码，然后在这里发：/pair 配对码";
+    "这个聊天还没有连到房间。请在 Myriad 的「连接」页里生成配对码，然后在这里发：/pair 配对码";
 const HINT_BAD_CODE: &str = "配对码不对，或者已经过期了（十分钟内有效）。请重新生成一个。";
 const HINT_LOCKED: &str = "配对码不对。试的次数太多了，过十分钟再试。";
 

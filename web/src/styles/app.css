@@ -97,13 +97,40 @@ button.sa-stage-room:hover,
 .sa-stage-room[data-docked="true"] {
   padding-left: var(--sa-space-1);
 }
-/* 苦乐的记号：一个圆，一半深一半亮。 */
+/* Myriad 的记号：跃鲲剪影，跟着文字颜色变。 */
 .sa-brand-mark {
   flex: none;
-  width: 16px;
-  height: 16px;
-  border-radius: 50%;
-  background: linear-gradient(135deg, var(--sa-fg) 50%, var(--sa-accent) 50%);
+  width: 22px;
+  height: 22px;
+  color: var(--sa-fg);
+}
+.sa-connect {
+  display: flex;
+  align-items: center;
+  gap: var(--sa-space-1);
+  min-width: 0;
+  margin-left: auto;
+  padding: 2px var(--sa-space-2);
+  border: 1px solid var(--sa-border);
+  border-radius: var(--sa-radius-md);
+  background: none;
+  font: inherit;
+  color: var(--sa-fg-muted);
+  cursor: pointer;
+}
+.sa-connect:hover:not(:disabled) {
+  color: var(--sa-fg);
+  border-color: var(--sa-fg-faint);
+}
+.sa-connect:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+.sa-connect-label {
+  overflow: hidden;
+  max-width: 9em;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 .sa-stage-sep {
   color: var(--sa-fg-faint);
@@ -394,7 +421,7 @@ button.sa-stage-room:hover,
 .sa-sidebar-toggle {
   margin-left: auto;
 }
-/* 抽屉里（窄窗口）上面已经有现场栏写着「苦乐」，不再写一遍。 */
+/* 抽屉里（窄窗口）上面已经有现场栏写着「Myriad」，不再写一遍。 */
 .sa-shell[data-rooms="open"] .sa-sidebar-head {
   display: none;
 }

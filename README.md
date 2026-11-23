@@ -1,4 +1,4 @@
-# 苦乐
+# Myriad
 
 > 原名 SuperAgent。命令行叫 `sa`，仓库、数据目录和导出的文件名里还是 `superagent`，没有跟着改。
 
@@ -400,7 +400,7 @@ default = { input = 10.0, cached_input = 10.0, output = 30.0 }      # 没有单�
 | 新 issue、issue 和 PR 下的评论 | 进房间，交给入口 Bot（`[github] issue_labels` 写了标签就只收带这些标签的 issue） |
 | PR 的评审、行内评论、CI 没通过或超时 | 只管任务开的 PR：进房间，交给那个任务的负责人 |
 | CI 通过、被取消 | 只管任务开的 PR：摆在时间线上，不叫 Bot |
-| 机器人账号做的、苦乐自己发的、没连房间的仓库、别的事件 | 不收 |
+| 机器人账号做的、Myriad 自己发的、没连房间的仓库、别的事件 | 不收 |
 
 签名（`X-Hub-Signature-256`）不对的一律拒绝。GitHub 重试同一次投递（`X-GitHub-Delivery` 相同）不会变成第二条消息。
 标题、正文、评论、文件名、分支名这些外人能随便写的东西：交给 Bot 时都围在 `<untrusted_external_content>` 里并说明只当资料看，里面的要求不照做；
@@ -530,7 +530,7 @@ auto_approve = ["read_file"]          # 这些工具不用问；别的每次调�
 | `sa doctor` | 体检 |
 | `sa service install [--workdir 目录] [--mock]` / `uninstall` | Linux 上装成 systemd 用户服务常驻：开机自启、崩了拉起、退出 SSH 也不停 |
 | `sa url` | 打印本机这个服务的地址和令牌（`sa connect` 在服务器上调它） |
-| `sa connect <用户@主机> [-p SSH 端口] [--local-port 端口] [--open]` | 通过 SSH 隧道连服务器上的苦乐，打印本机链接；断了自动重连 |
+| `sa connect <用户@主机> [-p SSH 端口] [--local-port 端口] [--open]` | 通过 SSH 隧道连服务器上的 Myriad，打印本机链接；断了自动重连 |
 
 所有命令都可以加 `--data-dir <目录>` 指定数据目录。`sa serve`、`sa chat`、`sa task`、`sa routine`、`sa link`、`sa usage`、`sa audit`、`sa bot`、`sa room` 用同一份数据，同一个数据目录同一时刻只能有一个在运行；
 `sa serve` 开着的时候，Bot 和房间在界面的「成员」面板里管理，定时任务在「定时」面板里管理。
@@ -553,14 +553,14 @@ cargo run -- --mock                                   # 直接运行
 pnpm dlx @tauri-apps/cli@2.12.4 build --bundles nsis  # 出安装包：Windows 用 nsis，Linux 用 deb
 ```
 
-- 第一次启动先选「本机」还是「服务器」，之后记着；菜单「文件 → 本机 / 服务器…」可以换，「更换工作目录」改本机的目录（都会重新启动）。
-- 选「服务器」填 `用户@主机`：桌面版用系统的 `ssh` 开隧道连服务器上常驻的苦乐（见 `docs/安装.md` 第 7 节），要能用密钥登录。关掉窗口只断开隧道，服务器上的任务照跑。也可以 `--server 用户@主机 [--ssh-port 端口]` 直接启动。
-- 窗口里只显示苦乐自己的页面，PR 之类的外部链接交给系统的浏览器；导出的 Bot 模板存进「下载」文件夹。
+- 打开就是本机，没选过工作目录就用「文稿」下的「Myriad」文件夹。要连服务器或换目录，点左栏底下的连接按钮，或者菜单「文件 → 连接本机 / 服务器…」；选过的会记着，换了会重新打开窗口。
+- 选「服务器」填 `用户@主机`：桌面版用系统的 `ssh` 开隧道连服务器上常驻的 Myriad（见 `docs/安装.md` 第 7 节），要能用密钥登录。关掉窗口只断开隧道，服务器上的任务照跑。也可以 `--server 用户@主机 [--ssh-port 端口]` 直接启动。
+- 窗口里只显示 Myriad 自己的页面，PR 之类的外部链接交给系统的浏览器；导出的 Bot 模板存进「下载」文件夹。
 - 用本机时，关掉窗口就停下服务，正在写的回复会标成「中断」，和 `Ctrl+C` 停 `sa serve` 一样。
 - 模型密钥、GitHub 令牌仍然从环境变量读。从开始菜单或桌面图标启动时读的是系统里的用户环境变量，不是某个终端里临时 `set` 的。
 - 页面没有被授予任何桌面能力，它能做的事和在浏览器里一样多。
 - 它是单独的一个 Cargo workspace，`cargo test --workspace` 不会编它；Linux 上编它要先装 WebKitGTK 等系统库（见 `.github/workflows/desktop.yml`）。
-- Windows 上安装后叫「苦乐」；Linux 的包名只能用字母，叫 `kule`，在应用菜单里显示的仍然是「苦乐」。
+- 安装后叫 Myriad；Linux 的包名只能用小写字母，叫 `kule`，应用菜单里显示 Myriad。命令行仍叫 `sa`，数据目录不变。
 - 安装包由 GitHub Actions 的 `Desktop` 工作流构建（手动触发，或者打 `v` 开头的标签），在运行记录的 Artifacts 里下载。安装包没有代码签名，Windows 第一次运行会有 SmartScreen 提示。
 
 ## 开发

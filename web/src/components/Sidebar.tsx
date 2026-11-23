@@ -1,4 +1,5 @@
 import { useEffect, useState, type FormEvent } from "react";
+import { connectionLabel, openConnect, type DesktopInfo } from "../api/desktop";
 import type { Presence, PresenceState } from "../api/presence";
 import type { Bot, Room, RoomId } from "../api/types";
 import { BotAvatar } from "./BotAvatar";
@@ -55,6 +56,8 @@ interface Props {
   onCreateRoom(name: string): Promise<void>;
   /** 每加一就打开「新建房间」的输入框（命令面板里点的）。 */
   createSignal: number;
+  /** 在桌面版里时：连的是本机还是哪台服务器。 */
+  desktop: DesktopInfo | null;
 }
 
 export function Sidebar({
@@ -74,6 +77,7 @@ export function Sidebar({
   onSelect,
   onCreateRoom,
   createSignal,
+  desktop,
 }: Props) {
   const [creating, setCreating] = useState(false);
   useEffect(() => {
@@ -112,8 +116,8 @@ export function Sidebar({
   return (
     <nav className="sa-sidebar" aria-label="左栏" data-collapsed={narrow}>
       <header className="sa-sidebar-head">
-        <span className="sa-brand-mark" aria-hidden="true" />
-        <span className="sa-brand">苦乐</span>
+        <BrandMark />
+        <span className="sa-brand">Myriad</span>
         {docked && (
           <button
             type="button"
@@ -237,7 +241,29 @@ export function Sidebar({
         <span className="sa-dot" data-state={connected ? "idle" : "warn"} aria-hidden="true" />
         <span className="sa-nav-label">{connected ? "已连接" : "连接中断，正在重连…"}</span>
         {version && <span className="sa-row-meta sa-nav-label">v{version}</span>}
+        {desktop && (
+          <button
+            type="button"
+            className="sa-connect"
+            disabled={desktop.pinned}
+            title={desktop.pinned ? "启动时用 --workdir 或 --server 定死了，换不了" : "连接本机或服务器"}
+            aria-label={`连接：${connectionLabel(desktop)}`}
+            onClick={openConnect}
+          >
+            <Icon name={desktop.current?.mode === "server" ? "server" : "plug"} />
+            <span className="sa-nav-label sa-connect-label">{connectionLabel(desktop)}</span>
+          </button>
+        )}
       </footer>
     </nav>
+  );
+}
+
+/** Myriad 的标：跃鲲剪影。 */
+function BrandMark() {
+  return (
+    <svg className="sa-brand-mark" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+      <path transform="matrix(0.003510 0 0 -0.003510 -2.530 27.695)" d="M3530 6555 c-11 -2 -57 -10 -102 -19 -45 -9 -108 -20 -140 -26 -56 -10 -69 -12 -148 -30 -21 -5 -51 -11 -66 -14 -659 -141 -1015 -409 -1193 -896 -9 -24 -19 -58 -23 -76 -3 -18 -9 -43 -12 -56 -33 -143 -31 -146 56 -77 97 77 240 166 332 205 174 74 348 125 356 104 5 -11 2 -13 -126 -94 -65 -41 -134 -83 -286 -173 -275 -163 -537 -369 -690 -539 -19 -21 -41 -46 -50 -56 -70 -76 -126 -149 -220 -286 -68 -99 -159 -265 -206 -378 -11 -27 -30 -73 -42 -100 -80 -190 -147 -472 -171 -720 -6 -67 -8 -257 -3 -302 25 -222 68 -325 149 -352 31 -11 141 -9 193 2 145 33 217 55 329 102 68 29 227 107 269 132 12 7 45 26 72 42 63 37 205 132 258 171 130 98 280 221 366 301 23 21 52 47 64 58 12 11 26 25 32 30 5 6 27 25 48 44 21 19 39 35 40 36 1 1 19 17 40 36 21 19 46 41 56 50 241 220 519 425 756 557 52 29 166 86 194 98 13 6 43 19 66 29 206 92 488 164 724 187 65 6 312 8 357 3 21 -2 57 -6 80 -8 347 -38 721 -194 936 -391 25 -24 26 -32 4 -66 -52 -80 -108 -211 -133 -309 -14 -56 -17 -71 -28 -145 -33 -229 49 -538 205 -771 60 -89 162 -210 224 -267 20 -18 45 -40 55 -50 41 -38 86 -72 144 -111 100 -67 96 -70 96 74 0 58 2 117 4 131 2 15 6 41 8 59 7 51 27 144 40 192 13 46 22 74 71 206 30 82 44 124 53 163 10 43 19 47 94 35 22 -4 64 -8 94 -10 151 -11 162 -12 260 -24 126 -15 321 -67 426 -112 42 -18 51 -5 36 54 -82 338 -297 625 -600 801 -15 8 -39 22 -53 30 -158 91 -394 162 -601 180 -25 2 -60 5 -78 6 -44 4 -48 7 -72 61 -26 59 -83 176 -100 204 -7 12 -20 35 -29 50 -99 174 -170 275 -308 442 -179 215 -397 403 -662 568 -62 39 -241 131 -306 157 -23 10 -65 27 -93 39 -47 19 -71 27 -193 64 -130 39 -297 74 -427 88 -169 19 -427 19 -592 0 -72 -8 -100 -12 -160 -22 -142 -24 -159 -16 -66 31 78 39 167 132 215 222 24 47 19 49 -63 33 -126 -25 -144 -17 -60 27 137 72 274 203 331 317 29 59 24 70 -31 59z m222 -1715 c32 -32 -113 -179 -242 -245 -81 -41 -72 -59 24 -46 68 10 41 -40 -55 -104 -85 -56 -191 -78 -295 -63 -38 6 -61 10 -176 34 -120 25 -305 -65 -499 -245 -70 -65 -42 19 57 169 131 197 339 332 625 404 75 19 181 40 307 62 46 8 116 21 156 28 87 16 88 16 98 6z" />
+    </svg>
   );
 }

@@ -1,4 +1,4 @@
-//! 连别的机器上的苦乐。
+//! 连别的机器上的 Myriad。
 //!
 //! 服务器上的 `sa serve` 只听服务器本机，不对外开端口；这边用系统的 `ssh` 开一条隧道：
 //! 本机的一个端口 → 服务器上的服务。先在服务器上跑 `sa url` 拿到端口和令牌，
@@ -45,7 +45,7 @@ pub struct ConnectArgs {
     open: bool,
 }
 
-/// `sa url`：打印这台机器上苦乐的连接地址（带令牌）。不占数据目录，服务开着也能用。
+/// `sa url`：打印这台机器上 Myriad 的连接地址（带令牌）。不占数据目录，服务开着也能用。
 pub fn url(data_dir: &DataDir, _args: UrlArgs) -> Result<()> {
     data_dir
         .create()
@@ -172,7 +172,7 @@ impl std::fmt::Display for SshTarget {
 /// 把 ssh 的报错翻译成人能照着做的话。
 fn explain_ssh_failure(code: Option<i32>, stderr: &str) -> String {
     let hint = if stderr.contains("Permission denied") {
-        "SSH 登录被拒绝。苦乐只用密钥登录：先在终端里 ssh-copy-id 一次，或者把公钥加进服务器的 ~/.ssh/authorized_keys"
+        "SSH 登录被拒绝。Myriad 只用密钥登录：先在终端里 ssh-copy-id 一次，或者把公钥加进服务器的 ~/.ssh/authorized_keys"
     } else if stderr.contains("Host key verification failed")
         || stderr.contains("REMOTE HOST IDENTIFICATION HAS CHANGED")
     {
@@ -249,7 +249,7 @@ pub struct Tunnel {
 }
 
 impl Tunnel {
-    /// 连上 `target` 上的苦乐，等到服务能应答才返回。`local_port` 不给就挑一个空着的。
+    /// 连上 `target` 上的 Myriad，等到服务能应答才返回。`local_port` 不给就挑一个空着的。
     /// 连的途中 `stop.close()` 了就放弃。
     pub fn open(target: &SshTarget, local_port: Option<u16>, stop: &TunnelStop) -> Result<Self> {
         let remote = target.remote_service()?;
@@ -390,12 +390,12 @@ fn wait_ready(stop: &TunnelStop, local: SocketAddr, token: &str) -> Result<()> {
         match probe(local, token) {
             Probe::Ok => return Ok(()),
             Probe::Unauthorized => bail!(
-                "连上了，但服务器上苦乐的令牌和 sa url 给的不一样：服务可能用的是另一个数据目录"
+                "连上了，但服务器上 Myriad 的令牌和 sa url 给的不一样：服务可能用的是另一个数据目录"
             ),
             Probe::NotYet => {}
         }
         if Instant::now() >= deadline {
-            bail!("SSH 连上了，但服务器上的苦乐没有应答：在服务器上运行 sa serve，或者 sa service install 让它常驻");
+            bail!("SSH 连上了，但服务器上的 Myriad 没有应答：在服务器上运行 sa serve，或者 sa service install 让它常驻");
         }
         std::thread::sleep(Duration::from_millis(300));
     }

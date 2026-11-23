@@ -1,6 +1,6 @@
 //! harness：本机装好的 Agent 命令行（Claude Code、Codex、OpenCode，或者自己写的命令）。
 //!
-//! 苦乐在 Bot 的工位目录里启动它，把这一轮的话交给它，一行一行读它的 JSON 输出，
+//! Myriad 在 Bot 的工位目录里启动它，把这一轮的话交给它，一行一行读它的 JSON 输出，
 //! 转成和内置 Bot 一样的文字和步骤。点停止时连它开出来的子进程一起结束。
 
 use sa_kernel::{Observer, StepEnd, TurnEnd};
@@ -395,7 +395,7 @@ fn parse(harness: Harness, value: &Value) -> Vec<Event> {
     }
 }
 
-/// Claude Code 的工具换成苦乐的叫法，标题挑最有用的那个参数。
+/// Claude Code 的工具换成 Myriad 的叫法，标题挑最有用的那个参数。
 fn claude_tool(name: &str, input: &Value) -> (String, String) {
     let pick = |keys: &[&str]| {
         keys.iter()

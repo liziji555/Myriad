@@ -27,7 +27,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 #[derive(Parser)]
-#[command(name = "sa", version, about = "苦乐：房间里的 AI 团队")]
+#[command(name = "sa", version, about = "Myriad：房间里的 AI 团队")]
 struct Cli {
     /// 数据目录（配置、数据库、会话记录都在这里）
     #[arg(long, global = true, env = "SA_DATA_DIR", value_name = "目录")]
@@ -41,9 +41,9 @@ struct Cli {
 enum Command {
     /// 启动本机服务，在浏览器里打开界面
     Serve(serve::ServeArgs),
-    /// 打印这台机器上苦乐的连接地址（带令牌），给 sa connect 和桌面版用
+    /// 打印这台机器上 Myriad 的连接地址（带令牌），给 sa connect 和桌面版用
     Url(remote::UrlArgs),
-    /// 通过 SSH 连另一台机器上的苦乐：开一条隧道，在本机浏览器里打开
+    /// 通过 SSH 连另一台机器上的 Myriad：开一条隧道，在本机浏览器里打开
     Connect(remote::ConnectArgs),
     /// 在 Linux 服务器上让 sa serve 常驻（systemd 用户服务）：开机自启，退出登录也不停
     Service {

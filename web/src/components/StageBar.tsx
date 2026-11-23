@@ -64,7 +64,7 @@ export function StageBar({
           onClick={onToggleRooms}
         >
           <span className="sa-brand-mark" aria-hidden="true" />
-          <span className="sa-brand">苦乐</span>
+          <span className="sa-brand">Myriad</span>
           <span className="sa-stage-sep" aria-hidden="true">
             /
           </span>

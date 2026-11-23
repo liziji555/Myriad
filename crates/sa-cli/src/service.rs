@@ -99,7 +99,7 @@ fn render_unit(exe: &Path, data_root: &Path, workdir: &Path, mock: bool) -> Stri
     format!(
         "# 由 sa service install 生成。重新运行它会覆盖这个文件。\n\
          [Unit]\n\
-         Description=苦乐（sa serve）\n\
+         Description=Myriad（sa serve）\n\
          Wants=network-online.target\n\
          After=network-online.target\n\
          \n\

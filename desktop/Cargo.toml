@@ -1,6 +1,6 @@
 [package]
 name = "sa-desktop"
-description = "苦乐的桌面外壳：一个窗口，里面是同一个本机服务和同一个界面"
+description = "Myriad 的桌面外壳：一个窗口，里面是同一个本机服务和同一个界面"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
