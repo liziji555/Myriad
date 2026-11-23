@@ -116,6 +116,11 @@ pub trait Tool: Send + Sync {
         8_000
     }
 
+    /// 开始做了就等它做完：点了停止也照样做完、照实报结果，免得改了文件却显示「已停止」。
+    fn finishes_once_started(&self) -> bool {
+        false
+    }
+
     async fn call(&self, input: Value, ctx: &ToolCtx) -> ToolResult;
 }
 

@@ -594,7 +594,7 @@ async fn run_one(
     let result = match &prepared.runnable {
         Err(message) => Some(Err(message.clone())),
         Ok((tool, input)) => {
-            let work = async {
+            let allowed = async {
                 match tool.check_permission(input, ctx).await {
                     Permission::Allow => {}
                     Permission::Deny(reason) => return Err(reason),
@@ -616,16 +616,36 @@ async fn run_one(
                         }
                     }
                 }
-                let max = tool.max_result_chars();
-                match tool.call(input.clone(), ctx).await {
-                    Ok(text) => Ok(clip_and_spill(text, max, spill_dir, &call.id).await),
-                    Err(e) => Err(clip_and_spill(e.0, max, spill_dir, &call.id).await),
-                }
+                Ok(())
             };
-            tokio::select! {
+            let allowed = tokio::select! {
                 biased;
                 _ = cancel.cancelled() => None,
-                result = work => Some(result),
+                allowed = allowed => Some(allowed),
+            };
+            match allowed {
+                None => None,
+                Some(Err(reason)) => Some(Err(reason)),
+                Some(Ok(())) => {
+                    let max = tool.max_result_chars();
+                    let work = async {
+                        match tool.call(input.clone(), ctx).await {
+                            Ok(text) => Ok(clip_and_spill(text, max, spill_dir, &call.id).await),
+                            Err(e) => Err(clip_and_spill(e.0, max, spill_dir, &call.id).await),
+                        }
+                    };
+                    if tool.finishes_once_started() {
+                        // 做完了照实报；是因为停止才没做的，算停止。
+                        let result = work.await;
+                        (result.is_ok() || !cancel.is_cancelled()).then_some(result)
+                    } else {
+                        tokio::select! {
+                            biased;
+                            _ = cancel.cancelled() => None,
+                            result = work => Some(result),
+                        }
+                    }
+                }
             }
         }
     };
@@ -818,6 +838,9 @@ mod tests {
         fn max_result_chars(&self) -> usize {
             50
         }
+        fn finishes_once_started(&self) -> bool {
+            self.name == "atomic"
+        }
         async fn check_permission(&self, input: &Value, _: &ToolCtx) -> Permission {
             match input["permission"].as_str() {
                 Some("ask") => Permission::Ask("探针要问一下".into()),
@@ -864,7 +887,7 @@ mod tests {
         let running = Arc::new(AtomicUsize::new(0));
         let peak = Arc::new(AtomicUsize::new(0));
         let mut tools = ToolRegistry::read_only();
-        for (name, parallel) in [("probe", true), ("serial", false)] {
+        for (name, parallel) in [("probe", true), ("serial", false), ("atomic", false)] {
             tools.register(Probe {
                 name,
                 parallel,
@@ -973,7 +996,7 @@ mod tests {
         assert_eq!(request.messages[0].role, Role::System);
         assert_eq!(request.messages[0].content, "你是测试助手");
         assert_eq!(request.messages[1].content, "你好");
-        assert_eq!(request.tools.len(), 7);
+        assert_eq!(request.tools.len(), 8);
         assert_eq!(request.session_id.as_deref(), Some("ses_test"));
     }
 
@@ -1187,6 +1210,34 @@ mod tests {
         let log = observer.log();
         assert!(log.contains(&"finish:c2:stopped".to_string()));
         assert!(!log.iter().any(|l| l.starts_with("start:c3")), "{log:?}");
+    }
+
+    /// 开始了就要做完的工具（比如写文件）：中途点停止，等它做完，照实报做成了，不说「已停止」。
+    #[tokio::test]
+    async fn cancel_while_an_atomic_tool_runs_lets_it_finish() {
+        let mut rig = rig();
+        let provider = MockProvider::scripted([MockReply::tool_calls(
+            "",
+            &[("c1", "atomic", r#"{"wait":true,"tag":"写完"}"#)],
+        )]);
+        let cancel = CancellationToken::new();
+        let observer = Recorder::default();
+        let stopper = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            stopper.cancel();
+        });
+        let outcome = rig
+            .turn(&provider, vec![vec![says("写", 1)]], &observer, &cancel)
+            .await;
+
+        assert_eq!(outcome.end, TurnEnd::Cancelled);
+        assert_eq!(rig.tool_results()[0], ("结果 写完".to_string(), false));
+        assert!(
+            observer.log().contains(&"finish:c1:true".to_string()),
+            "{:?}",
+            observer.log()
+        );
     }
 
     /// 要问人的调用：批准了才执行；不批准或者工具自己不让做，都不执行，并把原因告诉模型。
