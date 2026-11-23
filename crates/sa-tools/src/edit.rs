@@ -51,6 +51,11 @@ impl Tool for EditTool {
         write_permission(arg(input, "path"), ctx)
     }
 
+    // 写文件一下子就完：已经开始写了，就等它写完再停。
+    fn finishes_once_started(&self) -> bool {
+        true
+    }
+
     async fn call(&self, input: Value, ctx: &ToolCtx) -> ToolResult {
         let input: Input = parse_input(input)?;
         if input.old_string.is_empty() {

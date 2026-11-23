@@ -56,6 +56,10 @@ impl Tool for Serial {
         self.inner.check_permission(input, ctx).await
     }
 
+    fn finishes_once_started(&self) -> bool {
+        self.inner.finishes_once_started()
+    }
+
     fn max_result_chars(&self) -> usize {
         self.inner.max_result_chars()
     }
