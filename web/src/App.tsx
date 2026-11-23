@@ -10,19 +10,27 @@ import { useWorkspace } from "./api/useWorkspace";
 import { noticesFor } from "./api/workspace";
 import { CommandPalette, type PaletteEntry } from "./components/CommandPalette";
 import { Composer } from "./components/Composer";
-import { ContextPanel, type ActivityNode, type PanelTab } from "./components/ContextPanel";
+import {
+  ContextPanel,
+  type ActivityNode,
+  type PanelTab,
+} from "./components/ContextPanel";
 import { Notices } from "./components/Notices";
 import { applyTheme, loadTheme, nextTheme } from "./api/theme";
 import { Sidebar, type RoomState } from "./components/Sidebar";
 import { StageBar } from "./components/StageBar";
 import { Timeline } from "./components/Timeline";
+import { FlowView } from "./components/FlowView";
+import { flowOf } from "./api/flow";
 import { LightProvider, useLight } from "./light/LightProvider";
 
 /** 窗口够宽时左栏常驻（可以收成窄条），窄了变成从左上角呼出的抽屉。 */
 const DOCKED = "(min-width: 1101px)";
 
 function useMedia(query: string): boolean {
-  const [matches, setMatches] = useState(() => window.matchMedia(query).matches);
+  const [matches, setMatches] = useState(
+    () => window.matchMedia(query).matches,
+  );
   useEffect(() => {
     const media = window.matchMedia(query);
     const onChange = () => setMatches(media.matches);
@@ -66,6 +74,7 @@ function Shell() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [theme, setTheme] = useState(loadTheme);
   const [createSignal, setCreateSignal] = useState(0);
+  const [view, setView] = useState<"chat" | "flow">("chat");
   // 房间列表收起后把「新建房间」的信号清掉，不然下次打开列表又弹出填名字的框。
   const listShown = docked ? !collapsed : roomsOpen;
   useEffect(() => {
@@ -74,7 +83,11 @@ function Shell() {
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === "k") {
+      if (
+        (event.ctrlKey || event.metaKey) &&
+        !event.altKey &&
+        event.key.toLowerCase() === "k"
+      ) {
         event.preventDefault();
         setPaletteOpen((open) => !open);
       }
@@ -84,18 +97,24 @@ function Shell() {
   }, []);
 
   useEffect(() => {
-    api.health().then((health) => setVersion(health.version), () => {});
+    api.health().then(
+      (health) => setVersion(health.version),
+      () => {},
+    );
   }, []);
 
   // 选中的房间（没选时是第一个）。换房间、重新连上、片段丢了，都重新拉一次最新的消息。
-  const roomId = (workspace.rooms.find((r) => r.id === selected) ?? workspace.rooms[0])?.id ?? null;
+  const roomId =
+    (workspace.rooms.find((r) => r.id === selected) ?? workspace.rooms[0])
+      ?.id ?? null;
   const { openRoom, epoch } = workspace;
   useEffect(() => {
     if (!roomId) return;
     let stale = false;
     setLoadError(null);
     openRoom(roomId).catch((cause: unknown) => {
-      if (!stale) setLoadError(cause instanceof Error ? cause.message : String(cause));
+      if (!stale)
+        setLoadError(cause instanceof Error ? cause.message : String(cause));
     });
     return () => {
       stale = true;
@@ -107,7 +126,8 @@ function Shell() {
       <main className="sa-gate">
         <h1>需要访问令牌</h1>
         <p>
-          请回到运行 <code>sa serve</code> 的窗口，用它打印的链接重新打开这个页面。
+          请回到运行 <code>sa serve</code>{" "}
+          的窗口，用它打印的链接重新打开这个页面。
         </p>
       </main>
     );
@@ -120,19 +140,24 @@ function Shell() {
     );
   }
 
-  const room = workspace.rooms.find((r) => r.id === selected) ?? workspace.rooms[0];
+  const room =
+    workspace.rooms.find((r) => r.id === selected) ?? workspace.rooms[0];
   const roomChat = room ? workspace.chat.rooms[room.id] : undefined;
   // 有 Bot 在写、在挑人接话之前的空档里有人排着队，都算「正在回复」，可以点停止。
   // 任务的运行过程不算：它有自己的停止按钮，不占着输入框。
   const replying =
-    (roomChat?.messages.some((message) => message.state === "streaming" && message.kind === "chat") ??
+    (roomChat?.messages.some(
+      (message) => message.state === "streaming" && message.kind === "chat",
+    ) ??
       false) ||
     speakersOf(roomChat?.activity).length > 0 ||
     Boolean(roomChat?.activity?.routing) ||
     (roomChat?.activity?.queued.length ?? 0) > 0;
   // 按进房间的先后排，和服务端一致。
   const members = room
-    ? room.member_bot_ids.flatMap((id) => workspace.bots.filter((bot) => bot.id === id))
+    ? room.member_bot_ids.flatMap((id) =>
+        workspace.bots.filter((bot) => bot.id === id),
+      )
     : [];
   // 正在说话的那几个 Bot：没点名的插话它们都看得到。
   const speaking = speakersOf(roomChat?.activity).flatMap(
@@ -171,8 +196,15 @@ function Shell() {
   const roomStates: Record<RoomId, RoomState> = {};
   for (const [id, chat] of Object.entries(workspace.chat.rooms)) {
     if (!chat) continue;
-    const live = chat.messages.filter((message) => message.state === "streaming");
-    if (live.some((message) => message.steps.some((step) => step.state === "waiting"))) roomStates[id] = "warn";
+    const live = chat.messages.filter(
+      (message) => message.state === "streaming",
+    );
+    if (
+      live.some((message) =>
+        message.steps.some((step) => step.state === "waiting"),
+      )
+    )
+      roomStates[id] = "warn";
     else if (
       live.length > 0 ||
       speakersOf(chat.activity).length > 0 ||
@@ -184,15 +216,59 @@ function Shell() {
   const roomTasks = room ? (workspace.board.rooms[room.id] ?? []) : [];
   const presence = presenceOf(members, roomChat, roomTasks);
   const execution = executionOf(presence, members, roomChat, roomTasks);
-  const pendingTasks = roomTasks.filter((task) => ["review", "waiting", "blocked"].includes(task.state)).length;
+  const flow = room
+    ? flowOf(
+        roomChat?.messages ?? [],
+        workspace.bots,
+        room.host_bot_id,
+        room.member_bot_ids,
+        room.discussion,
+      )
+    : null;
+  const liveLanes = flow
+    ? new Set(
+        flow.nodes
+          .filter((node) => node.tone === "live" || node.tone === "waiting")
+          .map((node) => node.lane),
+      ).size
+    : 0;
+  const handoffCount = flow
+    ? flow.edges.filter(
+        (edge) => edge.kind === "dispatch" || edge.kind === "peer",
+      ).length
+    : 0;
+  // 从协作视图点一个节点：回到对话，滚到那条消息闪一下。
+  const openMessage = (messageId: string) => {
+    setView("chat");
+    window.setTimeout(() => {
+      const target = document.querySelector(`[data-message-id="${messageId}"]`);
+      if (!target) return;
+      target.scrollIntoView({ block: "center" });
+      target.setAttribute("data-flash", "true");
+      window.setTimeout(() => target.removeAttribute("data-flash"), 1600);
+    }, 60);
+  };
+  const pendingTasks = roomTasks.filter((task) =>
+    ["review", "waiting", "blocked"].includes(task.state),
+  ).length;
   // 点了现场栏上的牌子：主线上有那条消息就滚过去闪一下，否则打开那个任务。
   const jumpTo = (row: Presence) => {
-    const target = row.messageId && document.querySelector(`[data-message-id="${row.messageId}"]`);
+    // 在协作视图里点的：先切回对话，等主线显示出来再滚。
+    if (view === "flow") {
+      setView("chat");
+      window.setTimeout(() => reveal(row), 60);
+    } else reveal(row);
+  };
+  const reveal = (row: Presence) => {
+    const target =
+      row.messageId &&
+      document.querySelector(`[data-message-id="${row.messageId}"]`);
     if (target) {
       // 窗口窄的时候面板盖在主线上面：先收起来，不然要看的东西被挡着。
       if (window.matchMedia("(max-width: 1100px)").matches) setPanelOpen(false);
       // 回复很长时审批卡可能在它的最下面：有卡就对着卡滚，不对着整条回复。
-      const card = row.state === "approval" ? target.querySelector(".sa-approval") : null;
+      const card =
+        row.state === "approval" ? target.querySelector(".sa-approval") : null;
       (card ?? target).scrollIntoView({ block: "center", behavior: "smooth" });
       target.setAttribute("data-flash", "true");
       window.setTimeout(() => target.removeAttribute("data-flash"), 1600);
@@ -205,18 +281,25 @@ function Shell() {
   // 演示：先把节点放进右栏，再让光线从按钮飞到这个节点。
   const runLightDemo = (source: HTMLElement) => {
     const id = `demo-${Date.now()}`;
-    setDemoNodes((nodes) => [...nodes, { id, title: "演示节点", arrived: false }]);
+    setDemoNodes((nodes) => [
+      ...nodes,
+      { id, title: "演示节点", arrived: false },
+    ]);
     showPanel("activity");
     requestAnimationFrame(async () => {
       const result = await emit({
         id,
         source,
         target: () => document.querySelector(`[data-node-id="${id}"]`),
-        color: getComputedStyle(document.documentElement).getPropertyValue("--sa-accent").trim(),
+        color: getComputedStyle(document.documentElement)
+          .getPropertyValue("--sa-accent")
+          .trim(),
       });
       setDemoNodes((nodes) =>
         result === "arrived"
-          ? nodes.map((node) => (node.id === id ? { ...node, arrived: true } : node))
+          ? nodes.map((node) =>
+              node.id === id ? { ...node, arrived: true } : node,
+            )
           : nodes.filter((node) => node.id !== id),
       );
     });
@@ -229,42 +312,39 @@ function Shell() {
     run: () => showPanel(id),
   });
   const paletteEntries: PaletteEntry[] = [
-    ...workspace.rooms.map(
-      (r): PaletteEntry => ({
-        id: `room:${r.id}`,
-        group: "room",
-        title: r.name,
-        hint: r.id === room?.id ? "正开着" : undefined,
-        run: () => setSelected(r.id),
-      }),
-    ),
-    ...workspace.bots.map(
-      (bot): PaletteEntry => ({
-        id: `bot:${bot.id}`,
-        group: "bot",
-        title: bot.name,
-        hint: bot.persona.split("\n")[0] || (bot.enabled ? undefined : "已停用"),
-        run: () => showPanel("members"),
-      }),
-    ),
+    ...workspace.rooms.map((r): PaletteEntry => ({
+      id: `room:${r.id}`,
+      group: "room",
+      title: r.name,
+      hint: r.id === room?.id ? "正开着" : undefined,
+      run: () => setSelected(r.id),
+    })),
+    ...workspace.bots.map((bot): PaletteEntry => ({
+      id: `bot:${bot.id}`,
+      group: "bot",
+      title: bot.name,
+      hint: bot.persona.split("\n")[0] || (bot.enabled ? undefined : "已停用"),
+      run: () => showPanel("members"),
+    })),
     // 只有打开过的房间的任务在手上。
     ...Object.values(workspace.board.rooms)
       .flat()
-      .map(
-        (task): PaletteEntry => ({
-          id: `task:${task.id}`,
-          group: "task",
-          title: task.title,
-          hint: [workspace.rooms.find((r) => r.id === task.room_id)?.name, STATE_LABEL[task.state]]
-            .filter(Boolean)
-            .join(" · "),
-          run: () => {
-            setSelected(task.room_id);
-            setFocusTask(task.id);
-            showPanel("tasks");
-          },
-        }),
-      ),
+      .map((task): PaletteEntry => ({
+        id: `task:${task.id}`,
+        group: "task",
+        title: task.title,
+        hint: [
+          workspace.rooms.find((r) => r.id === task.room_id)?.name,
+          STATE_LABEL[task.state],
+        ]
+          .filter(Boolean)
+          .join(" · "),
+        run: () => {
+          setSelected(task.room_id);
+          setFocusTask(task.id);
+          showPanel("tasks");
+        },
+      })),
     {
       id: "action:new-room",
       group: "action",
@@ -330,10 +410,23 @@ function Shell() {
       data-panel-open={panelOpen}
       // 宽窗口：左栏常驻（docked）或收成窄条（rail）；窄窗口：抽屉开着（open）或收着（closed）。
       // 没有房间时抽屉总是开着：新建房间的入口在那里。
-      data-rooms={docked ? (collapsed ? "rail" : "docked") : roomsShown ? "open" : "closed"}
+      data-rooms={
+        docked
+          ? collapsed
+            ? "rail"
+            : "docked"
+          : roomsShown
+            ? "open"
+            : "closed"
+      }
       style={{ "--sa-panel-width": `${layout.panelWidth}px` } as CSSProperties}
     >
-      {paletteOpen && <CommandPalette entries={paletteEntries} onClose={() => setPaletteOpen(false)} />}
+      {paletteOpen && (
+        <CommandPalette
+          entries={paletteEntries}
+          onClose={() => setPaletteOpen(false)}
+        />
+      )}
       <StageBar
         room={room}
         presence={presence}
@@ -356,7 +449,9 @@ function Shell() {
       />
       {(docked || roomsShown) && (
         <>
-          {!docked && room && <div className="sa-scrim" onClick={() => setRoomsOpen(false)} />}
+          {!docked && room && (
+            <div className="sa-scrim" onClick={() => setRoomsOpen(false)} />
+          )}
           <Sidebar
             rooms={workspace.rooms}
             bots={workspace.bots}
@@ -398,25 +493,67 @@ function Shell() {
               }}
               onShowUsage={() => showPanel("usage")}
             />
-            <Timeline
-              key={room.id}
-              chat={roomChat}
-              bots={workspace.bots}
-              tasks={roomTasks}
-              runs={workspace.board.runs}
-              taskActions={workspace.tasks}
-              members={members.filter((bot) => bot.enabled)}
-              onShowTask={(taskId) => {
-                setFocusTask(taskId);
-                showPanel("tasks");
-              }}
-              loadError={loadError}
-              onRetry={() => setRetry((n) => n + 1)}
-              onLoadOlder={() => workspace.loadOlder(room.id)}
-              onDecide={workspace.decideApproval}
-              onLightDemo={runLightDemo}
-              onExample={setPrefill}
-            />
+            <div className="sa-viewbar" role="tablist" aria-label="看法">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={view === "chat"}
+                onClick={() => setView("chat")}
+              >
+                对话
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={view === "flow"}
+                onClick={() => setView("flow")}
+              >
+                协作
+                {liveLanes > 0 && (
+                  <span
+                    className="sa-viewbar-live"
+                    aria-label={`${liveLanes} 个在做`}
+                  />
+                )}
+              </button>
+              {flow && view === "flow" && (
+                <span className="sa-viewbar-meta">
+                  {flow.lanes.length - 1} 条线 · {handoffCount} 次派活和交接
+                  {liveLanes > 0 ? ` · ${liveLanes} 个在做` : ""}
+                </span>
+              )}
+            </div>
+            {view === "flow" && flow && (
+              <FlowView
+                key={room.id}
+                flow={flow}
+                presence={presence}
+                onOpen={openMessage}
+              />
+            )}
+            {/* 协作视图时主线只藏起来不卸载：没写完的打回意见、审批卡都还在。 */}
+            <div className="sa-viewpane" hidden={view === "flow" && !!flow}>
+              <Timeline
+                key={room.id}
+                chat={roomChat}
+                bots={workspace.bots}
+                tasks={roomTasks}
+                runs={workspace.board.runs}
+                taskActions={workspace.tasks}
+                members={members.filter((bot) => bot.enabled)}
+                onShowTask={(taskId) => {
+                  setFocusTask(taskId);
+                  showPanel("tasks");
+                }}
+                loadError={loadError}
+                onRetry={() => setRetry((n) => n + 1)}
+                onLoadOlder={() => workspace.loadOlder(room.id)}
+                onDecide={workspace.decideApproval}
+                onLightDemo={runLightDemo}
+                onExample={setPrefill}
+                hidden={view === "flow" && !!flow}
+              />
+            </div>
             {roomChat?.activity?.routing ? (
               <p className="sa-room-status" role="status">
                 正在挑选由谁来回答…
@@ -434,7 +571,9 @@ function Shell() {
               prefill={prefill}
               onPrefilled={() => setPrefill(null)}
               commands={slashCommands}
-              disabledReason={room.host_bot_id ? null : "这个房间里还没有 Bot，发了也没人回应"}
+              disabledReason={
+                room.host_bot_id ? null : "这个房间里还没有 Bot，发了也没人回应"
+              }
               replying={replying}
               steerTo={speaking.length > 0 ? speaking.join("、") : null}
               members={members.filter((bot) => bot.enabled)}
@@ -468,7 +607,9 @@ function Shell() {
           taskActions={workspace.tasks}
           focusTask={focusTask}
           onFocusTask={setFocusTask}
-          routines={workspace.routines.filter((routine) => routine.room_id === room.id)}
+          routines={workspace.routines.filter(
+            (routine) => routine.room_id === room.id,
+          )}
           routineActions={workspace.routineActions}
           links={workspace.links.filter((link) => link.room_id === room.id)}
           linkActions={workspace.linkActions}
