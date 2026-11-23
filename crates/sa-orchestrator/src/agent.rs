@@ -4,7 +4,9 @@
 
 use crate::Shared;
 use async_trait::async_trait;
-use sa_kernel::{run_turn, EntryBody, Inbox, Observer, Transcript, TurnConfig, TurnEnd, UserInput};
+use sa_kernel::{
+    run_turn, EntryBody, Inbox, Observer, StepEnd, Transcript, TurnConfig, TurnEnd, UserInput,
+};
 use sa_llm::{RetryPolicy, Usage};
 use sa_protocol::{BotId, ModelTier, RoomId, SessionId, TaskId};
 use sa_tools::{Tool, ToolCtx, ToolError, ToolRegistry, ToolResult};
@@ -212,7 +214,7 @@ impl Observer for Quiet<'_> {
     async fn tool_started(&self, _call_id: &str, _tool: &str, _title: &str, _arguments: &str) {
         self.beat();
     }
-    async fn tool_finished(&self, _call_id: &str, _ok: bool, _output: &str) {
+    async fn tool_finished(&self, _call_id: &str, _end: StepEnd, _output: &str) {
         self.beat();
     }
 

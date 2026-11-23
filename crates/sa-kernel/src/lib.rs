@@ -11,5 +11,6 @@ mod turn;
 
 pub use transcript::{Entry, EntryBody, Transcript, TranscriptError};
 pub use turn::{
-    run_turn, ApprovalRequest, Inbox, Observer, TurnConfig, TurnEnd, TurnOutcome, UserInput,
+    run_turn, ApprovalRequest, Inbox, Observer, StepEnd, TurnConfig, TurnEnd, TurnOutcome,
+    UserInput,
 };
