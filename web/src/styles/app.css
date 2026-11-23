@@ -50,19 +50,26 @@ code {
 /* ---- 现场栏 + 主线 + 面板 ------------------------------------------------ */
 .sa-shell {
   --sa-stage-height: 52px;
+  --sa-side: 0px;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) var(--sa-panel-width);
+  grid-template-columns: var(--sa-side) minmax(0, 1fr) var(--sa-panel-width);
   grid-template-rows: var(--sa-stage-height) minmax(0, 1fr);
   height: 100%;
 }
+.sa-shell[data-rooms="docked"] {
+  --sa-side: var(--sa-sidebar-width);
+}
+.sa-shell[data-rooms="rail"] {
+  --sa-side: var(--sa-rail-width);
+}
 .sa-shell[data-panel-open="false"] {
-  grid-template-columns: minmax(0, 1fr);
+  grid-template-columns: var(--sa-side) minmax(0, 1fr);
 }
 .sa-shell[data-panel-open="false"] .sa-panel {
   display: none;
 }
 .sa-stage {
-  grid-column: 1 / -1;
+  grid-column: 2 / -1;
   display: flex;
   align-items: center;
   gap: var(--sa-space-3);
@@ -83,9 +90,12 @@ code {
   border-radius: var(--sa-radius-md);
   background: none;
 }
-.sa-stage-room:hover,
+button.sa-stage-room:hover,
 .sa-stage-room[aria-expanded="true"] {
   background: var(--sa-hover);
+}
+.sa-stage-room[data-docked="true"] {
+  padding-left: var(--sa-space-1);
 }
 /* 苦乐的记号：一个圆，一半深一半亮。 */
 .sa-brand-mark {
@@ -321,27 +331,34 @@ code {
   }
 }
 
-/* 房间列表：平时收着，点左上角的房间名才出来，盖在主线上面。 */
+/* 窄窗口里左栏平时收着，点左上角的房间名才出来，盖在主线上面。 */
 .sa-scrim {
   position: fixed;
   inset: var(--sa-stage-height) 0 0 0;
   z-index: 5;
   background: color-mix(in srgb, #000 12%, transparent);
 }
-.sa-shell .sa-sidebar {
+.sa-shell[data-rooms="open"] .sa-sidebar {
   position: fixed;
   inset: var(--sa-stage-height) auto 0 0;
   width: var(--sa-sidebar-width);
   z-index: 6;
   box-shadow: 8px 0 24px color-mix(in srgb, #000 12%, transparent);
 }
+/* 宽窗口里左栏常驻：从顶到底一整条，现场栏和主线在它右边。 */
+.sa-shell[data-rooms="docked"] .sa-sidebar,
+.sa-shell[data-rooms="rail"] .sa-sidebar {
+  grid-row: 1 / -1;
+  grid-column: 1;
+  overflow: hidden;
+}
 .sa-shell .sa-main {
   grid-row: 2;
-  grid-column: 1;
+  grid-column: 2;
 }
 .sa-shell .sa-panel {
   grid-row: 2;
-  grid-column: 2;
+  grid-column: 3;
 }
 
 .sa-gate {
@@ -369,8 +386,135 @@ code {
 .sa-sidebar-head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  padding: var(--sa-space-3) var(--sa-space-3) var(--sa-space-2) var(--sa-space-4);
+  gap: var(--sa-space-2);
+  flex: none;
+  height: var(--sa-stage-height);
+  padding: 0 var(--sa-space-2) 0 var(--sa-space-4);
+}
+.sa-sidebar-toggle {
+  margin-left: auto;
+}
+/* 抽屉里（窄窗口）上面已经有现场栏写着「苦乐」，不再写一遍。 */
+.sa-shell[data-rooms="open"] .sa-sidebar-head {
+  display: none;
+}
+.sa-sidebar-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding-top: var(--sa-space-2);
+}
+.sa-new-room-button {
+  display: flex;
+  align-items: center;
+  gap: var(--sa-space-2);
+  width: calc(100% - 2 * var(--sa-space-2));
+  height: 36px;
+  margin: 0 var(--sa-space-2) var(--sa-space-1);
+  padding: 0 var(--sa-space-3);
+  border: 1px solid var(--sa-border);
+  border-radius: var(--sa-radius-md);
+  background: var(--sa-bg-raised);
+  font-weight: 500;
+  transition: border-color var(--sa-motion), background var(--sa-motion);
+}
+.sa-new-room-button:hover {
+  border-color: color-mix(in srgb, var(--sa-accent) 50%, var(--sa-border));
+}
+.sa-new-room-button .sa-icon {
+  color: var(--sa-accent);
+}
+/* 房间的记号：名字的第一个字，有 Bot 在忙或者有事等人时右下角一个点。 */
+.sa-room-mark {
+  position: relative;
+  flex: none;
+  display: inline-grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: var(--sa-radius-sm);
+  background: color-mix(in srgb, var(--sa-fg) 9%, var(--sa-bg-raised));
+  color: var(--sa-fg-muted);
+  font-size: var(--sa-text-xs);
+  font-weight: 600;
+}
+.sa-row[aria-current="page"] .sa-room-mark {
+  background: color-mix(in srgb, var(--sa-accent) 22%, var(--sa-bg-raised));
+  color: var(--sa-fg);
+}
+.sa-room-mark .sa-dot {
+  position: absolute;
+  right: -3px;
+  bottom: -3px;
+  width: 8px;
+  height: 8px;
+  box-shadow: 0 0 0 2px var(--sa-bg-side);
+}
+.sa-room-mark .sa-dot[data-state="idle"] {
+  display: none;
+}
+.sa-dot[data-state="busy"] {
+  background: var(--sa-accent);
+  animation: sa-pulse 1.2s ease-in-out infinite;
+}
+.sa-sidebar .sa-row[data-state="approval"] .sa-row-meta,
+.sa-sidebar .sa-row[data-state="asking"] .sa-row-meta {
+  color: var(--sa-warn);
+  font-weight: 500;
+}
+.sa-sidebar .sa-row[data-state="tool"] .sa-row-meta,
+.sa-sidebar .sa-row[data-state="writing"] .sa-row-meta,
+.sa-sidebar .sa-row[data-state="working"] .sa-row-meta {
+  color: var(--sa-accent);
+}
+.sa-nav-row {
+  color: var(--sa-fg-muted);
+}
+.sa-nav-row:hover,
+.sa-nav-row[aria-pressed="true"] {
+  color: var(--sa-fg);
+}
+.sa-nav-row[aria-pressed="true"] {
+  background: var(--sa-active);
+}
+.sa-nav-row:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+/* 收成窄条：只留图标和记号，名字在提示里。 */
+.sa-sidebar[data-collapsed="true"] .sa-brand,
+.sa-sidebar[data-collapsed="true"] .sa-brand-mark,
+.sa-sidebar[data-collapsed="true"] .sa-section-title,
+.sa-sidebar[data-collapsed="true"] .sa-row-label,
+.sa-sidebar[data-collapsed="true"] .sa-row-meta,
+.sa-sidebar[data-collapsed="true"] .sa-nav-label {
+  display: none;
+}
+.sa-sidebar[data-collapsed="true"] .sa-sidebar-head {
+  justify-content: center;
+  padding: 0;
+}
+.sa-sidebar[data-collapsed="true"] .sa-sidebar-toggle {
+  margin: 0;
+}
+.sa-sidebar[data-collapsed="true"] .sa-new-room-button {
+  justify-content: center;
+  width: 36px;
+  margin: 0 auto var(--sa-space-1);
+  padding: 0;
+}
+.sa-sidebar[data-collapsed="true"] .sa-section {
+  margin: 0 var(--sa-space-2);
+  padding: var(--sa-space-2) 0;
+  border-top: 1px solid var(--sa-border);
+}
+.sa-sidebar[data-collapsed="true"] .sa-row {
+  justify-content: center;
+  padding: 0;
+}
+.sa-sidebar[data-collapsed="true"] .sa-sidebar-foot {
+  justify-content: center;
+  padding: var(--sa-space-3) 0;
 }
 .sa-brand {
   font-weight: 600;
@@ -614,7 +758,7 @@ button.sa-row:hover {
   overflow-wrap: anywhere;
   line-height: 1.65;
 }
-/* 人说的话是一个浮起来的气泡，Bot 的话直接写在纸面上。 */
+/* 人说的话是一个浮起来的气泡，Bot 的话直接写在纸面上。自己说的靠右，别人（Bot、Telegram 那边的人）靠左。 */
 .sa-msg[data-sender="user"][data-kind="chat"] > .sa-msg-body {
   justify-self: start;
   max-width: 100%;
@@ -622,6 +766,41 @@ button.sa-row:hover {
   border: 1px solid var(--sa-border);
   border-radius: 4px var(--sa-radius-lg) var(--sa-radius-lg) var(--sa-radius-lg);
   background: var(--sa-bg-raised);
+}
+.sa-msg[data-mine="true"][data-kind="chat"] {
+  justify-items: end;
+}
+.sa-msg[data-mine="true"][data-kind="chat"] > .sa-msg-head {
+  flex-direction: row-reverse;
+}
+.sa-msg[data-mine="true"][data-kind="chat"] > .sa-msg-body {
+  justify-self: end;
+  max-width: min(78%, 640px);
+  border-color: color-mix(in srgb, var(--sa-accent) 30%, var(--sa-border));
+  border-radius: var(--sa-radius-lg) 4px var(--sa-radius-lg) var(--sa-radius-lg);
+  background: color-mix(in srgb, var(--sa-accent) 11%, var(--sa-bg-raised));
+}
+/* 自己说的话在主线上只留一个空心的小圈：头像在右边的气泡上就不用了。 */
+.sa-msg[data-mine="true"][data-kind="chat"] > .sa-line-node {
+  top: 9px;
+  left: calc(-1 * var(--sa-gutter) + 8px);
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--sa-fg-faint);
+  background: var(--sa-bg);
+  font-size: 0;
+}
+/* 插话：Bot 回复的中途说的话，不打断它。 */
+.sa-steer {
+  padding: 0 7px;
+  border: 1px solid color-mix(in srgb, var(--sa-accent) 45%, transparent);
+  border-radius: var(--sa-radius-pill);
+  color: var(--sa-accent);
+  font-size: var(--sa-text-xs);
+  font-weight: 500;
+}
+.sa-steer[data-live="true"] {
+  background: color-mix(in srgb, var(--sa-accent) 12%, transparent);
 }
 .sa-msg-note {
   font-size: var(--sa-text-sm);
@@ -1217,7 +1396,7 @@ button.sa-row:hover {
 @media (max-width: 1100px) {
   .sa-shell,
   .sa-shell[data-panel-open="false"] {
-    grid-template-columns: minmax(0, 1fr);
+    grid-template-columns: 0 minmax(0, 1fr);
   }
   /* 抽屉的宽度跟着屏幕走，不让拖。 */
   .sa-panel-resizer {
@@ -1284,6 +1463,7 @@ button.sa-row:hover {
 /* 不想看动画的人：会动的都停下，状态还是靠颜色和字看得出来。 */
 @media (prefers-reduced-motion: reduce) {
   .sa-avatar,
+  .sa-dot[data-state="busy"],
   .sa-live::before,
   .sa-dots i,
   .sa-caret,

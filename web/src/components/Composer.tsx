@@ -20,6 +20,8 @@ interface Props {
   disabledReason: string | null;
   /** Bot 是否正在回复。 */
   replying: boolean;
+  /** 正在回复的 Bot：这时发的话是插话，它不会停下，下一次想之前会看到。 */
+  steerTo: string | null;
   /** 房间里可以点名的 Bot。输入 `@` 时列出来。 */
   members: readonly Bot[];
   onSend(content: string): Promise<void>;
@@ -42,6 +44,7 @@ export function Composer({
   commands,
   disabledReason,
   replying,
+  steerTo,
   members,
   onSend,
   onStop,
@@ -248,7 +251,12 @@ export function Composer({
             value={text}
             disabled={disabledReason !== null}
             aria-label="输入消息"
-            placeholder={disabledReason ?? "说点什么，或者交代一件事…"}
+            placeholder={
+              disabledReason ??
+              (steerTo
+                ? `插话：${steerTo}不会停下，下一次想之前会看到（@别的 Bot 会先打断）`
+                : "说点什么，或者交代一件事…")
+            }
             onChange={(event) => {
               setText(event.target.value);
               setCaret(event.target.selectionStart);

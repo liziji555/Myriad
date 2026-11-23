@@ -13,6 +13,8 @@ interface Props {
   connected: boolean;
   /** 等人处理的任务有几个。 */
   pendingTasks: number;
+  /** 宽窗口：左栏常驻，这里只写房间名；窄窗口：点房间名开关抽屉。 */
+  docked: boolean;
   roomsOpen: boolean;
   drawerOpen: boolean;
   onToggleRooms(): void;
@@ -35,6 +37,7 @@ export function StageBar({
   presence,
   connected,
   pendingTasks,
+  docked,
   roomsOpen,
   drawerOpen,
   onToggleRooms,
@@ -48,21 +51,27 @@ export function StageBar({
   const mac = /Mac|iPhone|iPad/.test(navigator.platform);
   return (
     <header className="sa-stage">
-      <button
-        type="button"
-        className="sa-stage-room"
-        aria-expanded={roomsOpen}
-        title="换房间、新建房间"
-        onClick={onToggleRooms}
-      >
-        <span className="sa-brand-mark" aria-hidden="true" />
-        <span className="sa-brand">苦乐</span>
-        <span className="sa-stage-sep" aria-hidden="true">
-          /
-        </span>
-        <h1 className="sa-room-title">{room?.name ?? "还没有房间"}</h1>
-        <span className="sa-stage-caret" aria-hidden="true" />
-      </button>
+      {docked ? (
+        <div className="sa-stage-room" data-docked="true">
+          <h1 className="sa-room-title">{room?.name ?? "还没有房间"}</h1>
+        </div>
+      ) : (
+        <button
+          type="button"
+          className="sa-stage-room"
+          aria-expanded={roomsOpen}
+          title="换房间、新建房间"
+          onClick={onToggleRooms}
+        >
+          <span className="sa-brand-mark" aria-hidden="true" />
+          <span className="sa-brand">苦乐</span>
+          <span className="sa-stage-sep" aria-hidden="true">
+            /
+          </span>
+          <h1 className="sa-room-title">{room?.name ?? "还没有房间"}</h1>
+          <span className="sa-stage-caret" aria-hidden="true" />
+        </button>
+      )}
 
       <ul className="sa-presence" aria-label={`现场：${presenceSummary(presence)}`}>
         {presence.map((row) => {

@@ -16,16 +16,22 @@ describe("layout", () => {
   });
 
   it("记下来的摆法能读回来", () => {
-    const stored = JSON.stringify({ panelOpen: true, panelWidth: 400 });
-    expect(parseLayout(stored)).toEqual({ panelOpen: true, panelWidth: 400 });
+    const stored = JSON.stringify({ panelOpen: true, panelWidth: 400, sidebarCollapsed: true });
+    expect(parseLayout(stored)).toEqual({ panelOpen: true, panelWidth: 400, sidebarCollapsed: true });
+    // 旧版本存的没有左栏这一项：左栏展开着。
+    expect(parseLayout('{"panelOpen":true,"panelWidth":400}')).toEqual({
+      panelOpen: true,
+      panelWidth: 400,
+      sidebarCollapsed: false,
+    });
   });
 
   it("读到看不懂的东西时用默认的", () => {
-    const fallback = { panelOpen: false, panelWidth: PANEL_DEFAULT };
+    const fallback = { panelOpen: false, panelWidth: PANEL_DEFAULT, sidebarCollapsed: false };
     for (const stored of [null, "", "不是 JSON", "null", "[1]", '"x"']) {
       expect(parseLayout(stored)).toEqual(fallback);
     }
     expect(parseLayout('{"panelOpen":"yes","panelWidth":"宽"}')).toEqual(fallback);
-    expect(parseLayout('{"panelWidth":5000}')).toEqual({ panelOpen: false, panelWidth: PANEL_MAX });
+    expect(parseLayout('{"panelWidth":5000}')).toEqual({ panelOpen: false, panelWidth: PANEL_MAX, sidebarCollapsed: false });
   });
 });

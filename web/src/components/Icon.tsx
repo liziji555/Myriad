@@ -18,7 +18,15 @@ export type IconName =
   | "web"
   | "bot"
   | "plug"
-  | "tool";
+  | "tool"
+  | "sidebar"
+  | "clock"
+  | "users"
+  | "link"
+  | "chart"
+  | "shield"
+  | "file"
+  | "graph";
 
 /** 16×16 的线条图标，颜色跟着文字走。 */
 const PATHS: Record<IconName, ReactNode> = {
@@ -105,6 +113,51 @@ const PATHS: Record<IconName, ReactNode> = {
     <>
       <circle cx="8" cy="8" r="1.75" />
       <path d="M8 2.25v2M8 11.75v2M2.25 8h2M11.75 8h2" />
+    </>
+  ),
+  sidebar: (
+    <>
+      <rect x="2" y="3" width="12" height="10" rx="2.5" />
+      <path d="M6 3v10" />
+    </>
+  ),
+  clock: (
+    <>
+      <circle cx="8" cy="8" r="5.75" />
+      <path d="M8 4.75V8l2.25 1.5" />
+    </>
+  ),
+  users: (
+    <>
+      <circle cx="6" cy="5.75" r="2.25" />
+      <path d="M2.25 13c.4-2.2 1.9-3.5 3.75-3.5S9.35 10.8 9.75 13" />
+      <path d="M10.5 3.75a2.25 2.25 0 0 1 0 4M11.25 9.6c1.3.4 2.2 1.6 2.5 3.4" />
+    </>
+  ),
+  link: (
+    <>
+      <path d="M7 9a2.75 2.75 0 0 0 3.9.1l2-2a2.75 2.75 0 0 0-3.9-3.9l-.7.7" />
+      <path d="M9 7a2.75 2.75 0 0 0-3.9-.1l-2 2a2.75 2.75 0 0 0 3.9 3.9l.7-.7" />
+    </>
+  ),
+  chart: <path d="M2.5 13.5h11M4.5 11V8M8 11V4.5M11.5 11V6.5" />,
+  shield: (
+    <>
+      <path d="M8 2 13 3.75v3.9c0 3-2.1 5.2-5 6.35-2.9-1.15-5-3.35-5-6.35v-3.9L8 2Z" />
+      <path d="m5.75 8 1.5 1.5 3-3" />
+    </>
+  ),
+  file: (
+    <>
+      <path d="M2.5 4.5a1.5 1.5 0 0 1 1.5-1.5h2.5l1.5 1.5h4a1.5 1.5 0 0 1 1.5 1.5v5.5a1.5 1.5 0 0 1-1.5 1.5H4a1.5 1.5 0 0 1-1.5-1.5v-7Z" />
+    </>
+  ),
+  graph: (
+    <>
+      <circle cx="4" cy="4" r="1.5" />
+      <circle cx="12" cy="8" r="1.5" />
+      <circle cx="4" cy="12" r="1.5" />
+      <path d="M5.4 4.6 10.6 7.4M5.4 11.4l5.2-2.8" />
     </>
   ),
 };

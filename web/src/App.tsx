@@ -12,10 +12,25 @@ import { Composer } from "./components/Composer";
 import { ContextPanel, type ActivityNode, type PanelTab } from "./components/ContextPanel";
 import { Notices } from "./components/Notices";
 import { applyTheme, loadTheme, nextTheme } from "./api/theme";
-import { Sidebar } from "./components/Sidebar";
+import { Sidebar, type RoomState } from "./components/Sidebar";
 import { StageBar } from "./components/StageBar";
 import { Timeline } from "./components/Timeline";
 import { LightProvider, useLight } from "./light/LightProvider";
+
+/** 窗口够宽时左栏常驻（可以收成窄条），窄了变成从左上角呼出的抽屉。 */
+const DOCKED = "(min-width: 1101px)";
+
+function useMedia(query: string): boolean {
+  const [matches, setMatches] = useState(() => window.matchMedia(query).matches);
+  useEffect(() => {
+    const media = window.matchMedia(query);
+    const onChange = () => setMatches(media.matches);
+    onChange();
+    media.addEventListener("change", onChange);
+    return () => media.removeEventListener("change", onChange);
+  }, [query]);
+  return matches;
+}
 
 export function App() {
   return (
@@ -31,9 +46,11 @@ function Shell() {
   const [selected, setSelected] = useState<RoomId | null>(null);
   const [tab, setTab] = useState<PanelTab>("tasks");
   const [roomsOpen, setRoomsOpen] = useState(false);
+  const docked = useMedia(DOCKED);
   const [prefill, setPrefill] = useState<string | null>(null);
   const [layout, setLayout] = useState(loadLayout);
   const panelOpen = layout.panelOpen;
+  const collapsed = layout.sidebarCollapsed;
   const changeLayout = (patch: Partial<Layout>) =>
     setLayout((current) => {
       const next = { ...current, ...patch };
@@ -49,9 +66,10 @@ function Shell() {
   const [theme, setTheme] = useState(loadTheme);
   const [createSignal, setCreateSignal] = useState(0);
   // 房间列表收起后把「新建房间」的信号清掉，不然下次打开列表又弹出填名字的框。
+  const listShown = docked ? !collapsed : roomsOpen;
   useEffect(() => {
-    if (!roomsOpen) setCreateSignal(0);
-  }, [roomsOpen]);
+    if (!listShown) setCreateSignal(0);
+  }, [listShown]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -115,6 +133,7 @@ function Shell() {
   const members = room
     ? room.member_bot_ids.flatMap((id) => workspace.bots.filter((bot) => bot.id === id))
     : [];
+  const speaking = workspace.bots.find((bot) => bot.id === roomChat?.activity?.speaking)?.name;
   const queued = (roomChat?.activity?.queued ?? []).flatMap(
     (id) => workspace.bots.find((bot) => bot.id === id)?.name ?? [],
   );
@@ -123,6 +142,31 @@ function Shell() {
     setTab(next);
     setPanelOpen(true);
   };
+  // 左栏里点的面板页：已经开着的再点一下是收起。抽屉里点了就把抽屉收起来，让出地方。
+  const toggleTab = (next: PanelTab) => {
+    if (panelOpen && tab === next) setPanelOpen(false);
+    else showPanel(next);
+    if (!docked) setRoomsOpen(false);
+  };
+  // 左上角那个按钮：宽窗口里收起、展开常驻的左栏，窄窗口里开关抽屉。
+  const toggleRooms = () => {
+    if (docked) changeLayout({ sidebarCollapsed: !collapsed });
+    else {
+      // 窄窗口里抽屉和面板都盖在主线上，同一时间只开一个。
+      if (!roomsOpen) setPanelOpen(false);
+      setRoomsOpen(!roomsOpen);
+    }
+  };
+  const roomsShown = docked ? !collapsed : roomsOpen || !room;
+  // 每个打开过的房间此刻的样子：有步骤等批准是「等你」，有 Bot 在说、在排队、在挑人是「在忙」。
+  const roomStates: Record<RoomId, RoomState> = {};
+  for (const [id, chat] of Object.entries(workspace.chat.rooms)) {
+    if (!chat) continue;
+    const live = chat.messages.filter((message) => message.state === "streaming");
+    if (live.some((message) => message.steps.some((step) => step.state === "waiting"))) roomStates[id] = "warn";
+    else if (live.length > 0 || chat.activity?.speaking || chat.activity?.routing || chat.activity?.queued.length)
+      roomStates[id] = "busy";
+  }
   const roomTasks = room ? (workspace.board.rooms[room.id] ?? []) : [];
   const presence = presenceOf(members, roomChat, roomTasks);
   const pendingTasks = roomTasks.filter((task) => ["review", "waiting", "blocked"].includes(task.state)).length;
@@ -212,7 +256,8 @@ function Shell() {
       title: "新建房间",
       run: () => {
         // 填名字的地方在房间列表里：先把它打开。
-        setRoomsOpen(true);
+        if (docked) changeLayout({ sidebarCollapsed: false });
+        else setRoomsOpen(true);
         setCreateSignal((n) => n + 1);
       },
     },
@@ -229,8 +274,8 @@ function Shell() {
           {
             id: "action:toggle-sidebar",
             group: "action" as const,
-            title: roomsOpen ? "收起房间列表" : "打开房间列表",
-            run: () => setRoomsOpen((open) => !open),
+            title: roomsShown ? "收起左栏" : "打开左栏",
+            run: toggleRooms,
           },
           {
             id: "action:toggle-panel",
@@ -267,8 +312,9 @@ function Shell() {
     <div
       className="sa-shell"
       data-panel-open={panelOpen}
-      // 没有房间时房间列表总是开着：新建房间的入口在那里。
-      data-rooms={roomsOpen || !room ? "open" : "closed"}
+      // 宽窗口：左栏常驻（docked）或收成窄条（rail）；窄窗口：抽屉开着（open）或收着（closed）。
+      // 没有房间时抽屉总是开着：新建房间的入口在那里。
+      data-rooms={docked ? (collapsed ? "rail" : "docked") : roomsShown ? "open" : "closed"}
       style={{ "--sa-panel-width": `${layout.panelWidth}px` } as CSSProperties}
     >
       {paletteOpen && <CommandPalette entries={paletteEntries} onClose={() => setPaletteOpen(false)} />}
@@ -277,10 +323,14 @@ function Shell() {
         presence={presence}
         connected={workspace.connected}
         pendingTasks={pendingTasks}
-        roomsOpen={roomsOpen || !room}
+        docked={docked}
+        roomsOpen={roomsShown}
         drawerOpen={panelOpen}
-        onToggleRooms={() => setRoomsOpen((open) => !open)}
-        onToggleDrawer={() => setPanelOpen(!panelOpen)}
+        onToggleRooms={toggleRooms}
+        onToggleDrawer={() => {
+          if (!docked) setRoomsOpen(false);
+          setPanelOpen(!panelOpen);
+        }}
         onShowTasks={() => showPanel("tasks")}
         onOpenPalette={() => setPaletteOpen(true)}
         theme={theme}
@@ -291,15 +341,26 @@ function Shell() {
         }}
         onPick={jumpTo}
       />
-      {(roomsOpen || !room) && (
+      {(docked || roomsShown) && (
         <>
-          {room && <div className="sa-scrim" onClick={() => setRoomsOpen(false)} />}
+          {!docked && room && <div className="sa-scrim" onClick={() => setRoomsOpen(false)} />}
           <Sidebar
             rooms={workspace.rooms}
             bots={workspace.bots}
             selectedRoomId={room?.id ?? null}
+            roomStates={roomStates}
+            presence={presence}
             connected={workspace.connected}
             version={version}
+            collapsed={collapsed}
+            docked={docked}
+            onToggleCollapsed={toggleRooms}
+            activeTab={panelOpen ? tab : null}
+            onShowPanel={toggleTab}
+            onPickBot={(row) => {
+              if (!docked) setRoomsOpen(false);
+              jumpTo(row);
+            }}
             onSelect={(id) => {
               setSelected(id);
               setRoomsOpen(false);
@@ -362,6 +423,7 @@ function Shell() {
               commands={slashCommands}
               disabledReason={room.host_bot_id ? null : "这个房间里还没有 Bot，发了也没人回应"}
               replying={replying}
+              steerTo={speaking ?? null}
               members={members.filter((bot) => bot.enabled)}
               onSend={(content) => workspace.sendMessage(room.id, content)}
               onStop={() => workspace.stopReply(room.id)}
