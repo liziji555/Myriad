@@ -12,7 +12,7 @@ import { repliesOf, type Reply } from "../api/replies";
 import { steersOf, type Steer } from "../api/steer";
 import { isLatestDelivery, type TaskBoard } from "../api/tasks";
 import type { TaskActions } from "../api/useWorkspace";
-import type { ApprovalDecision, ApprovalId, Bot, Message, Task, TaskId, ToolStep } from "../api/types";
+import type { ApprovalDecision, ApprovalId, Bot, Discussion, Message, Task, TaskId, ToolStep } from "../api/types";
 import { Artifacts, StateBadge, TaskActionBar, deliveryHeading } from "./TaskCards";
 import { BotAvatar } from "./BotAvatar";
 import { HandoffLinks } from "./HandoffLinks";
@@ -41,6 +41,8 @@ interface Props {
   onLightDemo(source: HTMLElement): void;
   /** 空房间里点了一句示例：把它填进输入框，由人自己决定发不发。 */
   onExample(text: string): void;
+  /** 房间没点名的话怎么接，决定排着的交接会不会被人的新话换掉。 */
+  discussion: Discussion;
 }
 
 /** 离底部这么近就算「在看最新的」，新内容来了自动跟着滚。 */
@@ -67,6 +69,7 @@ export function Timeline({
   onDecide,
   onLightDemo,
   onExample,
+  discussion,
 }: Props) {
   const scroller = useRef<HTMLElement>(null);
   const stick = useRef(true);
@@ -124,7 +127,7 @@ export function Timeline({
     [messages, triggers],
   );
 
-  const handoffs = useMemo(() => handoffsOf(messages), [messages]);
+  const handoffs = useMemo(() => handoffsOf(messages, discussion), [messages, discussion]);
 
   const loadOlder = async () => {
     setLoadingOlder(true);

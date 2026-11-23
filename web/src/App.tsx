@@ -416,6 +416,7 @@ function Shell() {
               onDecide={workspace.decideApproval}
               onLightDemo={runLightDemo}
               onExample={setPrefill}
+              discussion={room.discussion}
             />
             {roomChat?.activity?.routing ? (
               <p className="sa-room-status" role="status">

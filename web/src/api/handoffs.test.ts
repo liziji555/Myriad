@@ -66,6 +66,26 @@ describe("handoffsOf", () => {
     ).toEqual(["ask1>c1", "ask2>c1"]);
   });
 
+  it("对方自己找别人的那句不算它的回复", () => {
+    expect(
+      handoffsOf([
+        message({ id: "ask", seq: 1, sender: bot("a"), mentions: ["c"], hop: 1 }),
+        message({ id: "c-ask", seq: 2, sender: bot("c"), mentions: ["d"], hop: 1 }),
+        message({ id: "c1", seq: 3, sender: bot("c"), state: "streaming", hop: 1 }),
+      ]).map(({ id, live }) => [id, live]),
+    ).toEqual([["ask>c1", true]]);
+  });
+
+  it("不是普通方式时，人说了没点名的话，之前排着的交接不再连", () => {
+    const messages = [
+      message({ id: "ask", seq: 1, sender: bot("a"), mentions: ["c"], hop: 1 }),
+      message({ id: "u2", seq: 2 }),
+      message({ id: "c1", seq: 3, sender: bot("c") }),
+    ];
+    expect(handoffsOf(messages, "parallel")).toEqual([]);
+    expect(handoffsOf(messages).map(({ id }) => id)).toEqual(["ask>c1"]);
+  });
+
   it("对方没接这次交接，之后人点名它的回复不连到这句", () => {
     expect(
       handoffsOf([
