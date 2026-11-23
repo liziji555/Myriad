@@ -2235,3 +2235,58 @@ async fn the_watchdog_stops_bots_that_keep_saying_the_same_thing() {
     assert!(t.rig.orchestrator.watchdog_tick().await.is_empty());
     t.rig.orchestrator.shutdown().await;
 }
+
+#[tokio::test]
+async fn queued_words_wait_until_the_room_is_free_and_go_out_one_by_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let rig = start(
+        dir.path(),
+        vec![
+            MockReply::Hang(vec![StreamEvent::TextDelta("写到一半".into())]),
+            MockReply::text("回二"),
+            MockReply::text("回三"),
+        ],
+        true,
+    );
+    rig.say("一").await;
+    rig.until("回复开始出字", |m| m.content == "写到一半").await;
+    let queue = rig
+        .orchestrator
+        .queue_message(&rig.room, "二".into())
+        .await
+        .unwrap();
+    assert_eq!(queue.items.len(), 1);
+    rig.orchestrator
+        .queue_message(&rig.room, "三".into())
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(rig.messages().len(), 2, "Bot 还在说，排着的不发");
+    assert_eq!(rig.provider.requests().len(), 1);
+
+    // 停止只停正在说的，排着的照样一句一句发。
+    assert!(rig.orchestrator.stop(&rig.room));
+    let messages = rig.settled(6).await;
+    let said: Vec<_> = messages.iter().map(|m| m.content.as_str()).collect();
+    assert_eq!(said, ["一", "写到一半", "二", "回二", "三", "回三"]);
+    let second = &rig.provider.requests()[1];
+    assert_eq!(
+        second.messages.last().unwrap().content,
+        "二",
+        "回二时还没看到三"
+    );
+    assert!(rig.engine.list_queue(&rig.room).unwrap().items.is_empty());
+    rig.orchestrator.shutdown().await;
+}
+
+#[tokio::test]
+async fn words_still_queued_at_shutdown_go_out_after_a_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let rig = start(dir.path(), vec![MockReply::text("接着回")], true);
+    rig.engine.queue_input(&rig.room, "关之前排的").unwrap();
+    assert_eq!(rig.orchestrator.resume_rooms().unwrap(), 1);
+    let messages = rig.settled(2).await;
+    let said: Vec<_> = messages.iter().map(|m| m.content.as_str()).collect();
+    assert_eq!(said, ["关之前排的", "接着回"]);
+    rig.orchestrator.shutdown().await;
+}

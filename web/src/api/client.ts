@@ -1,4 +1,7 @@
 import type {
+  EditQueuedRequest,
+  QueuedId,
+  RoomQueue,
   ApiError,
   ApprovalDecision,
   ApprovalId,
@@ -108,6 +111,16 @@ export const api = {
     ),
   postMessage: (roomId: RoomId, content: string) =>
     postJson<Message>(`/api/rooms/${encodeURIComponent(roomId)}/messages`, { content }),
+  listQueue: (roomId: RoomId) =>
+    request<RoomQueue>(`/api/rooms/${encodeURIComponent(roomId)}/queue`),
+  /** 排到待发队列最后：房间里的 Bot 都说完了再按顺序发出去。 */
+  queueMessage: (roomId: RoomId, content: string) =>
+    postJson<RoomQueue>(`/api/rooms/${encodeURIComponent(roomId)}/queue`, { content }),
+  /** 改字或挪一位。已经发出去的会失败。 */
+  editQueued: (id: QueuedId, body: EditQueuedRequest) =>
+    postJson<RoomQueue>(`/api/queue/${encodeURIComponent(id)}`, body, "PATCH"),
+  cancelQueued: (id: QueuedId) =>
+    request<RoomQueue>(`/api/queue/${encodeURIComponent(id)}`, { method: "DELETE" }),
   stopReply: (roomId: RoomId) =>
     postJson<StopResponse>(`/api/rooms/${encodeURIComponent(roomId)}/stop`, {}),
   /** 只停房间里的一个 Bot：它正在说的这一轮和排着的队，别的 Bot 照常。 */

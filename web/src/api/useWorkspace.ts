@@ -6,6 +6,7 @@ import {
   resetChat,
   removeMessage,
   setActivity,
+  setQueue,
   upsertMessage,
   watchRoom,
   type ChatState,
@@ -39,6 +40,9 @@ import type {
   NoticeId,
   Room,
   RoomActivity,
+  RoomQueue,
+  QueuedId,
+  EditQueuedRequest,
   RoomId,
   Routine,
   RoutineId,
@@ -116,6 +120,11 @@ export interface WorkspaceView extends Workspace {
   stopReply(roomId: RoomId): Promise<void>;
   /** 只停房间里的一个 Bot。 */
   stopBot(roomId: RoomId, botId: BotId): Promise<void>;
+  /** Bot 忙的时候说的话排进待发队列，房间里的 Bot 都说完了按顺序发。 */
+  queueMessage(roomId: RoomId, content: string): Promise<void>;
+  /** 改排着的一句（改字、挪一位）。已经发出去的会失败。 */
+  editQueued(id: QueuedId, edit: EditQueuedRequest): Promise<void>;
+  cancelQueued(id: QueuedId): Promise<void>;
   decideApproval(id: ApprovalId, decision: ApprovalDecision): Promise<void>;
   /** 收起一条提醒。 */
   dismissNotice(id: NoticeId): Promise<void>;
@@ -132,6 +141,8 @@ function applyChatEvent(chat: ChatState, event: Event): ChatState {
       return removeMessage(chat, event.payload as MessageRef);
     case "room.activity":
       return setActivity(chat, event.payload as RoomActivity);
+    case "queue.updated":
+      return setQueue(chat, event.payload as RoomQueue);
     default:
       return chat;
   }
@@ -297,8 +308,12 @@ export function useWorkspace(): WorkspaceView {
     // 先关注再拉：拉取期间事件流送来的消息会留下来，和拉到的那一页合并。
     setChat((current) => watchRoom(current, roomId));
     setBoard((current) => watchTasks(current, roomId));
-    const [page, tasks] = await Promise.all([api.listMessages(roomId), api.listTasks(roomId)]);
-    setChat((current) => mergePage(current, roomId, page, false));
+    const [page, tasks, queue] = await Promise.all([
+      api.listMessages(roomId),
+      api.listTasks(roomId),
+      api.listQueue(roomId),
+    ]);
+    setChat((current) => setQueue(mergePage(current, roomId, page, false), queue));
     setBoard((current) => mergeTasks(current, roomId, tasks));
   }, []);
 
@@ -373,6 +388,22 @@ export function useWorkspace(): WorkspaceView {
     setChat((current) => upsertMessage(current, message));
   }, []);
 
+  // 接口返回的就是最新的整个队列，直接放进去，不用等事件流。
+  const queueMessage = useCallback(async (roomId: RoomId, content: string) => {
+    const queue = await api.queueMessage(roomId, content);
+    setChat((current) => setQueue(current, queue));
+  }, []);
+
+  const editQueued = useCallback(async (id: QueuedId, edit: EditQueuedRequest) => {
+    const queue = await api.editQueued(id, edit);
+    setChat((current) => setQueue(current, queue));
+  }, []);
+
+  const cancelQueued = useCallback(async (id: QueuedId) => {
+    const queue = await api.cancelQueued(id);
+    setChat((current) => setQueue(current, queue));
+  }, []);
+
   const stopReply = useCallback(async (roomId: RoomId) => {
     await api.stopReply(roomId);
   }, []);
@@ -414,6 +445,9 @@ export function useWorkspace(): WorkspaceView {
     openRoom,
     loadOlder,
     sendMessage,
+    queueMessage,
+    editQueued,
+    cancelQueued,
     stopReply,
     stopBot,
     decideApproval,

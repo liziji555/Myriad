@@ -8,11 +8,12 @@ use axum::Json;
 use sa_engine::{AuditFilter, BotPatch, Engine, EngineError, RoutinePatch};
 use sa_protocol::{
     ApprovalId, AuditPage, Bot, BotId, CreateBotRequest, CreateLinkRequest, CreateRoomRequest,
-    CreateRoutineRequest, CreateTaskRequest, DecideApprovalRequest, Extensions, Health,
-    ImportReport, ImportTemplateRequest, Link, LinkId, Message, MessagePage, ModelTier, Notice,
-    NoticeId, Pairing, PermissionRule, PostMessageRequest, Room, RoomId, Routine, RoutineId,
-    RuleId, StopResponse, Task, TaskActionRequest, TaskDetail, TaskId, TeamTemplate, TemplateFile,
-    UpdateBotRequest, UpdateRoomRequest, UpdateRoutineRequest, UsageSummary,
+    CreateRoutineRequest, CreateTaskRequest, DecideApprovalRequest, EditQueuedRequest, Extensions,
+    Health, ImportReport, ImportTemplateRequest, Link, LinkId, Message, MessagePage, ModelTier,
+    Notice, NoticeId, Pairing, PermissionRule, PostMessageRequest, QueuedId, Room, RoomId,
+    RoomQueue, Routine, RoutineId, RuleId, StopResponse, Task, TaskActionRequest, TaskDetail,
+    TaskId, TeamTemplate, TemplateFile, UpdateBotRequest, UpdateRoomRequest, UpdateRoutineRequest,
+    UsageSummary,
 };
 use serde::Deserialize;
 
@@ -87,6 +88,49 @@ pub async fn post_message(
         .post_message(&room_id, body.content)
         .await?;
     Ok((StatusCode::CREATED, Json(message)))
+}
+
+/// 房间的待发队列，排在前面的先发。
+pub async fn list_queue(
+    State(state): State<AppState>,
+    Path(room_id): Path<RoomId>,
+) -> Result<Json<RoomQueue>, AppError> {
+    let queue = blocking(&state, move |engine| engine.list_queue(&room_id)).await?;
+    Ok(Json(queue))
+}
+
+/// Bot 忙的时候说的话排到队尾，房间闲下来按顺序发出去。
+pub async fn queue_message(
+    State(state): State<AppState>,
+    Path(room_id): Path<RoomId>,
+    body: Result<Json<PostMessageRequest>, JsonRejection>,
+) -> Result<(StatusCode, Json<RoomQueue>), AppError> {
+    let Json(body) = body.map_err(|e| AppError::bad_request(e.body_text()))?;
+    let queue = state
+        .orchestrator
+        .queue_message(&room_id, body.content)
+        .await?;
+    Ok((StatusCode::CREATED, Json(queue)))
+}
+
+/// 改排着的一句：改字、往前或往后挪一位。已经发出去的是 404。
+pub async fn edit_queued(
+    State(state): State<AppState>,
+    Path(queued_id): Path<QueuedId>,
+    body: Result<Json<EditQueuedRequest>, JsonRejection>,
+) -> Result<Json<RoomQueue>, AppError> {
+    let Json(body) = body.map_err(|e| AppError::bad_request(e.body_text()))?;
+    let queue = blocking(&state, move |engine| engine.edit_queued(&queued_id, &body)).await?;
+    Ok(Json(queue))
+}
+
+/// 取消排着的一句。已经发出去的是 404。
+pub async fn cancel_queued(
+    State(state): State<AppState>,
+    Path(queued_id): Path<QueuedId>,
+) -> Result<Json<RoomQueue>, AppError> {
+    let queue = blocking(&state, move |engine| engine.cancel_queued(&queued_id)).await?;
+    Ok(Json(queue))
 }
 
 /// 停下房间里正在写的回复。没有东西在写时也算成功，`stopped` 为 `false`。

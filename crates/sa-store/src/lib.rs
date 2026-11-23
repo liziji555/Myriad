@@ -13,6 +13,7 @@ pub mod events;
 pub mod external;
 pub mod messages;
 pub mod notices;
+pub mod queue;
 pub mod rooms;
 pub mod routines;
 pub mod rules;

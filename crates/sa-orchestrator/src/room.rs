@@ -170,6 +170,15 @@ pub(crate) async fn run(shared: Arc<Shared>, room_id: RoomId, link: Arc<RoomLink
         announce(&shared, &room_id, &link).await;
         let idle = lanes.is_empty() && link.episode().queued().is_empty();
         link.active.store(!idle, Ordering::SeqCst);
+        if idle && !shared.shutdown.is_cancelled() {
+            // 都说完了：待发队列里排在最前面的一句现在发出去，下一圈像人刚说的话一样处理。
+            let (engine, id) = (shared.engine.clone(), room_id.clone());
+            match db(move || engine.dispatch_queued(&id)).await {
+                Ok(Some(_)) => link.wake.notify_one(),
+                Ok(None) => {}
+                Err(error) => tracing::warn!(room = %room_id, "排着的话没发出去：{error}"),
+            }
+        }
     }
 }
 

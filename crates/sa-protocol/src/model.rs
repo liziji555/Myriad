@@ -1,6 +1,6 @@
 use crate::{
-    ApprovalId, ArtifactId, BotId, LinkId, MessageId, Millis, NoticeId, RoomId, RoutineId, RuleId,
-    RunId, TaskId,
+    ApprovalId, ArtifactId, BotId, LinkId, MessageId, Millis, NoticeId, QueuedId, RoomId,
+    RoutineId, RuleId, RunId, TaskId,
 };
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -190,6 +190,27 @@ pub struct PermissionRule {
     pub pattern: String,
     #[ts(type = "number")]
     pub created_at: Millis,
+}
+
+/// 待发队列里的一句话：Bot 忙的时候人说的，房间闲下来按顺序发出去。发出去之后就不在队列里了。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct QueuedInput {
+    pub id: QueuedId,
+    pub room_id: RoomId,
+    pub content: String,
+    #[ts(type = "number")]
+    pub created_at: Millis,
+    #[ts(type = "number")]
+    pub updated_at: Millis,
+}
+
+/// 一个房间的待发队列，排在前面的先发。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct RoomQueue {
+    pub room_id: RoomId,
+    pub items: Vec<QueuedInput>,
 }
 
 /// 一条消息在时间线上是什么。

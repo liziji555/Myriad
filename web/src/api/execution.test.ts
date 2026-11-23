@@ -47,6 +47,7 @@ const chat = (messages: Message[]): RoomChat => ({
   messages,
   hasMore: false,
   loaded: true,
+  queue: [],
   activity: { room_id: ROOM, speaking: null, speakers: [], queued: [], routing: false, handled_seq: 0 },
 });
 const cards = (members: Bot[], room: RoomChat, tasks: Task[] = []) =>

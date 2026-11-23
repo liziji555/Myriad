@@ -8,6 +8,7 @@ mod budget;
 pub mod cron;
 mod external;
 mod messages;
+mod queue;
 mod routines;
 mod rules;
 mod tasks;

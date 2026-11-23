@@ -46,6 +46,7 @@ const chat = (messages: Message[], queued: string[] = []): RoomChat => ({
   messages,
   hasMore: false,
   loaded: true,
+  queue: [],
   activity: { room_id: ROOM, speaking: null, speakers: [], queued, routing: false, handled_seq: 0 },
 });
 

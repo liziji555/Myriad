@@ -438,7 +438,11 @@ function Shell() {
               replying={replying}
               steerTo={speaking.length > 0 ? speaking.join("、") : null}
               members={members.filter((bot) => bot.enabled)}
+              queue={roomChat?.queue ?? []}
               onSend={(content) => workspace.sendMessage(room.id, content)}
+              onQueue={(content) => workspace.queueMessage(room.id, content)}
+              onEditQueued={workspace.editQueued}
+              onCancelQueued={workspace.cancelQueued}
               onStop={() => workspace.stopReply(room.id)}
             />
           </>

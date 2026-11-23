@@ -3,4 +3,4 @@
 /**
  * 事件种类。数据库和 SSE 里都用点分字符串（如 `room.created`）。
  */
-export type EventKind = "room.created" | "bot.created" | "bot.updated" | "bot.deleted" | "room.updated" | "room.activity" | "message.deleted" | "message.created" | "message.updated" | "task.created" | "task.updated" | "run.updated" | "notice.created" | "notice.updated" | "routine.created" | "routine.updated" | "routine.deleted" | "link.created" | "link.deleted";
+export type EventKind = "room.created" | "bot.created" | "bot.updated" | "bot.deleted" | "room.updated" | "room.activity" | "message.deleted" | "message.created" | "message.updated" | "task.created" | "task.updated" | "run.updated" | "notice.created" | "notice.updated" | "routine.created" | "routine.updated" | "routine.deleted" | "link.created" | "link.deleted" | "queue.updated";

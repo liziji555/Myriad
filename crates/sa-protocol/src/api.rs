@@ -29,6 +29,19 @@ pub struct PostMessageRequest {
     pub content: String,
 }
 
+/// 改待发队列里的一句：改字、往前或往后挪一位。都不给就什么也不变。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct EditQueuedRequest {
+    #[serde(default)]
+    #[ts(optional)]
+    pub content: Option<String>,
+    /// `-1` 往前挪一位，`1` 往后挪一位。
+    #[serde(default)]
+    #[ts(optional)]
+    pub offset: Option<i32>,
+}
+
 /// 一页消息，按 `seq` 升序。`has_more` 表示更早的还有。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]

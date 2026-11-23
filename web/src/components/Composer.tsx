@@ -1,9 +1,10 @@
 import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
 import { loadDraft, saveDraft, withExample } from "../api/drafts";
 import { groupCommands, matchCommands, slashQuery, type SlashCommand } from "../api/slash";
-import type { Bot } from "../api/types";
+import type { Bot, EditQueuedRequest, QueuedId, QueuedInput } from "../api/types";
 import { BotAvatar } from "./BotAvatar";
 import { Icon } from "./Icon";
+import { QueueList } from "./QueueList";
 
 /** 输入框最高长到这么高，再多就在里面滚。 */
 const MAX_INPUT_PX = 220;
@@ -24,7 +25,12 @@ interface Props {
   steerTo: string | null;
   /** 房间里可以点名的 Bot。输入 `@` 时列出来。 */
   members: readonly Bot[];
+  /** 待发队列。Bot 在说话或者队列里还有话时，回车是排队；「插话」按钮才是马上发。 */
+  queue: readonly QueuedInput[];
   onSend(content: string): Promise<void>;
+  onQueue(content: string): Promise<void>;
+  onEditQueued(id: QueuedId, edit: EditQueuedRequest): Promise<void>;
+  onCancelQueued(id: QueuedId): Promise<void>;
   onStop(): Promise<void>;
 }
 
@@ -46,7 +52,11 @@ export function Composer({
   replying,
   steerTo,
   members,
+  queue,
   onSend,
+  onQueue,
+  onEditQueued,
+  onCancelQueued,
   onStop,
 }: Props) {
   const input = useRef<HTMLTextAreaElement>(null);
@@ -73,12 +83,16 @@ export function Composer({
     }
   };
 
-  const send = async () => {
+  // 有 Bot 在说、或者前面还有排着的：新说的话排到最后，不插到前面去。
+  const queueing = replying || queue.length > 0;
+
+  /** `now` 为真是插话：马上发，正在说的 Bot 下一次想之前就会看到。 */
+  const send = async (now = false) => {
     if (!canSend) return;
     setSending(true);
     // 发出去之后才清空：失败的话写好的内容还在。
     await run(
-      () => onSend(text),
+      () => (queueing && !now ? onQueue(text) : onSend(text)),
       () => setText(""),
     );
     setSending(false);
@@ -244,6 +258,11 @@ export function Composer({
             {slash === null ? "没有匹配的 Bot" : "没有匹配的命令"}，按 Esc 关掉
           </p>
         )}
+        <QueueList
+          items={queue}
+          onEdit={(id, edit) => run(() => onEditQueued(id, edit))}
+          onCancel={(id) => run(() => onCancelQueued(id))}
+        />
         <div className="sa-composer-box" data-disabled={disabledReason !== null}>
           <textarea
             ref={input}
@@ -254,8 +273,10 @@ export function Composer({
             placeholder={
               disabledReason ??
               (steerTo
-                ? `插话：${steerTo}不会停下，下一次想之前会看到（@谁就只给谁）`
-                : "说点什么，或者交代一件事…")
+                ? `回车排队，等${steerTo}说完再发；点「插话」现在就给它们看`
+                : queueing
+                  ? "回车排到最后，前面的发完再发"
+                  : "说点什么，或者交代一件事…")
             }
             onChange={(event) => {
               setText(event.target.value);
@@ -279,12 +300,23 @@ export function Composer({
                   停止
                 </button>
               )}
+              {replying && (
+                <button
+                  type="button"
+                  className="sa-steer"
+                  disabled={!canSend}
+                  title="现在就发：正在说的 Bot 不会停下，下一次想之前会看到（@谁就只给谁）"
+                  onClick={() => void send(true)}
+                >
+                  插话
+                </button>
+              )}
               <button
                 type="button"
                 className="sa-send"
                 disabled={!canSend}
-                aria-label={sending ? "发送中…" : "发送"}
-                title={sending ? "发送中…" : "发送（回车）"}
+                aria-label={sending ? "发送中…" : queueing ? "排队" : "发送"}
+                title={sending ? "发送中…" : queueing ? "排到待发队列（回车）" : "发送（回车）"}
                 data-sending={sending}
                 onClick={() => void send()}
               >
