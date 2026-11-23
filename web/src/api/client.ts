@@ -14,6 +14,7 @@ import type {
   CreateRoutineRequest,
   Extensions,
   CreateTaskRequest,
+  HarnessDesk,
   Health,
   ImportReport,
   ImportTemplateRequest,
@@ -99,6 +100,13 @@ export const api = {
     request<Room>(memberPath(roomId, botId), { method: "PUT" }),
   removeMember: (roomId: RoomId, botId: BotId) =>
     request<Room>(memberPath(roomId, botId), { method: "DELETE" }),
+  listDesks: (roomId: RoomId) =>
+    request<HarnessDesk[]>(`/api/rooms/${encodeURIComponent(roomId)}/desks`),
+  closeDesk: (roomId: RoomId, botId: BotId, how: "accept" | "discard") =>
+    request<HarnessDesk[]>(
+      `/api/rooms/${encodeURIComponent(roomId)}/desks/${encodeURIComponent(botId)}/${how}`,
+      { method: "POST" },
+    ),
   createBot: (body: CreateBotRequest) => postJson<Bot>("/api/bots", body),
   updateBot: (botId: BotId, body: UpdateBotRequest) =>
     postJson<Bot>(`/api/bots/${encodeURIComponent(botId)}`, body, "PATCH"),
