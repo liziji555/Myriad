@@ -47,7 +47,8 @@
   --sa-hover: color-mix(in srgb, var(--sa-fg) 6%, transparent);
   --sa-active: color-mix(in srgb, var(--sa-fg) 10%, transparent);
 
-  --sa-sidebar-width: 264px;
+  --sa-sidebar-width: 248px;
+  --sa-rail-width: 56px;
   --sa-panel-width: 360px;
   /* 主线和输入框一样宽，左边对齐。 */
   --sa-line-width: 820px;

@@ -6,6 +6,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { RoomChat } from "../api/chat";
 import { safeUrl, sourceName, splitEvent } from "../api/links";
 import { shownTriggers, triggerTitle } from "../api/routines";
+import { steersOf, type Steer } from "../api/steer";
 import { isLatestDelivery, type TaskBoard } from "../api/tasks";
 import type { TaskActions } from "../api/useWorkspace";
 import type { ApprovalDecision, ApprovalId, Bot, Message, Task, TaskId, ToolStep } from "../api/types";
@@ -108,6 +109,7 @@ export function Timeline({
   }, [last?.id, last?.sender.kind, last?.kind]);
 
   const triggers = useMemo(() => shownTriggers(messages), [messages]);
+  const steers = useMemo(() => steersOf(messages), [messages]);
   // 开任务、做的过程、交结果挨在一起时连成一串，看得出哪个是哪个引出来的。
   const chain = useMemo(
     () => chainParts(messages.filter((message) => message.kind !== "routine" || triggers.has(message.id))),
@@ -209,6 +211,7 @@ export function Timeline({
               bots={bots}
               onDecide={onDecide}
               chain={chain.get(message.id)}
+              steer={steers.get(message.id)}
               work={
                 message.kind === "run"
                   ? {
@@ -363,6 +366,7 @@ function TaskMessage({
       className="sa-msg"
       data-message-id={message.id}
       data-sender={sender.kind}
+      data-mine={sender.kind === "user" && !origin}
       data-kind={message.kind}
       data-chain={chain}
     >
@@ -408,17 +412,24 @@ function MessageItem({
   onDecide,
   work,
   chain,
+  steer,
 }: {
   message: Message;
   bots: readonly Bot[];
   onDecide: Decide;
   work?: Work;
   chain?: ChainPart;
+  /** 这句话是在 Bot 回复的中途插进去的。 */
+  steer?: Steer;
 }) {
   const [stopping, setStopping] = useState(false);
   const { sender, state } = message;
+  const origin = sender.kind === "user" ? message.origin : undefined;
   const name =
-    sender.kind === "user" ? "你" : (bots.find((bot) => bot.id === sender.bot_id)?.name ?? "Bot");
+    sender.kind === "user"
+      ? (origin?.label ?? "你")
+      : (bots.find((bot) => bot.id === sender.bot_id)?.name ?? "Bot");
+  const steeredBot = steer ? (bots.find((bot) => bot.id === steer.botId)?.name ?? "Bot") : "";
   const waiting = state === "streaming" && message.content === "" && message.steps.length === 0;
   // 这条消息里有一步在等人批准：它不是在写，是在等你。
   const asking = message.steps.some((step) => step.state === "waiting");
@@ -428,6 +439,8 @@ function MessageItem({
       className="sa-msg"
       data-message-id={message.id}
       data-sender={sender.kind}
+      // 自己在界面里发的话靠右；Bot 和从 Telegram 进来的别人的话靠左。
+      data-mine={sender.kind === "user" && !origin}
       data-state={state}
       data-kind={message.kind}
       data-chain={chain}
@@ -435,6 +448,16 @@ function MessageItem({
       <Node message={message} bots={bots} name={name} asking={asking} />
       <div className="sa-msg-head">
         <span className="sa-msg-name">{name}</span>
+        {origin && <span className="sa-tag">{sourceName(origin.source)}</span>}
+        {steer && (
+          <span
+            className="sa-steer"
+            data-live={steer.live}
+            title={`在${steeredBot}回复的中途说的：它没有停下，下一次想之前会看到`}
+          >
+            插话
+          </span>
+        )}
         {state === "streaming" &&
           (asking ? (
             <span className="sa-live" data-tone="warn">
@@ -493,6 +516,11 @@ function MessageItem({
             <i />
           </span>
           {work ? "正在开工…" : "正在回复…"}
+        </p>
+      )}
+      {steer?.live && (
+        <p className="sa-msg-note sa-steer-note" role="status">
+          {steeredBot}没有停下，下一次想之前会看到这句话
         </p>
       )}
       {state === "cancelled" && <p className="sa-msg-note">已停止</p>}
