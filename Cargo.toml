@@ -6,7 +6,7 @@ members = ["crates/*"]
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/liziji555/superagent"
+repository = "https://github.com/liziji555/myriad"
 
 [workspace.dependencies]
 sa-protocol = { path = "crates/sa-protocol" }

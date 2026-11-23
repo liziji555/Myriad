@@ -1,6 +1,6 @@
 # Myriad
 
-> 原名 SuperAgent。命令行叫 `sa`，仓库、数据目录和导出的文件名里还是 `superagent`，没有跟着改。
+> 原名 SuperAgent。命令行叫 `sa`，数据目录和导出的文件名里还是 `superagent`，没有跟着改。
 
 Rust 多 Bot Agent Harness：房间里的 AI 团队。一个可执行文件，自带内核、本机服务和界面。
 
