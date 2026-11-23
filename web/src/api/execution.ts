@@ -17,6 +17,8 @@ export interface ExecCard extends Presence {
   failed: number;
   /** 上一次说完话是什么时候（毫秒）。空着的 Bot 才看这个。 */
   lastAt?: number;
+  /** 能单独停下：它在房间里说着话或者排着队（任务有自己的停止按钮）。 */
+  stoppable: boolean;
 }
 
 export const EXEC_LABEL: Record<PresenceState, string> = {
@@ -78,6 +80,7 @@ export function executionOf(
       done: steps.filter((step) => FINISHED.includes(step.state)).length,
       failed: steps.filter((step) => step.state === "error" || step.state === "denied").length,
       lastAt: last?.updated_at,
+      stoppable: row.state === "queued" || (live?.kind === "chat" && row.state !== "working"),
     };
   });
 }

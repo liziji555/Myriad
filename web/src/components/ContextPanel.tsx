@@ -1,7 +1,7 @@
 import { clampPanelWidth, panelWidthAt, PANEL_MAX, PANEL_MIN, PANEL_STEP } from "../api/layout";
 import type { TaskBoard } from "../api/tasks";
 import type { LinkActions, RoutineActions, TaskActions, Team } from "../api/useWorkspace";
-import type { Bot, Link, Room, Routine, TaskId } from "../api/types";
+import type { Bot, BotId, Link, Room, Routine, TaskId } from "../api/types";
 import type { ExecCard } from "../api/execution";
 import { AuditPanel } from "./AuditPanel";
 import { ExecutionPanel } from "./ExecutionPanel";
@@ -72,6 +72,8 @@ interface Props {
   /** 「执行」页：每个 Bot 一张卡片。 */
   execution: readonly ExecCard[];
   onJump(card: ExecCard): void;
+  /** 只停一个 Bot。 */
+  onStopBot(botId: BotId): void;
 }
 
 export function ContextPanel({
@@ -96,6 +98,7 @@ export function ContextPanel({
   usageKey,
   execution,
   onJump,
+  onStopBot,
 }: Props) {
   return (
     <aside className="sa-panel" aria-label="上下文面板">
@@ -157,6 +160,7 @@ export function ContextPanel({
           <ExecutionPanel
             cards={execution}
             onJump={onJump}
+            onStop={(card) => onStopBot(card.botId)}
             onShowTask={(taskId) => {
               onFocusTask(taskId);
               onTab("tasks");

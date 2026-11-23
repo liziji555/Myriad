@@ -429,7 +429,9 @@ function MessageItem({
     sender.kind === "user"
       ? (origin?.label ?? "你")
       : (bots.find((bot) => bot.id === sender.bot_id)?.name ?? "Bot");
-  const steeredBot = steer ? (bots.find((bot) => bot.id === steer.botId)?.name ?? "Bot") : "";
+  const steeredBot = steer
+    ? steer.botIds.map((id) => bots.find((bot) => bot.id === id)?.name ?? "Bot").join("、")
+    : "";
   const waiting = state === "streaming" && message.content === "" && message.steps.length === 0;
   // 这条消息里有一步在等人批准：它不是在写，是在等你。
   const asking = message.steps.some((step) => step.state === "waiting");

@@ -1,7 +1,7 @@
 import { useEffect, useState, type CSSProperties } from "react";
 import { loadLayout, saveLayout, type Layout } from "./api/layout";
 import type { SlashCommand } from "./api/slash";
-import { presenceOf, type Presence } from "./api/presence";
+import { presenceOf, speakersOf, type Presence } from "./api/presence";
 import { executionOf } from "./api/execution";
 import { STATE_LABEL } from "./api/tasks";
 import { api } from "./api/client";
@@ -127,14 +127,17 @@ function Shell() {
   const replying =
     (roomChat?.messages.some((message) => message.state === "streaming" && message.kind === "chat") ??
       false) ||
-    Boolean(roomChat?.activity?.speaking) ||
+    speakersOf(roomChat?.activity).length > 0 ||
     Boolean(roomChat?.activity?.routing) ||
     (roomChat?.activity?.queued.length ?? 0) > 0;
   // 按进房间的先后排，和服务端一致。
   const members = room
     ? room.member_bot_ids.flatMap((id) => workspace.bots.filter((bot) => bot.id === id))
     : [];
-  const speaking = workspace.bots.find((bot) => bot.id === roomChat?.activity?.speaking)?.name;
+  // 正在说话的那几个 Bot：没点名的插话它们都看得到。
+  const speaking = speakersOf(roomChat?.activity).flatMap(
+    (id) => workspace.bots.find((bot) => bot.id === id)?.name ?? [],
+  );
   const queued = (roomChat?.activity?.queued ?? []).flatMap(
     (id) => workspace.bots.find((bot) => bot.id === id)?.name ?? [],
   );
@@ -170,7 +173,12 @@ function Shell() {
     if (!chat) continue;
     const live = chat.messages.filter((message) => message.state === "streaming");
     if (live.some((message) => message.steps.some((step) => step.state === "waiting"))) roomStates[id] = "warn";
-    else if (live.length > 0 || chat.activity?.speaking || chat.activity?.routing || chat.activity?.queued.length)
+    else if (
+      live.length > 0 ||
+      speakersOf(chat.activity).length > 0 ||
+      chat.activity?.routing ||
+      chat.activity?.queued.length
+    )
       roomStates[id] = "busy";
   }
   const roomTasks = room ? (workspace.board.rooms[room.id] ?? []) : [];
@@ -428,7 +436,7 @@ function Shell() {
               commands={slashCommands}
               disabledReason={room.host_bot_id ? null : "这个房间里还没有 Bot，发了也没人回应"}
               replying={replying}
-              steerTo={speaking ?? null}
+              steerTo={speaking.length > 0 ? speaking.join("、") : null}
               members={members.filter((bot) => bot.enabled)}
               onSend={(content) => workspace.sendMessage(room.id, content)}
               onStop={() => workspace.stopReply(room.id)}
@@ -464,6 +472,7 @@ function Shell() {
           usageKey={workspace.notices.length}
           execution={execution}
           onJump={jumpTo}
+          onStopBot={(botId) => void workspace.stopBot(room.id, botId)}
         />
       )}
     </div>

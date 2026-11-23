@@ -1,7 +1,10 @@
 //! 端到端：真实的 Engine（SQLite 文件）+ 会话记录文件 + 脚本化的假模型。
 
 use sa_engine::Engine;
-use sa_llm::{LlmError, MockProvider, MockReply, StopReason, StreamEvent};
+use sa_llm::{
+    ChatRequest, EventStream, LlmError, MockProvider, MockReply, ModelCaps, Provider, StopReason,
+    StreamEvent,
+};
 use sa_orchestrator::{ModelRouter, Orchestrator, ResolvedModel, Settings, SingleModel};
 use sa_protocol::{
     ApprovalDecision, ApprovalId, BotId, Message, MessageState, ModelTier, RoomId, Sender,
@@ -10,8 +13,9 @@ use sa_protocol::{
 use sa_store::Store;
 use sa_tools::Fence;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 
 struct Rig {
     engine: Arc<Engine>,
@@ -72,6 +76,7 @@ fn build(
         fence: Fence::new(&work, std::slice::from_ref(&data)).unwrap(),
         prompt: None,
         max_steps: 6,
+        max_parallel_bots: 3,
         allow_private_network: false,
         approval_timeout,
         work_dir: data.join("work"),
@@ -134,15 +139,52 @@ impl Rig {
         step.approval.clone().expect("等批准的步骤带着审批卡").id
     }
 
-    /// 第 `index` 次发给模型的请求里，最后一条工具结果。
-    fn last_tool_result_of(&self, index: usize) -> String {
-        self.provider.requests()[index]
-            .messages
+    /// 房间最近一次报告的动态。
+    fn activity(&self) -> sa_protocol::RoomActivity {
+        let events = self.engine.events_after(0, 10_000).unwrap();
+        let event = events
             .iter()
             .rev()
-            .find(|m| m.role == sa_llm::Role::Tool)
-            .map(|m| m.content.clone())
-            .unwrap_or_default()
+            .find(|e| e.kind == sa_protocol::EventKind::RoomActivity)
+            .expect("房间报告过动态");
+        serde_json::from_value(event.payload.clone()).unwrap()
+    }
+
+    /// 等到所有消息里一共有 `count` 步在等批准，返回这些审批卡（按消息先后）。
+    async fn waiting_approvals(&self, count: usize) -> Vec<(BotId, ApprovalId)> {
+        for _ in 0..500 {
+            let waiting: Vec<(BotId, ApprovalId)> = self
+                .messages()
+                .iter()
+                .flat_map(|m| {
+                    m.steps
+                        .iter()
+                        .filter(|s| s.state == StepState::Waiting)
+                        .filter_map(|s| Some((sender_of(m)?.clone(), s.approval.clone()?.id)))
+                })
+                .collect();
+            if waiting.len() >= count {
+                return waiting;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("等不到 {count} 张审批卡：{:#?}", self.messages());
+    }
+
+    /// 等到消息里有 `count` 条正在写的回复，内容都有了。
+    async fn until_writing(&self, count: usize) -> Vec<Message> {
+        for _ in 0..500 {
+            let writing: Vec<Message> = self
+                .messages()
+                .into_iter()
+                .filter(|m| m.state == MessageState::Streaming && !m.content.is_empty())
+                .collect();
+            if writing.len() >= count {
+                return writing;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("等不到 {count} 条正在写的回复：{:#?}", self.messages());
     }
 
     /// 等到房间报告「没有人在说话，也没有人排队」，并且人发的消息都处理过了。
@@ -975,7 +1017,43 @@ async fn approval_does_not_cover_a_retargeted_link() {
 /// 路由用便宜档和强档，Bot 都用中档：两边的脚本分开写，互不干扰。
 struct Tiered {
     router: Arc<MockProvider>,
-    bots: Arc<MockProvider>,
+    bots: Arc<dyn Provider>,
+}
+
+/// 几个 Bot 同时说话时，各自用各自的脚本（按系统提示词里的名字分）；没有单独脚本的用共用的那份。
+struct ByBot {
+    shared: Arc<MockProvider>,
+    own: Mutex<Vec<(String, Arc<MockProvider>)>>,
+}
+
+impl ByBot {
+    fn pick(&self, request: &ChatRequest) -> Arc<MockProvider> {
+        let system = request
+            .messages
+            .iter()
+            .find(|m| m.role == sa_llm::Role::System)
+            .map(|m| m.content.clone())
+            .unwrap_or_default();
+        let own = self.own.lock().unwrap();
+        own.iter()
+            .find(|(name, _)| system.contains(&format!("名字叫「{name}」")))
+            .map_or_else(|| self.shared.clone(), |(_, provider)| provider.clone())
+    }
+}
+
+#[async_trait::async_trait]
+impl Provider for ByBot {
+    async fn stream(
+        &self,
+        request: ChatRequest,
+        cancel: CancellationToken,
+    ) -> Result<EventStream, LlmError> {
+        self.pick(&request).stream(request, cancel).await
+    }
+
+    fn capabilities(&self, model: &str) -> ModelCaps {
+        self.shared.capabilities(model)
+    }
 }
 
 impl ModelRouter for Tiered {
@@ -996,6 +1074,7 @@ impl ModelRouter for Tiered {
 struct Team {
     rig: Rig,
     router: Arc<MockProvider>,
+    by_bot: Arc<ByBot>,
     host: BotId,
     coder: BotId,
     reviewer: BotId,
@@ -1003,6 +1082,21 @@ struct Team {
 
 /// 一个房间，三个 Bot：助手（入口）、Coder、Reviewer。同一个目录再开一次就是重启。
 fn team(dir: &Path, router: Vec<MockReply>, bots: Vec<MockReply>) -> Team {
+    team_with(dir, router, bots, 3)
+}
+
+impl Team {
+    /// 给名叫 `name` 的 Bot 一份自己的脚本，返回它的假模型（看它收到了什么）。
+    fn script(&self, name: &str, replies: Vec<MockReply>) -> Arc<MockProvider> {
+        let provider = Arc::new(MockProvider::scripted(replies));
+        let mut own = self.by_bot.own.lock().unwrap();
+        own.push((name.to_string(), provider.clone()));
+        provider
+    }
+}
+
+/// `parallel`：一个房间里最多几个 Bot 同时说话。
+fn team_with(dir: &Path, router: Vec<MockReply>, bots: Vec<MockReply>, parallel: usize) -> Team {
     let data = dir.join("data");
     let work = dir.join("work");
     std::fs::create_dir_all(&data).unwrap();
@@ -1033,6 +1127,7 @@ fn team(dir: &Path, router: Vec<MockReply>, bots: Vec<MockReply>) -> Team {
         fence: Fence::new(&work, std::slice::from_ref(&data)).unwrap(),
         prompt: None,
         max_steps: 6,
+        max_parallel_bots: parallel,
         allow_private_network: false,
         approval_timeout: Duration::from_secs(600),
         work_dir: data.join("work"),
@@ -1041,9 +1136,13 @@ fn team(dir: &Path, router: Vec<MockReply>, bots: Vec<MockReply>) -> Team {
         watchdog: Default::default(),
         routines: Default::default(),
     };
+    let by_bot = Arc::new(ByBot {
+        shared: bots.clone(),
+        own: Mutex::default(),
+    });
     let models = Arc::new(Tiered {
         router: router.clone(),
-        bots: bots.clone(),
+        bots: by_bot.clone(),
     });
     Team {
         rig: Rig {
@@ -1053,6 +1152,7 @@ fn team(dir: &Path, router: Vec<MockReply>, bots: Vec<MockReply>) -> Team {
             room: room.id,
         },
         router,
+        by_bot,
         host: room.host_bot_id.unwrap(),
         coder,
         reviewer,
@@ -1208,49 +1308,62 @@ async fn unaddressed_messages_are_routed_and_fall_back_to_the_host() {
     t.rig.orchestrator.shutdown().await;
 }
 
-/// Bot 找 Bot：话带到就走，不等回答；对方的回答是一条新消息，转手次数记在消息上。
+/// `ask_bot`：对方马上在自己那边开始，找人的那个接着做自己的事，两边同时在说。
 #[tokio::test]
-async fn ask_bot_hands_over_without_waiting() {
+async fn ask_bot_starts_the_other_bot_without_waiting() {
     let dir = tempfile::tempdir().unwrap();
-    let bots = vec![
-        ask("c1", "@reviewer", "改好了，帮我看看 diff"),
-        MockReply::text("我请 Reviewer 看了"),
-        MockReply::text("看过了，没问题"),
-    ];
-    let t = team(dir.path(), vec![], bots);
+    let t = team(dir.path(), vec![], vec![]);
+    t.script(
+        "Coder",
+        vec![
+            ask("c1", "@reviewer", "改好了，帮我看看 diff"),
+            MockReply::Hang(vec![StreamEvent::TextDelta("我接着写测试".into())]),
+        ],
+    );
+    let reviewer = t.script("Reviewer", vec![MockReply::text("看过了，没问题")]);
     t.rig.say("@Coder 修一下 bug").await;
-    let all = t.rig.settled(4).await;
 
-    let (reply, asked, answer) = (&all[1], &all[2], &all[3]);
+    // Coder 还在写，Reviewer 已经答完了。
+    let answer = t
+        .rig
+        .until("Reviewer 答完", |m| {
+            m.content == "看过了，没问题" && m.state == MessageState::Complete
+        })
+        .await;
+    let all = t.rig.messages();
+    let (reply, asked) = (&all[1], &all[2]);
     assert_eq!(sender_of(reply), Some(&t.coder));
-    assert_eq!(reply.content, "我请 Reviewer 看了");
+    assert_eq!(reply.state, MessageState::Streaming);
     assert_eq!(reply.steps.len(), 1);
     assert_eq!(reply.steps[0].title, "请 reviewer：改好了，帮我看看 diff");
     assert_eq!(reply.steps[0].state, StepState::Ok);
     assert_eq!(reply.steps[0].approval, None, "找别的 Bot 不用人批准");
-    // 带的话是房间里看得到的一条消息。
     assert_eq!(sender_of(asked), Some(&t.coder));
     assert_eq!(asked.content, "@Reviewer 改好了，帮我看看 diff");
     assert_eq!(
         (asked.mentions.clone(), asked.hop),
         (vec![t.reviewer.clone()], 1)
     );
-    assert_eq!(asked.state, MessageState::Complete);
-    assert_eq!(sender_of(answer), Some(&t.reviewer));
-    assert_eq!((answer.content.as_str(), answer.hop), ("看过了，没问题", 1));
-
-    assert!(t
-        .rig
-        .last_tool_result_of(1)
-        .contains("已经把话带给 Reviewer"));
+    assert_eq!(sender_of(&answer), Some(&t.reviewer));
+    assert_eq!(answer.hop, 1);
+    // Reviewer 看不到 Coder 还没写完的话。
     assert_eq!(
-        heard(&t.rig.provider),
+        heard(&reviewer),
         [
             "【用户】@Coder 修一下 bug",
-            "【Coder】我请 Reviewer 看了",
             "【Coder（对你说）】@Reviewer 改好了，帮我看看 diff"
         ]
     );
+    // Reviewer 那条道收尾后，房间里只剩 Coder 在说。
+    t.rig
+        .until("只剩 Coder", |_| {
+            t.rig.activity().speakers == vec![t.coder.clone()]
+        })
+        .await;
+
+    assert!(t.rig.orchestrator.stop_bot(&t.rig.room, &t.coder));
+    t.rig.until_idle().await;
+    assert_eq!(t.rig.messages()[1].state, MessageState::Cancelled);
     assert!(t.router.requests().is_empty());
     t.rig.orchestrator.shutdown().await;
 }
@@ -1347,34 +1460,52 @@ async fn a_bot_that_passes_leaves_no_message() {
     t.rig.orchestrator.shutdown().await;
 }
 
-/// 人点名找另一个 Bot：正在说话的被打断，被点到的来接。
+/// Bot 正在说时人点名另一个 Bot：不打断正在说的，被点到的同时开始。点名的话只给被点到的。
 #[tokio::test]
-async fn mentioning_another_bot_interrupts_the_speaker() {
+async fn mentioning_another_bot_starts_it_alongside_the_speaker() {
     let dir = tempfile::tempdir().unwrap();
-    let bots = vec![
-        MockReply::Hang(vec![StreamEvent::TextDelta("我慢慢说".into())]),
-        MockReply::text("我来接"),
-    ];
-    let t = team(dir.path(), vec![], bots);
+    let t = team(dir.path(), vec![], vec![]);
+    let coder = t.script(
+        "Coder",
+        vec![
+            MockReply::tool_calls("", &[("c1", "shell", r#"{"command":"echo hi"}"#)]),
+            MockReply::text("命令跑完了"),
+        ],
+    );
+    let reviewer = t.script("Reviewer", vec![MockReply::text("我来接")]);
     t.rig.say("@Coder 讲讲").await;
-    t.rig
-        .until("Coder 开始说", |m| m.content == "我慢慢说")
-        .await;
-    t.rig.say("@Reviewer 还是你来").await;
+    let approval = t.rig.waiting_approval().await;
+    t.rig.say("@Reviewer 你也看看").await;
 
-    let all = t.rig.settled(4).await;
-    assert_eq!(sender_of(&all[1]), Some(&t.coder));
-    assert_eq!(all[1].state, MessageState::Cancelled);
-    assert_eq!(sender_of(&all[3]), Some(&t.reviewer));
-    assert_eq!(all[3].content, "我来接");
-    // Reviewer 看到了前面发生的事，包括 Coder 没说完的那半句。
+    let answer = t
+        .rig
+        .until("Reviewer 答完", |m| {
+            m.content == "我来接" && m.state == MessageState::Complete
+        })
+        .await;
+    assert_eq!(sender_of(&answer), Some(&t.reviewer));
     assert_eq!(
-        heard(&t.rig.provider),
+        t.rig.messages()[1].state,
+        MessageState::Streaming,
+        "Coder 没被打断"
+    );
+    assert_eq!(
+        heard(&reviewer),
         [
             "【用户】@Coder 讲讲",
-            "【Coder】我慢慢说",
-            "【用户（对你说）】@Reviewer 还是你来"
+            "【用户（对你说）】@Reviewer 你也看看"
         ]
+    );
+
+    assert!(t.rig.orchestrator.decide(&approval, ApprovalDecision::Once));
+    t.rig.until_idle().await;
+    let all = t.rig.messages();
+    assert_eq!(all[1].content, "命令跑完了");
+    assert_eq!(all[1].state, MessageState::Complete);
+    assert!(
+        !heard(&coder).iter().any(|h| h.contains("你也看看")),
+        "点名 Reviewer 的话不进 Coder 的上下文：{:?}",
+        heard(&coder)
     );
     t.rig.orchestrator.shutdown().await;
 }
@@ -1413,19 +1544,27 @@ async fn a_message_for_another_bot_is_not_swallowed_by_the_speaker() {
 #[tokio::test]
 async fn a_follow_up_read_by_the_speaker_resets_the_limits() {
     let dir = tempfile::tempdir().unwrap();
-    let bots = vec![
-        // 第一句话：Coder 和 Reviewer 互相找满 2 次。
-        ask("c1", "Reviewer", "先看第一版"),
-        MockReply::text("交给 Reviewer"),
-        ask("r1", "Coder", "看过了，请确认"),
-        MockReply::text("请 Coder 确认"),
-        // Coder 这一轮停在审批卡上；人补了一句之后它再找 Reviewer，应该被允许。
-        MockReply::tool_calls("", &[("c2", "shell", r#"{"command":"echo hi"}"#)]),
-        ask("c3", "Reviewer", "用户有新要求，请再看一遍"),
-        MockReply::text("已经转给 Reviewer"),
-        MockReply::text("按新要求看过了"),
-    ];
-    let t = team(dir.path(), vec![], bots);
+    let t = team(dir.path(), vec![], vec![]);
+    t.script(
+        "Coder",
+        vec![
+            // 第一句话：Coder 和 Reviewer 互相找满 2 次。
+            ask("c1", "Reviewer", "先看第一版"),
+            MockReply::text("交给 Reviewer"),
+            // Coder 第二轮停在审批卡上；人补了一句之后它再找 Reviewer，应该被允许。
+            MockReply::tool_calls("", &[("c2", "shell", r#"{"command":"echo hi"}"#)]),
+            ask("c3", "Reviewer", "用户有新要求，请再看一遍"),
+            MockReply::text("已经转给 Reviewer"),
+        ],
+    );
+    t.script(
+        "Reviewer",
+        vec![
+            ask("r1", "Coder", "看过了，请确认"),
+            MockReply::text("请 Coder 确认"),
+            MockReply::text("按新要求看过了"),
+        ],
+    );
     t.rig.say("@Coder 开始吧").await;
     let approval = t.rig.waiting_approval().await;
     t.rig.say("补充一下：还要兼容旧版本").await;
@@ -1439,44 +1578,49 @@ async fn a_follow_up_read_by_the_speaker_resets_the_limits() {
         .unwrap_or_else(|| panic!("第三次找 Reviewer 应该发得出去：{all:#?}"));
     // 人说了新的话，转手次数也从头算。
     assert_eq!(asked.hop, 1);
-    assert_eq!(all.last().unwrap().content, "按新要求看过了");
+    assert!(
+        all.iter().any(|m| m.content == "按新要求看过了"),
+        "{all:#?}"
+    );
     t.rig.orchestrator.shutdown().await;
 }
 
-/// 「停止」：正在说的停下，排着队的也不再说。重启之后已经处理过的消息不会被再答一遍。
+/// 「停止」：所有正在说的都停下，排着队的也不再说。重启之后已经处理过的消息不会被再答一遍。
 #[tokio::test]
 async fn stop_ends_the_whole_exchange_and_a_restart_does_not_replay_it() {
     let dir = tempfile::tempdir().unwrap();
     {
-        let bots = vec![
-            ask("c1", "Reviewer", "帮我看看"),
-            MockReply::Hang(vec![StreamEvent::TextDelta("还在写".into())]),
-        ];
-        let t = team(dir.path(), vec![], bots);
+        let t = team(dir.path(), vec![], vec![]);
+        let coder = t.script(
+            "Coder",
+            vec![
+                ask("c1", "Reviewer", "帮我看看"),
+                MockReply::Hang(vec![StreamEvent::TextDelta("还在写".into())]),
+            ],
+        );
+        let reviewer = t.script(
+            "Reviewer",
+            vec![MockReply::Hang(vec![StreamEvent::TextDelta(
+                "我也在写".into(),
+            )])],
+        );
         t.rig.say("@Coder 开始").await;
-        t.rig
-            .until("Coder 把话带给了 Reviewer", |m| {
-                m.content == "@Reviewer 帮我看看"
-            })
-            .await;
-        // 等 Coder 开始写后面的话再停：这时它的第二次模型调用已经发出去了。
         for _ in 0..500 {
-            if t.rig.messages().iter().any(|m| m.content == "还在写") {
+            let all = t.rig.messages();
+            if all.iter().any(|m| m.content == "还在写")
+                && all.iter().any(|m| m.content == "我也在写")
+            {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        assert_eq!(t.rig.provider.requests().len(), 2);
         assert!(t.rig.orchestrator.stop(&t.rig.room));
         t.rig.until_idle().await;
         let all = t.rig.messages();
-        assert_eq!(all.len(), 3, "{all:#?}");
+        assert_eq!(all.len(), 4, "{all:#?}");
         assert_eq!(all[1].state, MessageState::Cancelled);
-        assert_eq!(
-            t.rig.provider.requests().len(),
-            2,
-            "Reviewer 不应该被叫起来"
-        );
+        assert_eq!(all[3].state, MessageState::Cancelled);
+        assert_eq!((coder.requests().len(), reviewer.requests().len()), (2, 1));
         // 没有东西在跑时，停止什么都不做。
         assert!(!t.rig.orchestrator.stop(&t.rig.room));
         t.rig.orchestrator.shutdown().await;
@@ -1484,11 +1628,162 @@ async fn stop_ends_the_whole_exchange_and_a_restart_does_not_replay_it() {
 
     let t = team(dir.path(), vec![], vec![MockReply::text("新的回答")]);
     t.rig.say("@Reviewer 现在呢").await;
-    let all = t.rig.settled(5).await;
-    assert_eq!(sender_of(&all[4]), Some(&t.reviewer));
+    let all = t.rig.settled(6).await;
+    assert_eq!(sender_of(&all[5]), Some(&t.reviewer));
     assert_eq!(t.rig.provider.requests().len(), 1, "只回答新的这一条");
     t.rig.until_idle().await;
-    assert_eq!(t.rig.messages().len(), 5);
+    assert_eq!(t.rig.messages().len(), 6);
+    t.rig.orchestrator.shutdown().await;
+}
+
+/// 一句话点了两个 Bot：两个同时开始说，房间动态里两个都在说。
+#[tokio::test]
+async fn two_mentioned_bots_answer_the_same_message_together() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = team(dir.path(), vec![], vec![]);
+    let hang = |text: &str| MockReply::Hang(vec![StreamEvent::TextDelta(text.into())]);
+    t.script("Coder", vec![hang("Coder 在写")]);
+    t.script("Reviewer", vec![hang("Reviewer 在写")]);
+    t.rig.say("@Coder @Reviewer 一起看看").await;
+
+    let writing = t.rig.until_writing(2).await;
+    let mut senders: Vec<_> = writing.iter().filter_map(sender_of).cloned().collect();
+    senders.sort_by_key(|id| id.to_string());
+    let mut both = vec![t.coder.clone(), t.reviewer.clone()];
+    both.sort_by_key(|id| id.to_string());
+    assert_eq!(senders, both);
+    let mut speakers = t.rig.activity().speakers;
+    speakers.sort_by_key(|id| id.to_string());
+    assert_eq!(speakers, both);
+
+    assert!(t.rig.orchestrator.stop(&t.rig.room));
+    t.rig.until_idle().await;
+    let all = t.rig.messages();
+    assert!(
+        all[1..].iter().all(|m| m.state == MessageState::Cancelled),
+        "{all:#?}"
+    );
+    assert!(t.router.requests().is_empty());
+    t.rig.orchestrator.shutdown().await;
+}
+
+/// 同时说话的有上限：多的排队，前面的说完（或被单独停下）就轮到它。单独停一个不影响别的。
+#[tokio::test]
+async fn bots_over_the_limit_wait_and_stopping_one_lets_the_next_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = team_with(dir.path(), vec![], vec![], 1);
+    t.script(
+        "Coder",
+        vec![MockReply::Hang(vec![StreamEvent::TextDelta(
+            "Coder 在写".into(),
+        )])],
+    );
+    t.script("Reviewer", vec![MockReply::text("轮到我了")]);
+    t.rig.say("@Coder @Reviewer 都说说").await;
+    t.rig.until_writing(1).await;
+    for _ in 0..500 {
+        if t.rig.activity().queued == vec![t.reviewer.clone()] {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let activity = t.rig.activity();
+    assert_eq!(activity.speakers, vec![t.coder.clone()]);
+    assert_eq!(activity.queued, vec![t.reviewer.clone()]);
+
+    assert!(t.rig.orchestrator.stop_bot(&t.rig.room, &t.coder));
+    t.rig.until_idle().await;
+    let all = t.rig.messages();
+    assert_eq!(sender_of(&all[1]), Some(&t.coder));
+    assert_eq!(all[1].state, MessageState::Cancelled);
+    assert_eq!(sender_of(&all[2]), Some(&t.reviewer));
+    assert_eq!(
+        (all[2].content.as_str(), all[2].state),
+        ("轮到我了", MessageState::Complete)
+    );
+    // 停一个不在说话的 Bot：什么都不做。
+    assert!(!t.rig.orchestrator.stop_bot(&t.rig.room, &t.coder));
+    t.rig.orchestrator.shutdown().await;
+}
+
+/// 两个 Bot 各自等批准，互不耽误；没点名的插话两个都看到，点名的只给被点到的。
+#[tokio::test]
+async fn approvals_are_separate_and_unaddressed_follow_ups_reach_every_speaker() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = team(dir.path(), vec![], vec![]);
+    let coder = t.script(
+        "Coder",
+        vec![
+            MockReply::tool_calls("", &[("c1", "shell", r#"{"command":"echo coder"}"#)]),
+            MockReply::text("Coder 做完了"),
+        ],
+    );
+    let reviewer = t.script(
+        "Reviewer",
+        vec![
+            MockReply::tool_calls("", &[("r1", "shell", r#"{"command":"echo reviewer"}"#)]),
+            MockReply::text("Reviewer 做完了"),
+        ],
+    );
+    t.rig.say("@Coder @Reviewer 各跑一条命令").await;
+    let cards = t.rig.waiting_approvals(2).await;
+    t.rig.say("补充：输出里带上日期").await;
+    t.rig.say("@Coder 只跟你说").await;
+
+    // 先批 Reviewer 的：Coder 还在等，Reviewer 照常做完。
+    let card = |bot: &BotId| cards.iter().find(|(b, _)| b == bot).unwrap().1.clone();
+    assert!(t
+        .rig
+        .orchestrator
+        .decide(&card(&t.reviewer), ApprovalDecision::Once));
+    t.rig
+        .until("Reviewer 做完", |_| {
+            t.rig
+                .messages()
+                .iter()
+                .any(|m| m.content == "Reviewer 做完了" && m.state == MessageState::Complete)
+        })
+        .await;
+    assert_eq!(
+        t.rig.waiting_approvals(1).await.len(),
+        1,
+        "Coder 的卡还在等"
+    );
+    assert!(t
+        .rig
+        .orchestrator
+        .decide(&card(&t.coder), ApprovalDecision::Once));
+    t.rig.until_idle().await;
+
+    let coder_heard = heard(&coder);
+    assert!(
+        coder_heard
+            .iter()
+            .any(|h| h == "【用户】补充：输出里带上日期"),
+        "{coder_heard:?}"
+    );
+    assert!(
+        coder_heard
+            .iter()
+            .any(|h| h == "【用户（对你说）】@Coder 只跟你说"),
+        "{coder_heard:?}"
+    );
+    let reviewer_heard = heard(&reviewer);
+    assert!(
+        reviewer_heard
+            .iter()
+            .any(|h| h == "【用户】补充：输出里带上日期"),
+        "{reviewer_heard:?}"
+    );
+    assert!(
+        !reviewer_heard.iter().any(|h| h.contains("只跟你说")),
+        "{reviewer_heard:?}"
+    );
+    // 插话都在这一轮里看到了，不会再另外答一遍。
+    assert_eq!((coder.requests().len(), reviewer.requests().len()), (2, 2));
+    let all = t.rig.messages();
+    let replies = all.iter().filter(|m| sender_of(m).is_some()).count();
+    assert_eq!(replies, 2, "{all:#?}");
     t.rig.orchestrator.shutdown().await;
 }
 
@@ -1536,17 +1831,19 @@ async fn one_human_message_gets_at_most_six_bot_turns() {
         MockReply::text("分下去了"),
         fan("k2", "E", "F"),
         MockReply::text("我也分下去了"),
-        fan("k3", "E", "F"),
+        fan("k3", "助手", "E"),
         MockReply::text("D 说完"),
         MockReply::text("E 说完"),
         MockReply::text("F 说完"),
+        MockReply::text("助手说完"),
         MockReply::text("不会用到"),
     ];
-    let t = team(dir.path(), vec![], bots);
+    // 一次只让一个 Bot 说，次序固定，只看总次数。
+    let t = team_with(dir.path(), vec![], bots, 1);
     t.rig.say("@Coder 把活分一下").await;
     t.rig.until_idle().await;
 
-    // Coder、Reviewer、D、E、F 各说一次是 5 次，加上排到的第 6 次；D 想再找两个人时名额只剩一个。
+    // Coder、Reviewer、D 说过、E、F 排着是 5 次；D 找助手是第 6 次，再找 E 时没有名额了。
     let spoken: Vec<_> = t
         .rig
         .messages()

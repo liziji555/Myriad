@@ -2561,6 +2561,18 @@ button.sa-row:hover {
 .sa-exec-actions {
   display: flex;
   justify-content: flex-end;
+  align-items: center;
+  gap: var(--sa-space-3);
+}
+.sa-exec-stop {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-right: auto;
+  color: var(--sa-fg-faint);
+}
+.sa-exec-stop:hover {
+  color: var(--sa-danger);
 }
 .sa-exec-approve {
   height: 28px;
