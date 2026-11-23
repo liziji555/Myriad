@@ -38,26 +38,27 @@ pub struct App {
 
 impl App {
     pub fn open(data_dir: &DataDir, args: &RunArgs) -> Result<Self> {
-        Self::open_with(data_dir, args, |config| {
+        Self::open_and_tune(data_dir, args, |_| {})
+    }
+
+    /// 和 [`App::open`] 一样，另外可以在启动前调整设置。
+    pub fn open_and_tune(
+        data_dir: &DataDir,
+        args: &RunArgs,
+        tune: impl FnOnce(&mut Settings),
+    ) -> Result<Self> {
+        let models = |config: &Config| -> Arc<dyn ModelRouter> {
             if args.mock {
                 // 假模型也看 mid 档位的窗口大小：调小它就能演示自动压缩。
                 Arc::new(models::mock(config.tiers.mid.context_window))
             } else {
                 Arc::new(ConfigModels::new(config.clone()))
             }
-        })
+        };
+        Self::open_tuned(data_dir, args, models, tune)
     }
 
-    /// 和 [`App::open`] 一样，但由调用方决定用哪些模型。
-    pub fn open_with(
-        data_dir: &DataDir,
-        args: &RunArgs,
-        models: impl FnOnce(&Config) -> Arc<dyn ModelRouter>,
-    ) -> Result<Self> {
-        Self::open_tuned(data_dir, args, models, |_| {})
-    }
-
-    /// 和 [`App::open_with`] 一样，另外可以在启动前调整设置。测试用它把等待时间调短。
+    /// 和 [`App::open_and_tune`] 一样，但由调用方决定用哪些模型。测试用它把等待时间调短。
     pub fn open_tuned(
         data_dir: &DataDir,
         args: &RunArgs,
