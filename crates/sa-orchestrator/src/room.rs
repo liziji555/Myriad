@@ -1107,6 +1107,9 @@ async fn harness_turn(
         prompt: &prompt,
         session: resume.as_deref(),
     };
+    if cancel.is_cancelled() {
+        return Ok(TurnEnd::Cancelled);
+    }
     let finished = crate::harness::run(&launch, observer, cancel).await;
     if !finished.text.is_empty() {
         transcript
