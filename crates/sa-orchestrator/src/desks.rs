@@ -81,6 +81,9 @@ impl Orchestrator {
             workdir::commit_and_diff(&dir, "带回前记下改动")
                 .await
                 .map_err(OrchestratorError::Conflict)?;
+            workdir::back_to_branch(&dir)
+                .await
+                .map_err(OrchestratorError::Conflict)?;
             workdir::apply_to_workspace(&dir)
                 .await
                 .map_err(OrchestratorError::Conflict)?;

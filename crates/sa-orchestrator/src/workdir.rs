@@ -359,6 +359,19 @@ pub async fn current_branch(workdir: &Workdir) -> Option<String> {
     (!name.is_empty()).then(|| name.to_string())
 }
 
+/// 目录里切到了别的分支时，把开工时的分支挪到现在的提交上再切回去：带回的是真正做完的那份。
+pub async fn back_to_branch(workdir: &Workdir) -> Result<(), String> {
+    let Some(branch) = &workdir.branch else {
+        return Ok(());
+    };
+    if current_branch(workdir).await.as_deref() == Some(branch.as_str()) {
+        return Ok(());
+    }
+    task_git(workdir, &["checkout", "-q", "-B", branch])
+        .await
+        .map(|_| ())
+}
+
 /// 任务分支现在指向哪个提交。
 pub async fn head(workdir: &Workdir) -> Result<String, String> {
     Ok(task_git(workdir, &["rev-parse", "HEAD"])
