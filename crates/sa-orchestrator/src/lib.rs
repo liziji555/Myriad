@@ -148,7 +148,7 @@ struct RoomHandle {
 
 /// 房间的后台任务和外面（发消息、停止、`ask_bot`）共用的状态。
 /// 说话的、排队的、是不是在挑人。
-pub(crate) type Announced = (Vec<BotId>, Vec<BotId>, bool);
+pub(crate) type Announced = (Vec<BotId>, Vec<BotId>, bool, i64);
 
 pub(crate) struct RoomLink {
     /// 正在说话的 Bot 和各自的取消开关，按开始的先后排。几个 Bot 可以同时说，每个 Bot 同时只说一轮。
@@ -175,7 +175,7 @@ impl RoomLink {
         Self {
             lanes: Mutex::default(),
             speaking: Mutex::default(),
-            announced: Mutex::new(Some((vec![], vec![], false))),
+            announced: Mutex::new(Some((vec![], vec![], false, 0))),
             routing: Mutex::default(),
             writing: tokio::sync::Mutex::new(()),
             wake: Arc::new(Notify::new()),

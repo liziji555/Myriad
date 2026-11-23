@@ -526,7 +526,9 @@ async fn announce(shared: &Arc<Shared>, room_id: &RoomId, link: &RoomLink) {
     }
     let queued = link.episode().queued();
     let routing = link.routing.lock().unwrap().is_some();
-    let now = (speakers.clone(), queued.clone(), routing);
+    // 处理到哪一条也算：Bot 都停用了、没人说话时，终端靠它知道这条消息已经有了结果。
+    let handled_seq = link.handled.load(Ordering::SeqCst).max(0);
+    let now = (speakers.clone(), queued.clone(), routing, handled_seq);
     if link.announced.lock().unwrap().replace(now.clone()) == Some(now) {
         return;
     }
@@ -536,7 +538,7 @@ async fn announce(shared: &Arc<Shared>, room_id: &RoomId, link: &RoomLink) {
         speakers,
         queued,
         routing,
-        handled_seq: link.handled.load(Ordering::SeqCst).max(0),
+        handled_seq,
     };
     let engine = shared.engine.clone();
     if let Err(error) = db(move || engine.record_activity(&activity)).await {
