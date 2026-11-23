@@ -142,6 +142,8 @@ pub(crate) struct Shared {
     pub telegram_username: Mutex<Option<String>>,
     /// 正在做定时任务的房间。一个房间里的定时任务一个一个来。
     pub routine_rooms: Mutex<std::collections::HashSet<RoomId>>,
+    /// 这个进程什么时候起来的。比它早的定时任务消息是上次没做完的，由调度器重做，房间不再答。
+    pub started_at: i64,
 }
 
 struct RoomHandle {
@@ -237,6 +239,7 @@ impl Orchestrator {
                 owner: format!("sa-{}", sa_protocol::RoutineId::new()),
                 telegram_username: Mutex::default(),
                 routine_rooms: Mutex::default(),
+                started_at: sa_engine::now_ms(),
             }),
             rooms: Mutex::new(HashMap::new()),
         }

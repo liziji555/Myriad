@@ -1838,6 +1838,47 @@ async fn stopped_event_is_not_answered_after_restart(settle: bool) {
     t.rig.orchestrator.shutdown().await;
 }
 
+/// 关掉时还没人看的定时任务消息：重启后别的话叫醒了房间，也不答它（调度器在租约过期后会重做）。
+#[tokio::test]
+async fn an_unfinished_routine_is_left_to_the_scheduler_after_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let t = team(dir.path(), vec![], vec![]);
+        let routine = t
+            .rig
+            .engine
+            .create_routine(&t.rig.room, None, "早报", "看看有什么新消息", "0 9 * * *")
+            .unwrap();
+        let until = sa_engine::now_ms() + 60_000;
+        assert!(t
+            .rig
+            .engine
+            .claim_routine(&routine.id, "old", until)
+            .unwrap());
+        t.rig
+            .engine
+            .post_routine_message(&routine.id, "old")
+            .unwrap();
+        t.rig.orchestrator.shutdown().await;
+    }
+
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    let t = team(dir.path(), vec![], vec![]);
+    let host = t.script("助手", vec![MockReply::text("早报来了")]);
+    let coder = t.script("Coder", vec![MockReply::text("你好")]);
+    t.rig.say("@Coder 你好").await;
+    t.rig
+        .until("Coder 答了", |m| {
+            m.content == "你好" && m.state == MessageState::Complete
+        })
+        .await;
+    t.rig.until_idle().await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(coder.requests().len(), 1);
+    assert!(host.requests().is_empty());
+    t.rig.orchestrator.shutdown().await;
+}
+
 /// 一句话点了两个 Bot：两个同时开始说，房间动态里两个都在说。
 #[tokio::test]
 async fn two_mentioned_bots_answer_the_same_message_together() {
