@@ -58,6 +58,8 @@ fn template(bot: &Bot) -> BotTemplate {
         name: bot.name.clone(),
         tier: bot.tier,
         persona: bot.persona.clone(),
+        harness: bot.harness,
+        harness_command: bot.harness_command.clone(),
         enabled: bot.enabled,
     }
 }
@@ -190,12 +192,22 @@ impl Engine {
                 let have = existing.iter().find(|have| same(&have.name, &bot.name))?;
                 let differs = bot.tier != have.tier
                     || bot.persona.trim() != have.persona
-                    || bot.enabled != have.enabled;
+                    || bot.enabled != have.enabled
+                    || bot.harness != have.harness
+                    || bot.harness_command.trim() != have.harness_command;
                 differs.then_some((have, bot))
             })
             .collect();
         for (_, bot) in &changed {
             crate::team::check_bot(&bot.name, &bot.persona)?;
+        }
+        // 先把每个 harness 命令都查一遍：中途才发现不对，前面改过的 Bot 就留下了。
+        for bot in changed
+            .iter()
+            .map(|(_, bot)| *bot)
+            .chain(fresh.iter().copied())
+        {
+            crate::team::check_harness(bot.harness, &bot.harness_command)?;
         }
         if let Some(room) = &team.room {
             crate::check_room_name(&room.name)?;
@@ -222,12 +234,20 @@ impl Engine {
                 tier: Some(bot.tier),
                 persona: Some(bot.persona.clone()),
                 enabled: Some(bot.enabled),
+                harness: Some(bot.harness),
+                harness_command: Some(bot.harness_command.clone()),
                 ..Default::default()
             };
             report.updated.push(self.update_bot(&have.id, patch)?);
         }
         for bot in fresh {
-            let mut created = self.create_bot(&bot.name, bot.tier, &bot.persona)?;
+            let mut created = self.create_harness_bot(
+                &bot.name,
+                bot.tier,
+                &bot.persona,
+                bot.harness,
+                &bot.harness_command,
+            )?;
             if !bot.enabled {
                 let patch = BotPatch {
                     enabled: Some(false),
@@ -314,6 +334,8 @@ mod tests {
             tier,
             persona: persona.into(),
             enabled: true,
+            harness: Default::default(),
+            harness_command: String::new(),
         }
     }
 

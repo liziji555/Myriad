@@ -117,6 +117,8 @@ pub async fn provision(
     task_id: &TaskId,
 ) -> Result<Workdir, String> {
     git(workspace, &["--version"]).await?;
+    // git 按工作目录解析相对路径，之后的查找按本服务的当前目录：先变成绝对路径。
+    let work_root = &std::path::absolute(work_root).map_err(|e| format!("建不了任务目录：{e}"))?;
     let target = work_root.join(task_id.as_str());
     if target.exists() {
         return Err(format!("任务目录 {} 已经存在", target.display()));
@@ -357,6 +359,47 @@ pub async fn current_branch(workdir: &Workdir) -> Option<String> {
         .ok()?;
     let name = name.trim();
     (!name.is_empty()).then(|| name.to_string())
+}
+
+/// 目录里切到了别的分支时，把开工时的分支挪到现在的提交上再切回去：带回的是真正做完的那份。
+pub async fn back_to_branch(workdir: &Workdir) -> Result<(), String> {
+    let Some(branch) = &workdir.branch else {
+        return Ok(());
+    };
+    if current_branch(workdir).await.as_deref() == Some(branch.as_str()) {
+        return Ok(());
+    }
+    task_git(workdir, &["checkout", "-q", "-B", branch])
+        .await
+        .map(|_| ())
+}
+
+/// 从开工到现在，分支上改了工作目录外面的哪些文件（路径相对仓库根）。
+/// 工作目录是仓库里的一层时，合并分支会把外面的改动一起带进来，而改动清单里只列了里面的。
+pub async fn outside_changes(workdir: &Workdir) -> Result<Vec<String>, String> {
+    if workdir.kind != KIND_WORKTREE {
+        return Ok(vec![]);
+    }
+    // 和合并时一样，从分支与人的工作目录分开的地方算起：分支变基到新的提交上之后，
+    // 那些提交里本来就有的改动不算它的。
+    let target = git(Path::new(&workdir.source), &["rev-parse", "HEAD"]).await?;
+    let base = task_git(workdir, &["merge-base", "HEAD", target.trim()]).await?;
+    let range = [
+        "diff",
+        "--name-only",
+        "--no-renames",
+        "--ignore-submodules=none",
+        base.trim(),
+        "HEAD",
+    ];
+    let all = task_git(workdir, &range).await?;
+    let inside = task_git(workdir, &[&range[..], &["--", "."]].concat()).await?;
+    let inside: std::collections::HashSet<&str> = inside.lines().collect();
+    Ok(all
+        .lines()
+        .filter(|path| !inside.contains(path))
+        .map(str::to_string)
+        .collect())
 }
 
 /// 任务分支现在指向哪个提交。
@@ -771,11 +814,38 @@ mod tests {
         std::fs::write(Path::new(&workdir.root).join("leftover.log"), "x\n").unwrap();
         assert_eq!(commit_and_diff(&workdir, "任务").await.unwrap(), changed);
 
+        assert!(outside_changes(&workdir).await.unwrap().is_empty());
+
         apply_to_workspace(&workdir).await.unwrap();
         assert_eq!(
             std::fs::read_to_string(workspace.join("b.txt")).unwrap(),
             "二\n"
         );
+
+        // 在上一层提交了改动（比如 harness 自己 git commit）：合并会带进去，要报出来。
+        std::fs::write(Path::new(&workdir.root).join("a.txt"), "外面\n").unwrap();
+        task_git(&workdir, &["add", ":/a.txt"]).await.unwrap();
+        task_git(&workdir, &["commit", "-q", "-m", "外面"])
+            .await
+            .unwrap();
+        assert_eq!(outside_changes(&workdir).await.unwrap(), ["a.txt"]);
+
+        // 人的工作目录里也改了外面的文件，分支变基上去再改里面的：外面那些不算分支的。
+        task_git(&workdir, &["reset", "-q", "--hard", "HEAD~1"])
+            .await
+            .unwrap();
+        std::fs::write(outer.join("c.txt"), "人改的\n").unwrap();
+        git(&outer, &["add", "c.txt"]).await.unwrap();
+        git(&outer, &["commit", "-q", "-m", "人改的"])
+            .await
+            .unwrap();
+        let main = git(&outer, &["rev-parse", "HEAD"]).await.unwrap();
+        task_git(&workdir, &["rebase", "-q", main.trim()])
+            .await
+            .unwrap();
+        std::fs::write(Path::new(&workdir.path).join("b.txt"), "三\n").unwrap();
+        commit_and_diff(&workdir, "任务").await.unwrap();
+        assert!(outside_changes(&workdir).await.unwrap().is_empty());
     }
 
     /// 一个有 `origin` 的仓库和它的任务目录，任务分支上有一个提交。`origin` 另有第二个推送地址。

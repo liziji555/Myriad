@@ -9,11 +9,11 @@ use sa_engine::{AuditFilter, BotPatch, Engine, EngineError, RoutinePatch};
 use sa_protocol::{
     ApprovalId, AuditPage, Bot, BotId, CreateBotRequest, CreateLinkRequest, CreateRoomRequest,
     CreateRoutineRequest, CreateTaskRequest, DecideApprovalRequest, EditQueuedRequest, Extensions,
-    Health, ImportReport, ImportTemplateRequest, Link, LinkId, Message, MessagePage, ModelTier,
-    Notice, NoticeId, Pairing, PermissionRule, PostMessageRequest, QueuedId, Room, RoomId,
-    RoomQueue, Routine, RoutineId, RuleId, StopResponse, Task, TaskActionRequest, TaskDetail,
-    TaskId, TeamTemplate, TemplateFile, UpdateBotRequest, UpdateRoomRequest, UpdateRoutineRequest,
-    UsageSummary,
+    HarnessDesk, Health, ImportReport, ImportTemplateRequest, Link, LinkId, Message, MessagePage,
+    ModelTier, Notice, NoticeId, Pairing, PermissionRule, PostMessageRequest, QueuedId, Room,
+    RoomId, RoomQueue, Routine, RoutineId, RuleId, StopResponse, Task, TaskActionRequest,
+    TaskDetail, TaskId, TeamTemplate, TemplateFile, UpdateBotRequest, UpdateRoomRequest,
+    UpdateRoutineRequest, UsageSummary,
 };
 use serde::Deserialize;
 
@@ -207,10 +207,12 @@ pub async fn create_bot(
 ) -> Result<(StatusCode, Json<Bot>), AppError> {
     let Json(body) = body.map_err(|e| AppError::bad_request(e.body_text()))?;
     let bot = blocking(&state, move |engine| {
-        engine.create_bot(
+        engine.create_harness_bot(
             &body.name,
             body.tier.unwrap_or(ModelTier::Mid),
             body.persona.as_deref().unwrap_or(""),
+            body.harness.unwrap_or_default(),
+            body.harness_command.as_deref().unwrap_or(""),
         )
     })
     .await?;
@@ -229,6 +231,8 @@ pub async fn update_bot(
         tier: body.tier,
         persona: body.persona,
         enabled: body.enabled,
+        harness: body.harness,
+        harness_command: body.harness_command,
     };
     Ok(Json(
         blocking(&state, move |engine| engine.update_bot(&bot_id, patch)).await?,
@@ -253,6 +257,36 @@ pub async fn update_room(
     let Json(body) = body.map_err(|e| AppError::bad_request(e.body_text()))?;
     Ok(Json(
         blocking(&state, move |engine| engine.edit_room(&room_id, &body)).await?,
+    ))
+}
+
+/// 房间里 harness 成员开着的独立目录，和里面改了哪些文件。
+pub async fn list_desks(
+    State(state): State<AppState>,
+    Path(room_id): Path<RoomId>,
+) -> Result<Json<Vec<HarnessDesk>>, AppError> {
+    let room = room_id.clone();
+    blocking(&state, move |engine| engine.get_room(&room)).await?;
+    Ok(Json(state.orchestrator.room_desks(&room_id).await?))
+}
+
+/// 把 harness 工位里的改动带回工作目录。带不回去时返回 409，工位留着。
+pub async fn accept_desk(
+    State(state): State<AppState>,
+    Path((room_id, bot_id)): Path<(RoomId, BotId)>,
+) -> Result<Json<Vec<HarnessDesk>>, AppError> {
+    Ok(Json(
+        state.orchestrator.accept_desk(&room_id, &bot_id).await?,
+    ))
+}
+
+/// 丢掉 harness 工位里的改动。
+pub async fn discard_desk(
+    State(state): State<AppState>,
+    Path((room_id, bot_id)): Path<(RoomId, BotId)>,
+) -> Result<Json<Vec<HarnessDesk>>, AppError> {
+    Ok(Json(
+        state.orchestrator.discard_desk(&room_id, &bot_id).await?,
     ))
 }
 

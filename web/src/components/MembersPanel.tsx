@@ -1,8 +1,8 @@
-import { useRef, useState, type ChangeEvent, type FormEvent } from "react";
+import { useEffect, useRef, useState, type ChangeEvent, type FormEvent } from "react";
 import { api } from "../api/client";
 import { importSummary, MAX_TEMPLATE_BYTES, saveTextFile } from "../api/templates";
 import type { Team } from "../api/useWorkspace";
-import type { Bot, Discussion, ModelTier, Room } from "../api/types";
+import type { Bot, Discussion, Harness, HarnessDesk, ModelTier, Room } from "../api/types";
 
 /** 一个房间里最多几个 Bot。和服务端的上限一致，超过时服务端也会拒绝。 */
 const MAX_MEMBERS = 6;
@@ -12,6 +12,17 @@ const TIERS: readonly { id: ModelTier; label: string }[] = [
   { id: "mid", label: "中档" },
   { id: "strong", label: "强" },
 ];
+
+/** Bot 由谁来干活。除了内置的，都是在跑苦乐的这台机器上启动对应的命令行。 */
+const HARNESSES: readonly { id: Harness; label: string }[] = [
+  { id: "builtin", label: "内置（直接调模型）" },
+  { id: "claude_code", label: "Claude Code" },
+  { id: "codex", label: "Codex" },
+  { id: "open_code", label: "OpenCode" },
+  { id: "command", label: "自定义命令" },
+];
+
+const harnessLabel = (harness: Harness) => HARNESSES.find((h) => h.id === harness)?.label ?? harness;
 
 /** 没点名的话怎么接。点了名的总是只给被点到的。 */
 export const DISCUSSIONS: readonly { id: Discussion; label: string; note: string }[] = [
@@ -44,6 +55,19 @@ export function MembersPanel({ room, members, bots, team }: Props) {
   const [imported, setImported] = useState<string | null>(null);
   const [updateExisting, setUpdateExisting] = useState(false);
   const filePicker = useRef<HTMLInputElement>(null);
+  const [desks, setDesks] = useState<readonly HarnessDesk[]>([]);
+  const hasHarness = members.some((bot) => bot.harness !== "builtin");
+  useEffect(() => {
+    if (!hasHarness) return;
+    let live = true;
+    api.listDesks(room.id).then(
+      (found) => live && setDesks(found),
+      () => {},
+    );
+    return () => {
+      live = false;
+    };
+  }, [room.id, hasHarness]);
   const outside = bots.filter((bot) => !room.member_bot_ids.includes(bot.id));
   const full = members.length >= MAX_MEMBERS;
 
@@ -177,9 +201,15 @@ export function MembersPanel({ room, members, bots, team }: Props) {
                 <span className="sa-dot" data-state={bot.enabled ? "idle" : "off"} aria-hidden="true" />
                 <span className="sa-row-label">{bot.name}</span>
                 {bot.id === room.host_bot_id && <span className="sa-tag">入口</span>}
+                {bot.harness !== "builtin" && <span className="sa-tag">{harnessLabel(bot.harness)}</span>}
                 {!bot.enabled && <span className="sa-tag">已停用</span>}
               </div>
               {bot.persona && <p className="sa-member-role">{bot.persona.split("\n")[0]}</p>}
+              <DeskView
+                desk={desks.find((desk) => desk.bot_id === bot.id)}
+                busy={busy}
+                onClose={(how) => void run(async () => setDesks(await api.closeDesk(room.id, bot.id, how)))}
+              />
               <div className="sa-member-actions">
                 {bot.id !== room.host_bot_id && (
                   <button
@@ -292,10 +322,50 @@ export function MembersPanel({ room, members, bots, team }: Props) {
   );
 }
 
+/** harness 成员的独立目录：改了哪些文件，带回还是丢掉。 */
+function DeskView({
+  desk,
+  busy,
+  onClose,
+}: {
+  desk: HarnessDesk | undefined;
+  busy: boolean;
+  onClose(how: "accept" | "discard"): void;
+}) {
+  if (!desk) return null;
+  return (
+    <div className="sa-member-desk" aria-label="独立目录">
+      <p className="sa-member-role">
+        独立目录{desk.branch ? `（分支 ${desk.branch}）` : ""}：
+        {desk.changes.length === 0 ? "还没有改动" : `改了 ${desk.changes.length} 个文件`}
+      </p>
+      {desk.changes.length > 0 && (
+        <ul className="sa-member-changes">
+          {desk.changes.map((change) => (
+            <li key={change.path}>
+              {change.label} {change.path}
+            </li>
+          ))}
+        </ul>
+      )}
+      <div className="sa-member-actions">
+        <button type="button" className="sa-link" disabled={busy} onClick={() => onClose("accept")}>
+          带回工作目录
+        </button>
+        <button type="button" className="sa-link sa-link-danger" disabled={busy} onClick={() => onClose("discard")}>
+          丢掉改动
+        </button>
+      </div>
+    </div>
+  );
+}
+
 interface Draft {
   name: string;
   tier: ModelTier;
   persona: string;
+  harness: Harness;
+  harness_command: string;
   enabled?: boolean;
 }
 
@@ -314,10 +384,13 @@ function BotForm({ bot, busy, error, onSave, onCancel, onDelete }: FormProps) {
   const [tier, setTier] = useState<ModelTier>(bot?.tier ?? "mid");
   const [persona, setPersona] = useState(bot?.persona ?? "");
   const [enabled, setEnabled] = useState(bot?.enabled ?? true);
+  const [harness, setHarness] = useState<Harness>(bot?.harness ?? "builtin");
+  const [command, setCommand] = useState(bot?.harness_command ?? "");
 
   const submit = (event: FormEvent) => {
     event.preventDefault();
-    void onSave({ name: name.trim(), tier, persona, ...(bot ? { enabled } : {}) });
+    const harness_command = harness === "builtin" ? "" : command.trim();
+    void onSave({ name: name.trim(), tier, persona, harness, harness_command, ...(bot ? { enabled } : {}) });
   };
 
   return (
@@ -343,6 +416,28 @@ function BotForm({ bot, busy, error, onSave, onCancel, onDelete }: FormProps) {
           ))}
         </select>
       </label>
+      <label className="sa-field">
+        <span>由谁来干</span>
+        <select value={harness} onChange={(event) => setHarness(event.target.value as Harness)}>
+          {HARNESSES.map(({ id, label }) => (
+            <option key={id} value={id}>
+              {label}
+            </option>
+          ))}
+        </select>
+      </label>
+      {harness !== "builtin" && (
+        <label className="sa-field">
+          <span>{harness === "command" ? "命令" : "命令（不填就用默认的）"}</span>
+          <input
+            value={command}
+            maxLength={300}
+            required={harness === "command"}
+            placeholder={harness === "command" ? "比如 python my_harness.py" : "比如 /usr/local/bin/claude"}
+            onChange={(event) => setCommand(event.target.value)}
+          />
+        </label>
+      )}
       <label className="sa-field">
         <span>分工和人设</span>
         <textarea

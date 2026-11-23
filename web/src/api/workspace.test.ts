@@ -9,6 +9,8 @@ const bot: Bot = {
   persona: "",
   tier: "mid",
   enabled: true,
+  harness: "builtin",
+  harness_command: "",
   created_at: 1,
 };
 const room = (id: string, name: string): Room => ({

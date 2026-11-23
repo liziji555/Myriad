@@ -54,6 +54,7 @@ fn boot_with(dir: &Path, approval_timeout: Duration, replies: Vec<MockReply>) ->
         prompt: None,
         max_steps: 8,
         max_parallel_bots: 3,
+        max_parallel_harness: sa_orchestrator::DEFAULT_MAX_PARALLEL_HARNESS,
         allow_private_network: false,
         approval_timeout,
         work_dir: data.join("work"),

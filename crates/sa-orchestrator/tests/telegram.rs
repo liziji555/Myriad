@@ -58,6 +58,7 @@ fn start_with(dir: &Path, mock: MockProvider, budget: Budget, routines: Routines
         prompt: None,
         max_steps: 8,
         max_parallel_bots: 3,
+        max_parallel_harness: sa_orchestrator::DEFAULT_MAX_PARALLEL_HARNESS,
         allow_private_network: false,
         approval_timeout: Duration::from_secs(600),
         work_dir: data.join("work"),

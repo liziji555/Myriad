@@ -11,9 +11,11 @@ mod agent;
 mod ask;
 mod budget;
 mod deliver;
+mod desks;
 mod episode;
 mod extensions;
 mod github;
+pub mod harness;
 mod room;
 mod router;
 mod routines;
@@ -97,10 +99,15 @@ pub struct Settings {
     pub routines: Routines,
     /// 一个房间里最多几个 Bot 同时说话。多的排队。
     pub max_parallel_bots: usize,
+    /// 整个服务里最多几个 harness 同时在跑。多的排队。
+    pub max_parallel_harness: usize,
 }
 
 /// 一个房间里默认最多 3 个 Bot 同时说话。
 pub const DEFAULT_MAX_PARALLEL_BOTS: usize = 3;
+
+/// 默认最多 2 个 harness 同时在跑：每个都是一个单独的进程，小机器上开多了吃不消。
+pub const DEFAULT_MAX_PARALLEL_HARNESS: usize = 2;
 
 /// 审批卡默认等 10 分钟。
 pub const DEFAULT_APPROVAL_TIMEOUT: Duration = Duration::from_secs(600);
@@ -137,6 +144,10 @@ pub(crate) struct Shared {
     pub approvals: Mutex<HashMap<ApprovalId, oneshot::Sender<ApprovalDecision>>>,
     /// 正在跑的任务。
     pub works: work::Works,
+    /// harness 的空位：整个服务里同时跑的 harness 不超过这么多。
+    pub harness_slots: Arc<tokio::sync::Semaphore>,
+    /// 每个 harness 工位一把锁：harness 在里面干活时，人不能同时带回或丢弃它的改动。
+    pub desk_locks: Mutex<HashMap<(RoomId, BotId), desks::DeskLock>>,
     /// 这个进程在租约上签的名字。
     pub owner: String,
     /// 连上 Telegram 之后，机器人在那边的用户名。
@@ -226,6 +237,7 @@ impl RoomLink {
 
 impl Orchestrator {
     pub fn new(engine: Arc<Engine>, models: Arc<dyn ModelRouter>, settings: Settings) -> Self {
+        let harness_slots = settings.max_parallel_harness.max(1);
         Self {
             shared: Arc::new(Shared {
                 engine,
@@ -237,6 +249,8 @@ impl Orchestrator {
                 shutdown: CancellationToken::new(),
                 approvals: Mutex::new(HashMap::new()),
                 works: work::Works::default(),
+                harness_slots: Arc::new(tokio::sync::Semaphore::new(harness_slots)),
+                desk_locks: Mutex::default(),
                 owner: format!("sa-{}", sa_protocol::RoutineId::new()),
                 telegram_username: Mutex::default(),
                 routine_rooms: Mutex::default(),
