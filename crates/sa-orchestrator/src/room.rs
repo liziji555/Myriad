@@ -340,9 +340,16 @@ async fn work(
         let Some(bot) = members.iter().find(|bot| bot.id == job.bot_id).cloned() else {
             continue;
         };
+        // 出队就占上道：下面等会话的时候人点了停止，也找得到它、停得下来。
+        let cancel = shared.shutdown.child_token();
+        link.lanes
+            .lock()
+            .unwrap()
+            .push((bot.id.clone(), cancel.clone()));
         let session = match session_of(shared, room_id, &bot.id, sessions).await {
             Ok(session) => session,
             Err(error) => {
+                link.lanes.lock().unwrap().retain(|(id, _)| id != &bot.id);
                 fail_fast(shared, room_id, &bot.id, error).await;
                 continue;
             }
