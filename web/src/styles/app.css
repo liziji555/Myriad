@@ -97,7 +97,7 @@ button.sa-stage-room:hover,
 .sa-stage-room[data-docked="true"] {
   padding-left: var(--sa-space-1);
 }
-/* Glimmer 的记号：一个圆，一半深一半亮。 */
+/* Myriad 的记号：跃鲲剪影，跟着文字颜色变。 */
 .sa-brand-mark {
   flex: none;
   width: 22px;
@@ -421,7 +421,7 @@ button.sa-stage-room:hover,
 .sa-sidebar-toggle {
   margin-left: auto;
 }
-/* 抽屉里（窄窗口）上面已经有现场栏写着「Glimmer」，不再写一遍。 */
+/* 抽屉里（窄窗口）上面已经有现场栏写着「Myriad」，不再写一遍。 */
 .sa-shell[data-rooms="open"] .sa-sidebar-head {
   display: none;
 }

@@ -18,7 +18,7 @@ pub const MAX_TEMPLATE_BYTES: usize = 1024 * 1024;
 pub fn template_text(team: &TeamTemplate) -> String {
     let body = toml::to_string_pretty(team).expect("模板里只有字符串、数字和布尔值，总能写成 TOML");
     format!(
-        "# Glimmer 的 Bot 模板。在「成员」页导入，或者用 `sa bot import <这个文件>`。\n\n{body}"
+        "# Myriad 的 Bot 模板。在「成员」页导入，或者用 `sa bot import <这个文件>`。\n\n{body}"
     )
 }
 
@@ -425,7 +425,7 @@ mod tests {
             }),
         };
         let text = template_text(&team);
-        assert!(text.starts_with("# Glimmer"), "{text}");
+        assert!(text.starts_with("# Myriad"), "{text}");
         assert_eq!(parse_template(&text).unwrap(), team);
         // 带 BOM 的（Windows 记事本存的）、JSON 写的也认。
         assert_eq!(parse_template(&format!("\u{feff}{text}")).unwrap(), team);

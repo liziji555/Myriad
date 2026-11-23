@@ -117,7 +117,7 @@ export function Sidebar({
     <nav className="sa-sidebar" aria-label="左栏" data-collapsed={narrow}>
       <header className="sa-sidebar-head">
         <BrandMark />
-        <span className="sa-brand">Glimmer</span>
+        <span className="sa-brand">Myriad</span>
         {docked && (
           <button
             type="button"
@@ -259,7 +259,7 @@ export function Sidebar({
   );
 }
 
-/** Glimmer 的标：一个太极。 */
+/** Myriad 的标：跃鲲剪影。 */
 function BrandMark() {
   return (
     <svg className="sa-brand-mark" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">

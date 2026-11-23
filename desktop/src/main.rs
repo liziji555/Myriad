@@ -1,4 +1,4 @@
-//! Glimmer 的桌面外壳。
+//! Myriad 的桌面外壳。
 //!
 //! 它不是另一套程序，有两种用法：
 //! - **本机**：在本进程里起和 `sa serve` 一样的本机服务，再开一个窗口去看它。
@@ -9,7 +9,7 @@
 //! 主窗口里的页面拿不到任何桌面能力，它能做的事和在浏览器里一样多。
 //! 只有内置的启动页（换本机还是服务器、说明为什么没起来）能调下面几个命令。
 //!
-//! 打开就是本机：没选过工作目录就用「文稿」下的 `Glimmer` 文件夹。
+//! 打开就是本机：没选过工作目录就用「文稿」下的 `Myriad` 文件夹。
 //! 要连服务器、换目录，点左栏底下的连接按钮（主窗口里的页面跳到 [`CONNECT_PATH`]，
 //! 这边拦下来开「连接」窗口），或者菜单「文件 → 连接本机 / 服务器…」。
 
@@ -31,12 +31,12 @@ use tauri_plugin_opener::OpenerExt;
 const SHUTDOWN_WAIT: Duration = Duration::from_secs(10);
 
 #[derive(Parser, Clone)]
-#[command(name = "superagent-desktop", version, about = "Glimmer 桌面版")]
+#[command(name = "superagent-desktop", version, about = "Myriad 桌面版")]
 struct Args {
     /// 数据目录（配置、数据库、会话记录都在这里），和 sa 用的是同一个
     #[arg(long, env = "SA_DATA_DIR", value_name = "目录")]
     data_dir: Option<PathBuf>,
-    /// Bot 能读取的工作目录。不给就用上次选的；没选过就用「文稿」下的「Glimmer」文件夹
+    /// Bot 能读取的工作目录。不给就用上次选的；没选过就用「文稿」下的「Myriad」文件夹
     #[arg(long, value_name = "目录")]
     workdir: Option<PathBuf>,
     /// 用不联网的假模型，不需要密钥（用来试流程）
@@ -45,7 +45,7 @@ struct Args {
     /// 监听端口，覆盖 config.toml 里的设置
     #[arg(long)]
     port: Option<u16>,
-    /// 不在本机起服务，用 SSH 连这台服务器上的 Glimmer（写成 用户@主机）。不给就用上次选的
+    /// 不在本机起服务，用 SSH 连这台服务器上的 Myriad（写成 用户@主机）。不给就用上次选的
     #[arg(long, value_name = "用户@主机", conflicts_with_all = ["workdir", "mock", "port"])]
     server: Option<String>,
     /// 服务器的 SSH 端口
@@ -73,7 +73,7 @@ const START: &str = "start";
 const CONNECT_PATH: &str = "/__desktop/connect";
 
 /// 默认工作目录：在「文稿」（没有就在主目录）下面。
-const DEFAULT_WORKDIR: &str = "Glimmer";
+const DEFAULT_WORKDIR: &str = "Myriad";
 
 /// 正在跑的服务：怎么让它停，以及它停好了没有。
 struct Server {
@@ -236,7 +236,7 @@ fn start_local(handle: &AppHandle, shell: &Shell, workdir: PathBuf) -> tauri::Re
     match started.recv() {
         Ok(Ok(url)) => {
             *shell.serving.lock().unwrap() = Some(workdir);
-            open_main(handle, shell, &url, "Glimmer")
+            open_main(handle, shell, &url, "Myriad")
         }
         Ok(Err(reason)) => open_failed(handle, shell, &reason, None),
         Err(_) => open_failed(handle, shell, "服务还没开始就退出了", None),
@@ -255,7 +255,7 @@ fn start_server(handle: &AppHandle, shell: &Shell, target: &SshTarget) -> tauri:
         Ok(tunnel) => {
             let url = tunnel.url().to_string();
             *shell.tunnel.lock().unwrap() = Some(tunnel);
-            open_main(handle, shell, &url, &format!("Glimmer · {}", target.host))?;
+            open_main(handle, shell, &url, &format!("Myriad · {}", target.host))?;
             if let Some(start) = handle.get_webview_window(START) {
                 start.close()?;
             }
@@ -265,7 +265,7 @@ fn start_server(handle: &AppHandle, shell: &Shell, target: &SshTarget) -> tauri:
     }
 }
 
-/// 「文稿/Glimmer」，没有就建一个。
+/// 「文稿/Myriad」，没有就建一个。
 fn default_workdir(handle: &AppHandle) -> Result<PathBuf, String> {
     let path = handle.path();
     let parent = path
@@ -430,7 +430,7 @@ fn open_main(handle: &AppHandle, shell: &Shell, url: &str, title: &str) -> tauri
         .inner_size(1280.0, 820.0)
         .min_inner_size(720.0, 480.0)
         .initialization_script(format!("window.__SA_DESKTOP__ = {desktop};"))
-        // 窗口里只看 Glimmer 自己的页面；别的网址（PR 链接之类）交给系统的浏览器。
+        // 窗口里只看 Myriad 自己的页面；别的网址（PR 链接之类）交给系统的浏览器。
         .on_navigation(move |to| {
             if to.origin() == home && to.path() == CONNECT_PATH {
                 open_connect(&links);
@@ -473,7 +473,7 @@ fn open_main(handle: &AppHandle, shell: &Shell, url: &str, title: &str) -> tauri
                     downloads
                         .dialog()
                         .message(text)
-                        .title("Glimmer")
+                        .title("Myriad")
                         .kind(kind)
                         .show(|_| {});
                 }
@@ -584,7 +584,7 @@ fn open_start(
         return window.set_focus();
     }
     WebviewWindowBuilder::new(handle, START, WebviewUrl::App("index.html".into()))
-        .title("Glimmer · 连接")
+        .title("Myriad · 连接")
         .inner_size(800.0, 560.0)
         .initialization_script(format!("window.__SA_START__ = {details};"))
         .build()

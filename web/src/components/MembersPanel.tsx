@@ -13,7 +13,7 @@ const TIERS: readonly { id: ModelTier; label: string }[] = [
   { id: "strong", label: "强" },
 ];
 
-/** Bot 由谁来干活。除了内置的，都是在跑 Glimmer 的这台机器上启动对应的命令行。 */
+/** Bot 由谁来干活。除了内置的，都是在跑 Myriad 的这台机器上启动对应的命令行。 */
 const HARNESSES: readonly { id: Harness; label: string }[] = [
   { id: "builtin", label: "内置（直接调模型）" },
   { id: "claude_code", label: "Claude Code" },

@@ -62,12 +62,12 @@ pub fn serve_until(
         .block_on(async move {
             let listener = TcpListener::bind(addr).await.map_err(|e| match e.kind() {
                 ErrorKind::AddrInUse => anyhow::anyhow!(
-                    "端口 {addr} 已被占用：可能已有一个 Glimmer 在运行，或者换一个端口（sa serve --port，或改 config.toml 里的 port）"
+                    "端口 {addr} 已被占用：可能已有一个 Myriad 在运行，或者换一个端口（sa serve --port，或改 config.toml 里的 port）"
                 ),
                 _ => anyhow::Error::new(e).context(format!("无法监听 {addr}")),
             })?;
             let url = format!("http://{}/auth?token={token}", listener.local_addr()?);
-            println!("Glimmer 已启动，数据目录：{}", data_dir.root().display());
+            println!("Myriad 已启动，数据目录：{}", data_dir.root().display());
             println!("Bot 能读取的工作目录：{}", app.workdir);
             if app.mock {
                 println!("当前用的是不联网的假模型（--mock），回复是固定规则生成的。");

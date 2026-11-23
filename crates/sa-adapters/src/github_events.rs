@@ -6,7 +6,7 @@ use sa_protocol::Source;
 use serde_json::Value;
 use sha2::Sha256;
 
-/// Glimmer 自己发到 GitHub 上的评论里带着这个记号：这样的评论再送回来时不看，免得自己和自己说话。
+/// Myriad 自己发到 GitHub 上的评论里带着这个记号：这样的评论再送回来时不看，免得自己和自己说话。
 pub const MARKER: &str = "<!-- superagent -->";
 
 /// 验 `X-Hub-Signature-256`：`sha256=` 加上用密钥对原始请求体算出来的 HMAC。比较是定长时间的。
@@ -206,9 +206,9 @@ pub fn parse(event: &str, delivery: &str, payload: &Value, options: &Options) ->
         }
         _ => return Parsed::Ignored(format!("不管 {event} 事件的 {action} 动作")),
     };
-    // 只看正文：记号是 Glimmer 自己写在评论里的。标题里有这几个字不算。
+    // 只看正文：记号是 Myriad 自己写在评论里的。标题里有这几个字不算。
     if found.body.contains(MARKER) {
-        return Parsed::Ignored("是 Glimmer 自己发的".into());
+        return Parsed::Ignored("是 Myriad 自己发的".into());
     }
     // 只去掉前后的空行：正文第一行开头的空格是缩进（缩进四格的代码块），要留着。
     let text = found.body.trim_end().trim_start_matches(['\r', '\n']);

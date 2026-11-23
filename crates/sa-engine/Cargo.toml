@@ -1,6 +1,6 @@
 [package]
 name = "sa-engine"
-description = "Glimmer 的领域层：唯一的状态写入者"
+description = "Myriad 的领域层：唯一的状态写入者"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

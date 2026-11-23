@@ -1,4 +1,4 @@
-//! 测试用的假 harness：按 Glimmer 自定义命令的格式说话，不调任何模型。
+//! 测试用的假 harness：按 Myriad 自定义命令的格式说话，不调任何模型。
 //!
 //! 从标准输入读这一轮的话，看里面有没有这些词：
 //! - 「写」：在当前目录写一个 `harness-<会话号>.txt`
@@ -40,7 +40,7 @@ fn main() {
     say(json!({"type": "step_end", "id": "1", "ok": true, "output": listed.join("\n")}));
 
     if prompt.contains("子进程") {
-        // 故意不等它：测试要看停止时 Glimmer 能不能把它一起杀掉。
+        // 故意不等它：测试要看停止时 Myriad 能不能把它一起杀掉。
         #[allow(clippy::zombie_processes)]
         let child = std::process::Command::new(if cfg!(windows) { "ping" } else { "sleep" })
             .args(if cfg!(windows) {
@@ -54,7 +54,7 @@ fn main() {
         std::fs::write("child.pid", child.id().to_string()).expect("写不了 child.pid");
     }
     if prompt.contains("后台") {
-        // 故意不等它，也不关它的输出：测试要看 harness 退出后 Glimmer 不会一直等这个管道。
+        // 故意不等它，也不关它的输出：测试要看 harness 退出后 Myriad 不会一直等这个管道。
         #[allow(clippy::zombie_processes)]
         let child = std::process::Command::new(if cfg!(windows) { "ping" } else { "sleep" })
             .args(if cfg!(windows) {

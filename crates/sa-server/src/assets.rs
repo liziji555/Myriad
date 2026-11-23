@@ -7,7 +7,7 @@ use rust_embed::RustEmbed;
 #[folder = "../../web/dist"]
 struct Frontend;
 
-const NOT_BUILT: &str = "<!doctype html><meta charset=\"utf-8\"><title>Glimmer</title>\
+const NOT_BUILT: &str = "<!doctype html><meta charset=\"utf-8\"><title>Myriad</title>\
 <p>前端还没有构建。请在仓库根目录运行 <code>pnpm --dir web install</code> 和 \
 <code>pnpm --dir web build</code>，再重新编译。</p>";
 
