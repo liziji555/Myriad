@@ -253,8 +253,18 @@ pub async fn commit_and_diff(
     };
     task_git(workdir, add).await?;
     // 只看暂存区：工作目录是仓库里的一层时，别的层里有没提交的东西不关这次提交的事。
-    let staged = task_git(workdir, &["diff", "--cached", "--name-only"]).await?;
-    if !staged.trim().is_empty() {
+    // 子模块指针的改动也算：仓库配了 `diff.ignoreSubmodules` 也不能漏。名字全是空格的文件也算，所以不 trim。
+    let staged = task_git(
+        workdir,
+        &[
+            "diff",
+            "--cached",
+            "--name-only",
+            "--ignore-submodules=none",
+        ],
+    )
+    .await?;
+    if !staged.is_empty() {
         task_git(workdir, &["commit", "-q", "--no-verify", "-m", message]).await?;
     }
     let listed = task_git(
@@ -575,6 +585,17 @@ mod tests {
         );
         // 没有新改动时再算一次，结果一样，也不会多一个空提交。
         assert_eq!(commit_and_diff(&workdir, "修 bug").await.unwrap(), changed);
+        // 名字全是空格的文件也是改动，照样提交。
+        #[cfg(unix)]
+        {
+            std::fs::write(dir.join("   "), "空格\n").unwrap();
+            let changed = commit_and_diff(&workdir, "修 bug").await.unwrap();
+            assert!(changed.iter().any(|(name, _)| name == "   "), "{changed:?}");
+            let status = git(&dir, &["status", "--porcelain"]).await.unwrap();
+            assert!(status.trim().is_empty(), "{status}");
+            git(&dir, &["rm", "-q", "--", "   "]).await.unwrap();
+            git(&dir, &["commit", "-q", "-m", "去掉"]).await.unwrap();
+        }
         // 人的工作目录在验收之前不受影响。
         assert_eq!(
             std::fs::read_to_string(workspace.join("a.txt")).unwrap(),

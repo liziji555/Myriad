@@ -47,6 +47,11 @@ impl Tool for WriteTool {
         write_permission(arg(input, "path"), ctx)
     }
 
+    // 写文件一下子就完：已经开始写了，就等它写完再停。
+    fn finishes_once_started(&self) -> bool {
+        true
+    }
+
     async fn call(&self, input: Value, ctx: &ToolCtx) -> ToolResult {
         let input: Input = parse_input(input)?;
         if input.content.len() > MAX_BYTES {
@@ -125,16 +130,22 @@ pub(crate) fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()>
     }
     // 名字里不带目标文件名：目标的名字已经到了文件系统的长度上限时，临时文件也建得出来。
     let temp = dir.join(format!(".sa-tmp-{}", uuid::Uuid::new_v4().simple()));
+    let original = std::fs::metadata(path).ok().map(|meta| meta.permissions());
     let result = (|| {
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp)?;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        // 覆盖已有文件时，临时文件先只让自己读写：原文件可能是私有的，换上去之前别人读不到新内容。
+        #[cfg(unix)]
+        if original.is_some() {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temp)?;
         file.write_all(bytes)?;
         file.sync_all()?;
         // 覆盖已有文件时保留它原来的权限（比如可执行位）。
-        if let Ok(meta) = std::fs::metadata(path) {
-            std::fs::set_permissions(&temp, meta.permissions())?;
+        if let Some(permissions) = original {
+            std::fs::set_permissions(&temp, permissions)?;
         }
         std::fs::rename(&temp, path)
     })();

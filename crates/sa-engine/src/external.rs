@@ -460,7 +460,7 @@ fn is_task_of(task: &Task, repo: &str, pr: Option<u64>, branch: Option<&str>) ->
 /// 送不送看它在回谁：回 Telegram 里说的话，送回那个聊天；定时任务和外面来的事引出的话没有人在界面前等着，
 /// 送到房间连着的每个 Telegram 聊天；回界面里说的话，不送。
 ///
-/// 「在回谁」取它前面最近的一条可能引出这句话的：人说的话（点了别的 Bot 的名、而它又不是经交接来说的，不算），
+/// 「在回谁」取它前面最近的一条可能引出这句话的：人说的话（Telegram 里点了别的 Bot 的名、而它又不是经交接来说的，不算），
 /// 或者指定交给这个 Bot 的定时任务和事件。只摆在时间线上的事、交给别的 Bot 的事不算数，
 /// 否则回界面里的话会被当成它们引出来的，送到所有聊天里去。
 pub(crate) fn relay(tx: &Transaction<'_>, message: &Message) -> sa_store::Result<()> {
@@ -763,6 +763,35 @@ mod tests {
         assert_eq!(out[0].target, "99");
     }
 
+    #[test]
+    fn a_telegram_message_for_another_bot_does_not_take_a_reply_to_the_web() {
+        let (engine, room, bot) = engine();
+        let other = engine
+            .create_bot("Coder", sa_protocol::ModelTier::Mid, "")
+            .unwrap();
+        engine.add_room_member(&room, &other.id).unwrap();
+        let pairing = engine.create_pairing(&room).unwrap();
+        engine.redeem_pairing(&pairing.code, "42", "张三").unwrap();
+
+        // 人在界面里问入口 Bot；它回之前，Telegram 里有人点名问 Coder。入口 Bot 回的是界面里的话，不送。
+        engine
+            .post_user_message(&room, "账单里那笔钱是怎么回事")
+            .unwrap();
+        let Receipt::Stored(asked) = engine
+            .receive(said("u-1", "42", "@Coder 看看日志"))
+            .unwrap()
+        else {
+            panic!("应该收下");
+        };
+        assert_eq!(asked.mentions, vec![other.id.clone()]);
+        reply(&engine, &room, &bot, "那笔是退款。");
+        let queued = || engine.pending_outbound(Source::Telegram, 10).unwrap();
+        assert!(queued().is_empty());
+        // Coder 回的是 Telegram 里的话：送回去。
+        reply(&engine, &room, &other.id, "日志没问题。");
+        assert_eq!(queued().len(), 1);
+    }
+
     fn review(key: &str, pr: u64) -> Incoming {
         Incoming {
             source: Source::Github,
@@ -881,24 +910,23 @@ mod tests {
         let queued = || engine.pending_outbound(Source::Telegram, 10).unwrap();
         assert_eq!(queued().len(), 1);
 
-        // 事件交给了入口 Bot，它还没说，人在界面里点名问另一个 Bot：两个都会说。
-        // 被点名的回的是界面里的话，不送；入口 Bot 说的是那件事，照常送出去。
+        // 事件交给了入口 Bot，它还没说，人在界面里点名问另一个 Bot：入口 Bot 也看得到界面里的这句话，
+        // 它的回复可能带着界面里的内容，所以两个都不送，免得界面里的话被转到外面。
         engine.receive(issue("d-3", "me/app")).unwrap();
         engine
             .post_user_message(&room, "@Coder 上个月的账对上了吗")
             .unwrap();
         reply(&engine, &room, &other.id, "对上了。");
         assert_eq!(queued().len(), 1);
-        reply(&engine, &room, &bot, "又有个新 issue。");
-        assert_eq!(queued().len(), 2);
-        assert!(queued()[1].body.ends_with("又有个新 issue。"));
-        // 入口 Bot 被交接过来接着回界面里的话（不是第一手）：不送。
+        reply(&engine, &room, &bot, "又有个新 issue。账也对上了。");
+        assert_eq!(queued().len(), 1);
+        // 入口 Bot 被交接过来接着回界面里的话（不是第一手）：也不送。
         let draft = engine.begin_bot_message(&room, &bot, 1).unwrap();
         engine.append_delta(&draft.id, "补充：账是 Coder 对的。");
         engine
             .finish_message(&draft.id, MessageState::Complete, None)
             .unwrap();
-        assert_eq!(queued().len(), 2);
+        assert_eq!(queued().len(), 1);
     }
 
     #[test]

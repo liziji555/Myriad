@@ -346,9 +346,16 @@ async fn work(
         let Some(bot) = members.iter().find(|bot| bot.id == job.bot_id).cloned() else {
             continue;
         };
+        // 出队就占上道：下面等会话的时候人点了停止，也找得到它、停得下来。
+        let cancel = shared.shutdown.child_token();
+        link.lanes
+            .lock()
+            .unwrap()
+            .push((bot.id.clone(), cancel.clone()));
         let session = match session_of(shared, room_id, &bot.id, sessions).await {
             Ok(session) => session,
             Err(error) => {
+                link.lanes.lock().unwrap().retain(|(id, _)| id != &bot.id);
                 fail_fast(shared, room_id, &bot.id, error).await;
                 continue;
             }
@@ -358,11 +365,6 @@ async fn work(
             .filter(|other| other.id != bot.id)
             .cloned()
             .collect();
-        let cancel = shared.shutdown.child_token();
-        link.lanes
-            .lock()
-            .unwrap()
-            .push((bot.id.clone(), cancel.clone()));
         let (shared, room_id, link) = (shared.clone(), room_id.clone(), link.clone());
         lanes.spawn(async move {
             let reply = Mutex::new(None);
@@ -849,6 +851,7 @@ async fn turn(
                 retry: RetryPolicy::default(),
             };
             let mut ctx = ToolCtx::new(shared.settings.fence.clone());
+            ctx.cancel = cancel.clone();
             ctx.allow_private_network = shared.settings.allow_private_network;
             // 别的 Bot 可能同时在这个工作目录里干活（包括这一轮中途才进房间的）：改文件、执行命令一个一个来。
             // 主 Agent 只看不动手：改文件、执行命令都派给成员。
@@ -1832,9 +1835,10 @@ fn publishes(command: &str) -> bool {
 /// 「总是允许」记的是什么：命令记原文，写文件记文件的完整路径。其他工具不能记。
 fn rule_key(tool: &str, input: &Value, fence: &Fence) -> Option<String> {
     match tool {
+        // 命令按工作目录记：同一条命令在另一个目录里跑的是那里的脚本，要重新问。
         "shell" => {
             let command = input["command"].as_str()?.trim();
-            (!command.is_empty()).then(|| command.to_string())
+            (!command.is_empty()).then(|| format!("{}\n{command}", fence.root().display()))
         }
         "write" | "edit" => {
             let (real, _) = fence.resolve_for_write(input["path"].as_str()?).ok()?;

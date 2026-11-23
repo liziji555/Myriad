@@ -645,9 +645,11 @@ async fn approval_card_is_decided_over_http_and_rules_can_be_revoked() {
     let rules: Vec<PermissionRule> =
         json(app.clone().oneshot(get(&rules_path)).await.unwrap()).await;
     assert_eq!(rules.len(), 1);
-    assert_eq!(
-        (rules[0].tool.as_str(), rules[0].pattern.as_str()),
-        ("shell", "echo ok")
+    assert_eq!(rules[0].tool, "shell");
+    assert!(
+        rules[0].pattern.ends_with("\necho ok"),
+        "{}",
+        rules[0].pattern
     );
     assert_eq!(status(say("运行 `echo ok`")).await, StatusCode::CREATED);
     let all = settled(&app, &room, 4).await;
