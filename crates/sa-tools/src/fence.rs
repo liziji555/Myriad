@@ -276,9 +276,12 @@ mod tests {
             assert!(fence.resolve_for_write(dir).is_err(), "{dir}");
         }
         // 外面的文件后面跟 `..`：操作系统不认，不能退回来算成工作目录里的文件。
+        // （Windows 按字面处理 `..`，那里它确实就是工作目录里的文件。）
+        #[cfg(unix)]
         let (back, inside) = fence
             .resolve_for_write("../secret.txt/../work/src/a.rs")
             .unwrap();
+        #[cfg(unix)]
         assert!(!inside, "{back:?}");
     }
 
