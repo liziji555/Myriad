@@ -1,7 +1,9 @@
 //! Bot 的增删改，房间的成员和入口 Bot。
 
 use crate::{now_ms, to_json, Audit, Engine, EngineError, Result, MAX_ROOM_NAME_CHARS};
-use sa_protocol::{Bot, BotId, BotKind, BotRef, EventKind, ModelTier, Room, RoomId};
+use sa_protocol::{
+    Bot, BotId, BotKind, BotRef, EventKind, ModelTier, Room, RoomId, UpdateRoomRequest, MAX_ROUNDS,
+};
 use sa_store::{bots, events, rooms};
 
 pub const MAX_BOT_NAME_CHARS: usize = 24;
@@ -129,8 +131,21 @@ impl Engine {
         name: Option<&str>,
         host_bot_id: Option<&BotId>,
     ) -> Result<Room> {
+        self.edit_room(
+            id,
+            &UpdateRoomRequest {
+                name: name.map(str::to_string),
+                host_bot_id: host_bot_id.cloned(),
+                discussion: None,
+                rounds: None,
+            },
+        )
+    }
+
+    /// 改房间的设置：名字、入口 Bot（必须已经是成员）、没点名的话怎么接、轮流讨论转几圈。没写的不变。
+    pub fn edit_room(&self, id: &RoomId, edit: &UpdateRoomRequest) -> Result<Room> {
         self.change_room(id, |room, _| {
-            if let Some(name) = name {
+            if let Some(name) = &edit.name {
                 let name = name.trim();
                 if name.is_empty() {
                     return Err(EngineError::Invalid("房间名不能为空".into()));
@@ -142,13 +157,24 @@ impl Engine {
                 }
                 room.name = name.to_string();
             }
-            if let Some(host) = host_bot_id {
+            if let Some(host) = &edit.host_bot_id {
                 if !room.member_bot_ids.contains(host) {
                     return Err(EngineError::Invalid(
                         "入口 Bot 必须先是这个房间的成员".into(),
                     ));
                 }
                 room.host_bot_id = Some(host.clone());
+            }
+            if let Some(rounds) = edit.rounds {
+                if !(1..=MAX_ROUNDS).contains(&rounds) {
+                    return Err(EngineError::Invalid(format!(
+                        "轮流讨论转 1 到 {MAX_ROUNDS} 圈"
+                    )));
+                }
+                room.rounds = rounds;
+            }
+            if let Some(discussion) = edit.discussion {
+                room.discussion = discussion;
             }
             Ok(RoomChange::Keep)
         })

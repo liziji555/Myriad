@@ -8,6 +8,7 @@ export type { AuditEntry } from "./generated/AuditEntry";
 export type { AuditPage } from "./generated/AuditPage";
 export type { ArtifactKind } from "./generated/ArtifactKind";
 export type { Bot } from "./generated/Bot";
+export type { Discussion } from "./generated/Discussion";
 export type { BotId } from "./generated/BotId";
 export type { BotRef } from "./generated/BotRef";
 export type { CreateBotRequest } from "./generated/CreateBotRequest";

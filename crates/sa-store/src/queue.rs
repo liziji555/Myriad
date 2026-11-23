@@ -120,6 +120,8 @@ mod tests {
             name: "房间".into(),
             host_bot_id: None,
             member_bot_ids: vec![],
+            discussion: Default::default(),
+            rounds: sa_protocol::DEFAULT_ROUNDS,
             created_at: 1,
             updated_at: 1,
         };

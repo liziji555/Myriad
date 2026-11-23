@@ -453,6 +453,8 @@ mod tests {
     fn seeded() -> (Store, RoomId) {
         let store = Store::open_in_memory().unwrap();
         let room = Room {
+            discussion: Default::default(),
+            rounds: sa_protocol::DEFAULT_ROUNDS,
             id: RoomId::new(),
             name: "房间".into(),
             host_bot_id: None,

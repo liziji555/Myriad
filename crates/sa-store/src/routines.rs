@@ -245,6 +245,8 @@ mod tests {
             created_at: 1,
         };
         let room = Room {
+            discussion: Default::default(),
+            rounds: sa_protocol::DEFAULT_ROUNDS,
             id: RoomId::new(),
             name: "房间".into(),
             host_bot_id: Some(bot.id.clone()),

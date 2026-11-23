@@ -1,4 +1,4 @@
-use crate::{ApprovalDecision, BotId, Message, ModelTier, RoomId, Run, Task};
+use crate::{ApprovalDecision, BotId, Discussion, Message, ModelTier, RoomId, Run, Task};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
@@ -105,6 +105,13 @@ pub struct UpdateRoomRequest {
     #[serde(default)]
     #[ts(optional)]
     pub host_bot_id: Option<BotId>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub discussion: Option<Discussion>,
+    /// 轮流讨论转几圈，1 到 3。
+    #[serde(default)]
+    #[ts(optional)]
+    pub rounds: Option<u32>,
 }
 
 /// 人开一个任务。

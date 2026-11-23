@@ -11,8 +11,9 @@ use sa_kernel::{
 };
 use sa_llm::{RetryPolicy, Usage};
 use sa_protocol::{
-    ApprovalDecision, ApprovalId, Bot, BotId, Message, MessageId, MessageKind, MessageState, Room,
-    RoomActivity, RoomId, Sender, SessionId, Source, StepApproval, StepState, ToolStep,
+    ApprovalDecision, ApprovalId, Bot, BotId, Discussion, Message, MessageId, MessageKind,
+    MessageState, Room, RoomActivity, RoomId, Sender, SessionId, Source, StepApproval, StepState,
+    ToolStep, MAX_ROUNDS,
 };
 use sa_tools::{Fence, ToolCtx};
 use serde_json::Value;
@@ -233,7 +234,7 @@ async fn finished(
         return;
     };
     if !session.lock().await.seen(seq) {
-        link.episode().push(Job { bot_id, hop: 0 });
+        link.episode().push(Job::new(bot_id, 0));
     }
 }
 
@@ -300,17 +301,16 @@ async fn work(
             .iter()
             .any(|message| message.kind == MessageKind::Chat)
         {
-            let first = first.into_iter().map(|bot_id| Job { bot_id, hop: 0 });
             let latest = fresh
                 .iter()
                 .rfind(|m| m.kind == MessageKind::Chat)
                 .map_or(0, |m| m.seq);
             if link.renewed.fetch_max(latest, Ordering::SeqCst) < latest {
                 // 人说了新的话：之前排着队的不算了，重新开始一轮。正在说的接着说。
-                episode.restart(first.collect(), running.len());
+                episode.restart(first, running.len());
             } else {
                 // 正在说的 Bot 已经先读到这句话、为它重新开始过这一轮：它为这句话找的人还排着，不能清掉。
-                episode.start(first.collect());
+                episode.start(first);
             }
         }
         // 定时任务和外面来的事各有指定的 Bot，别的 Bot 看不到它们：每个被指定的都要轮到。
@@ -360,7 +360,7 @@ async fn work(
         let (shared, room_id, link) = (shared.clone(), room_id.clone(), link.clone());
         lanes.spawn(async move {
             let result = turn(
-                &shared, &room_id, &bot, job.hop, &others, &link, &session, cancel,
+                &shared, &room_id, &bot, &job, &others, &link, &session, cancel,
             )
             .await;
             (bot.id, result)
@@ -528,7 +528,7 @@ async fn dispatch(
     link: &Arc<RoomLink>,
     running: &[BotId],
     owed: &mut HashMap<BotId, i64>,
-) -> Vec<BotId> {
+) -> Vec<Job> {
     let is_member = |id: &BotId| members.iter().any(|bot| &bot.id == id);
     // 已经被停下、还没收尾的 Bot 不算在说：给它的新话要另外排队，不能记成它这一轮该看的。
     let running: Vec<BotId> = {
@@ -565,6 +565,42 @@ async fn dispatch(
             } else if !first.contains(bot_id) {
                 first.push(bot_id.clone());
             }
+        }
+    }
+    let mut first: Vec<Job> = first
+        .into_iter()
+        .map(|bot_id| Job::new(bot_id, 0))
+        .collect();
+    // 房间设了别的讨论方式：没点名的话不挑人，按讨论方式叫上大家。
+    if let Some(latest) = open.filter(|_| room.discussion != Discussion::Normal) {
+        let everyone = members.iter().map(|bot| bot.id.clone());
+        match room.discussion {
+            Discussion::Normal => {}
+            // 每个 Bot 各答一份，同时开始。正在说的会在这一轮里看到。
+            Discussion::Parallel | Discussion::Blind => {
+                let blind = (room.discussion == Discussion::Blind).then_some(latest.seq);
+                for bot_id in everyone {
+                    if !running.contains(&bot_id) && !first.iter().any(|job| job.bot_id == bot_id) {
+                        first.push(Job {
+                            blind,
+                            ..Job::new(bot_id, 0)
+                        });
+                    }
+                }
+            }
+            // 按进房间的先后一个接一个说，转 `rounds` 圈。
+            Discussion::Rounds => {
+                let order: Vec<BotId> = everyone.collect();
+                for _ in 0..room.rounds.clamp(1, MAX_ROUNDS) {
+                    first.extend(order.iter().map(|bot_id| Job {
+                        in_turn: true,
+                        ..Job::new(bot_id.clone(), 0)
+                    }));
+                }
+            }
+        }
+        if !first.is_empty() {
+            return first;
         }
     }
     // 没点名的话：已经有 Bot 在说或者被点到了，它们会看到；否则挑一个人来接。
@@ -608,7 +644,10 @@ async fn dispatch(
     )
     .await;
     *link.routing.lock().unwrap() = None;
-    chosen.into_iter().collect()
+    chosen
+        .into_iter()
+        .map(|bot_id| Job::new(bot_id, 0))
+        .collect()
 }
 
 /// 打开（或取出已经打开的）某个 Bot 在这个房间里的会话记录。
@@ -672,13 +711,13 @@ async fn announce(shared: &Arc<Shared>, room_id: &RoomId, link: &RoomLink) {
     }
 }
 
-/// 让一个 Bot 说一轮。`hop` 是这次发言在 Bot 之间转到了第几手，`others` 是房间里别的 Bot。
+/// 让一个 Bot 说一轮。`job` 里有这次发言在 Bot 之间转到了第几手，`others` 是房间里别的 Bot。
 #[allow(clippy::too_many_arguments)]
 async fn turn(
     shared: &Arc<Shared>,
     room_id: &RoomId,
     bot: &Bot,
-    hop: u32,
+    job: &Job,
     others: &[Bot],
     link: &Arc<RoomLink>,
     session: &tokio::sync::Mutex<Session>,
@@ -693,6 +732,7 @@ async fn turn(
         ..
     } = &mut *session;
     let session_id = session_id.clone();
+    let hop = job.hop;
 
     let mut names: HashMap<BotId, String> = others
         .iter()
@@ -710,6 +750,7 @@ async fn turn(
         ahead: std::mem::take(ahead),
         first_drain: true,
         hop: Arc::new(AtomicU32::new(hop)),
+        blind: job.blind,
     };
     let live_hop = inbox.hop.clone();
     let first = inbox.drain().await;
@@ -914,6 +955,8 @@ struct RoomInbox {
     first_drain: bool,
     /// 这次发言转到了第几手，和 `ask_bot` 共用。
     hop: Arc<AtomicU32>,
+    /// 独立评议：别的 Bot 在这条之后说的话这一轮先不看，下一轮再看。
+    blind: Option<i64>,
 }
 
 impl RoomInbox {
@@ -1017,7 +1060,9 @@ impl Inbox for RoomInbox {
                 ),
             };
             // 别人还没写完的先不看：它写完了再看，后面写完的照常看。
-            if message.state == MessageState::Streaming {
+            // 独立评议时别人对这句话的回答也一样，这一轮不看。
+            let hidden = speaker.is_some() && self.blind.is_some_and(|after| message.seq > after);
+            if message.state == MessageState::Streaming || hidden {
                 waiting = true;
                 continue;
             }

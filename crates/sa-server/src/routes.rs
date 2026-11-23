@@ -252,10 +252,7 @@ pub async fn update_room(
 ) -> Result<Json<Room>, AppError> {
     let Json(body) = body.map_err(|e| AppError::bad_request(e.body_text()))?;
     Ok(Json(
-        blocking(&state, move |engine| {
-            engine.update_room(&room_id, body.name.as_deref(), body.host_bot_id.as_ref())
-        })
-        .await?,
+        blocking(&state, move |engine| engine.edit_room(&room_id, &body)).await?,
     ))
 }
 

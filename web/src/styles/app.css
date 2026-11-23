@@ -2676,3 +2676,12 @@ button.sa-row:hover {
   height: 28px;
   background: var(--sa-warn);
 }
+
+.sa-discussion {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--sa-space-2);
+}
+.sa-discussion .sa-field:only-child {
+  grid-column: 1 / -1;
+}

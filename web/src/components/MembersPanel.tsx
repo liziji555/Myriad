@@ -2,7 +2,7 @@ import { useRef, useState, type ChangeEvent, type FormEvent } from "react";
 import { api } from "../api/client";
 import { importSummary, MAX_TEMPLATE_BYTES, saveTextFile } from "../api/templates";
 import type { Team } from "../api/useWorkspace";
-import type { Bot, ModelTier, Room } from "../api/types";
+import type { Bot, Discussion, ModelTier, Room } from "../api/types";
 
 /** 一个房间里最多几个 Bot。和服务端的上限一致，超过时服务端也会拒绝。 */
 const MAX_MEMBERS = 6;
@@ -12,6 +12,17 @@ const TIERS: readonly { id: ModelTier; label: string }[] = [
   { id: "mid", label: "中档" },
   { id: "strong", label: "强" },
 ];
+
+/** 没点名的话怎么接。点了名的总是只给被点到的。 */
+export const DISCUSSIONS: readonly { id: Discussion; label: string; note: string }[] = [
+  { id: "normal", label: "普通", note: "没点名时挑一个最合适的 Bot 接" },
+  { id: "parallel", label: "并行回复", note: "没点名时每个 Bot 各答一份，同时开始" },
+  { id: "rounds", label: "轮流讨论", note: "没点名时按进房间的先后一个接一个说，后说的看得到先说的" },
+  { id: "blind", label: "独立评议", note: "没点名时每个 Bot 各答一份，这一轮互相看不到对方的答案" },
+];
+
+/** 轮流讨论最多转几圈。和服务端的上限一致。 */
+const MAX_ROUNDS = 3;
 
 interface Props {
   room: Room;
@@ -115,6 +126,46 @@ export function MembersPanel({ room, members, bots, team }: Props) {
           {error}
         </p>
       )}
+      <h3 className="sa-panel-heading">讨论方式</h3>
+      <div className="sa-discussion">
+        <label className="sa-field">
+          <span>没点名的话</span>
+          <select
+            value={room.discussion}
+            disabled={busy}
+            onChange={(event) =>
+              void run(() => team.updateRoom(room.id, { discussion: event.target.value as Discussion }))
+            }
+          >
+            {DISCUSSIONS.map(({ id, label }) => (
+              <option key={id} value={id}>
+                {label}
+              </option>
+            ))}
+          </select>
+        </label>
+        {room.discussion === "rounds" && (
+          <label className="sa-field">
+            <span>转几圈</span>
+            <select
+              value={room.rounds}
+              disabled={busy}
+              onChange={(event) => void run(() => team.updateRoom(room.id, { rounds: Number(event.target.value) }))}
+            >
+              {Array.from({ length: MAX_ROUNDS }, (_, index) => index + 1).map((rounds) => (
+                <option key={rounds} value={rounds}>
+                  {rounds} 圈
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
+      </div>
+      <p className="sa-panel-note">
+        {DISCUSSIONS.find(({ id }) => id === room.discussion)?.note}。用 @ 点了名的话只给被点到的。
+      </p>
+
+      <h3 className="sa-panel-heading">成员</h3>
       {members.length === 0 ? (
         <p className="sa-panel-empty">这个房间还没有 Bot。</p>
       ) : (
