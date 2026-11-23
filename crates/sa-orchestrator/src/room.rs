@@ -646,11 +646,8 @@ async fn turn(
             };
             let mut ctx = ToolCtx::new(shared.settings.fence.clone());
             ctx.allow_private_network = shared.settings.allow_private_network;
-            let mut tools = shared.tools();
-            if !others.is_empty() {
-                // 别的 Bot 可能同时在这个工作目录里干活：改文件、执行命令一个一个来。
-                tools = crate::serial::one_writer_at_a_time(tools, link.clone());
-            }
+            // 别的 Bot 可能同时在这个工作目录里干活（包括这一轮中途才进房间的）：改文件、执行命令一个一个来。
+            let mut tools = crate::serial::one_writer_at_a_time(shared.tools(), link.clone());
             if let Some(tool) = skills.tool {
                 tools.register(tool);
             }
