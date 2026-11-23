@@ -1,6 +1,6 @@
 [package]
 name = "sa-tools"
-description = "苦乐的工具：读文件、列目录、按名字和内容搜索、抓网页"
+description = "Glimmer 的工具：读文件、列目录、按名字和内容搜索、抓网页"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

@@ -784,7 +784,7 @@ async fn approved_outside_write_happens_and_always_covers_that_file_only() {
     assert!(!dir.path().join("另一个.txt").exists());
 }
 
-/// 苦乐自己的数据目录：不问，直接不让写。
+/// Glimmer 自己的数据目录：不问，直接不让写。
 #[tokio::test]
 async fn data_dir_writes_are_refused_without_asking() {
     let dir = tempfile::tempdir().unwrap();

@@ -15,13 +15,13 @@ window.saShow = (state) => {
   const mode = state.current?.mode;
   $("local-badge").hidden = mode !== "local";
   $("server-badge").hidden = mode !== "server";
-  $("workdir").textContent = state.workdir ?? "第一次用时会在「文稿」下建一个「苦乐」文件夹";
+  $("workdir").textContent = state.workdir ?? "第一次用时会在「文稿」下建一个「Glimmer」文件夹";
   if (state.view === "connect") {
     $("host").value = state.host ?? "";
     $("port").value = state.sshPort ?? "";
   }
   const remote = Boolean(state.server);
-  $("failed-title").textContent = remote ? "没能连上服务器" : "苦乐没能启动";
+  $("failed-title").textContent = remote ? "没能连上服务器" : "Glimmer 没能启动";
   $("reason").textContent = state.reason ?? "没有拿到原因。";
   $("local-hints").hidden = remote;
   $("server-hints").hidden = !remote;

@@ -117,7 +117,7 @@ export function Sidebar({
     <nav className="sa-sidebar" aria-label="左栏" data-collapsed={narrow}>
       <header className="sa-sidebar-head">
         <BrandMark />
-        <span className="sa-brand">苦乐</span>
+        <span className="sa-brand">Glimmer</span>
         {docked && (
           <button
             type="button"
@@ -259,7 +259,7 @@ export function Sidebar({
   );
 }
 
-/** 苦乐的标：一个太极。 */
+/** Glimmer 的标：一个太极。 */
 function BrandMark() {
   return (
     <svg className="sa-brand-mark" viewBox="0 0 16 16" aria-hidden="true">

@@ -1,6 +1,6 @@
 [package]
 name = "sa-adapters"
-description = "苦乐和外面的接口：GitHub 事件、Telegram"
+description = "Glimmer 和外面的接口：GitHub 事件、Telegram"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

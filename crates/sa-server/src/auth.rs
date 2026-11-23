@@ -59,7 +59,7 @@ pub async fn exchange_token(
         _ => (
             StatusCode::UNAUTHORIZED,
             Html(
-                "<!doctype html><meta charset=\"utf-8\"><title>苦乐</title>\
+                "<!doctype html><meta charset=\"utf-8\"><title>Glimmer</title>\
                  <p>访问令牌不正确。请用 <code>sa serve</code> 打印的链接重新打开。</p>",
             ),
         )

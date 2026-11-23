@@ -59,7 +59,7 @@ pub enum Harness {
     ClaudeCode,
     Codex,
     OpenCode,
-    /// 自己指定的命令，按苦乐约定的格式一行一个 JSON 报告每一步。
+    /// 自己指定的命令，按 Glimmer 约定的格式一行一个 JSON 报告每一步。
     Command,
 }
 

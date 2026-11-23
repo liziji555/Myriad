@@ -1,6 +1,6 @@
 [package]
 name = "sa-orchestrator"
-description = "苦乐的编排层：房间里来了消息，让谁接、怎么跑、结果写回哪"
+description = "Glimmer 的编排层：房间里来了消息，让谁接、怎么跑、结果写回哪"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

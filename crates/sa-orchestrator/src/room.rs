@@ -971,7 +971,7 @@ async fn harness_turn(
     record_inputs(transcript, inputs)?;
     let label = bot.harness.label();
 
-    // 启动前问一次人：harness 里面的每一步苦乐管不到，只能在门口问。
+    // 启动前问一次人：harness 里面的每一步 Glimmer 管不到，只能在门口问。
     let workspace = shared.settings.fence.root_display();
     let title = format!("让 {}（{label}）在自己的独立目录里动手", bot.name);
     let input = serde_json::json!({
@@ -983,7 +983,7 @@ async fn harness_turn(
         .tool_started("harness-start", "harness", &title, &input.to_string())
         .await;
     let mut reason = format!(
-        "{label} 会自己改文件、执行命令，苦乐管不到它里面的每一步。它只在从 {workspace} 开出来的独立目录里干活，改动要你验收后才带回。"
+        "{label} 会自己改文件、执行命令，Glimmer 管不到它里面的每一步。它只在从 {workspace} 开出来的独立目录里干活，改动要你验收后才带回。"
     );
     // 设置里写了命令就照它启动，不管名字叫什么：命令得让人看见。
     let command = bot.harness_command.trim();
@@ -1097,7 +1097,7 @@ async fn harness_turn(
     let mut prompt = String::new();
     if resume.is_none() {
         prompt.push_str(&format!(
-            "你是「苦乐」房间里的 {}。{}\n你在自己的独立目录里干活，改动要人验收后才会带回。做完用几句话说清做了什么、结果怎样。\n\n",
+            "你是「Glimmer」房间里的 {}。{}\n你在自己的独立目录里干活，改动要人验收后才会带回。做完用几句话说清做了什么、结果怎样。\n\n",
             bot.name,
             bot.persona.trim()
         ));

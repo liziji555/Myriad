@@ -31,7 +31,7 @@ impl Check {
 /// `sa doctor`：只检查、不修改（除了在数据目录里试写一个临时文件）。
 pub fn run(data_dir: &DataDir) -> ExitCode {
     let checks = collect(data_dir, &|name| std::env::var(name).ok());
-    println!("苦乐体检（版本 {}）", env!("CARGO_PKG_VERSION"));
+    println!("Glimmer 体检（版本 {}）", env!("CARGO_PKG_VERSION"));
     for check in &checks {
         let mark = match check.status {
             Status::Ok => "✓",
