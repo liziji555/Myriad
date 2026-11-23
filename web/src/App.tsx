@@ -253,6 +253,13 @@ function Shell() {
   ).length;
   // 点了现场栏上的牌子：主线上有那条消息就滚过去闪一下，否则打开那个任务。
   const jumpTo = (row: Presence) => {
+    // 在协作视图里点的：先切回对话，等主线显示出来再滚。
+    if (view === "flow") {
+      setView("chat");
+      window.setTimeout(() => reveal(row), 60);
+    } else reveal(row);
+  };
+  const reveal = (row: Presence) => {
     const target =
       row.messageId &&
       document.querySelector(`[data-message-id="${row.messageId}"]`);
@@ -516,14 +523,16 @@ function Shell() {
                 </span>
               )}
             </div>
-            {view === "flow" && flow ? (
+            {view === "flow" && flow && (
               <FlowView
                 key={room.id}
                 flow={flow}
                 presence={presence}
                 onOpen={openMessage}
               />
-            ) : (
+            )}
+            {/* 协作视图时主线只藏起来不卸载：没写完的打回意见、审批卡都还在。 */}
+            <div className="sa-viewpane" hidden={view === "flow" && !!flow}>
               <Timeline
                 key={room.id}
                 chat={roomChat}
@@ -543,7 +552,7 @@ function Shell() {
                 onLightDemo={runLightDemo}
                 onExample={setPrefill}
               />
-            )}
+            </div>
             {roomChat?.activity?.routing ? (
               <p className="sa-room-status" role="status">
                 正在挑选由谁来回答…

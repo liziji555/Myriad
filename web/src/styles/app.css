@@ -2769,6 +2769,14 @@ button.sa-row:hover {
   font-variant-numeric: tabular-nums;
 }
 
+.sa-viewpane {
+  display: contents;
+}
+
+.sa-viewpane[hidden] {
+  display: none;
+}
+
 .sa-flow {
   flex: 1;
   min-height: 0;
