@@ -162,6 +162,8 @@ fn linger() {
 mod tests {
     use super::*;
 
+    // systemd 只在 Linux 上有；Windows 上拼出来的路径是反斜杠。
+    #[cfg(unix)]
     #[test]
     fn the_unit_runs_sa_serve_with_quoted_paths() {
         let unit = render_unit(
