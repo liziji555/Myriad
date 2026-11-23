@@ -3,9 +3,9 @@ import type { EditQueuedRequest, QueuedId, QueuedInput } from "../api/types";
 
 interface Props {
   items: readonly QueuedInput[];
-  /** 改字或挪一位。出错由外面显示。 */
-  onEdit(id: QueuedId, edit: EditQueuedRequest): Promise<void>;
-  onCancel(id: QueuedId): Promise<void>;
+  /** 改字或挪一位，做成了返回 `true`。出错由外面显示。 */
+  onEdit(id: QueuedId, edit: EditQueuedRequest): Promise<boolean>;
+  onCancel(id: QueuedId): Promise<boolean>;
 }
 
 /** 待发队列：输入框上面一排，排在前面的先发。已经发出去的就不在这里了，改不了也取消不了。 */
@@ -17,8 +17,8 @@ export function QueueList({ items, onEdit, onCancel }: Props) {
 
   const save = async () => {
     if (!open || open.text.trim() === "") return;
-    await onEdit(open.id, { content: open.text });
-    setEditing(null);
+    // 没改成（比如太长）：编辑框留着，改好的字不丢。
+    if (await onEdit(open.id, { content: open.text })) setEditing(null);
   };
   const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.nativeEvent.isComposing) return;

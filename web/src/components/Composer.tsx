@@ -73,13 +73,16 @@ export function Composer({
   const [error, setError] = useState<string | null>(null);
   const canSend = !disabledReason && !sending && text.trim() !== "";
 
+  /** 做成了返回 `true`；出错把原因显示在输入框上面，返回 `false`。 */
   const run = async (action: () => Promise<void>, onDone?: () => void) => {
     setError(null);
     try {
       await action();
       onDone?.();
+      return true;
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
+      return false;
     }
   };
 
