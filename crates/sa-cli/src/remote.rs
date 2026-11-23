@@ -370,18 +370,22 @@ fn spawn(mut command: Command, capture: bool) -> Result<Child> {
 fn wait_ready(stop: &TunnelStop, local: SocketAddr, token: &str) -> Result<()> {
     let deadline = Instant::now() + READY_WAIT;
     loop {
-        {
+        let exited = {
             let mut slot = stop.child.lock().unwrap();
             let Some(child) = slot.as_mut().filter(|_| !stop.stopped()) else {
                 bail!("已取消连接");
             };
-            if let Some(status) = child.try_wait()? {
-                let mut stderr = String::new();
-                if let Some(mut pipe) = child.stderr.take() {
-                    let _ = pipe.read_to_string(&mut stderr);
-                }
-                bail!("{}", explain_ssh_failure(status.code(), stderr.trim()));
+            child
+                .try_wait()?
+                .map(|status| (status, child.stderr.take()))
+        };
+        // 放开锁再读：ssh 的代理之类的子进程可能还占着 stderr，读到头要等它，别让断开也跟着等。
+        if let Some((status, pipe)) = exited {
+            let mut stderr = String::new();
+            if let Some(mut pipe) = pipe {
+                let _ = pipe.read_to_string(&mut stderr);
             }
+            bail!("{}", explain_ssh_failure(status.code(), stderr.trim()));
         }
         match probe(local, token) {
             Probe::Ok => return Ok(()),
