@@ -1900,7 +1900,7 @@ async fn an_unfinished_routine_is_left_to_the_scheduler_after_restart() {
 
     tokio::time::sleep(Duration::from_millis(5)).await;
     let t = team(dir.path(), vec![], vec![]);
-    let host = t.script("助手", vec![MockReply::text("早报来了")]);
+    let host = t.script("助手", vec![MockReply::text("在")]);
     let coder = t.script("Coder", vec![MockReply::text("你好")]);
     t.rig.say("@Coder 你好").await;
     t.rig
@@ -1912,6 +1912,17 @@ async fn an_unfinished_routine_is_left_to_the_scheduler_after_restart() {
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert_eq!(coder.requests().len(), 1);
     assert!(host.requests().is_empty());
+    // 叫到负责它的 Bot 时，它也看不到那条旧的。
+    t.rig.say("@助手 在吗").await;
+    t.rig
+        .until("入口 Bot 答了", |m| {
+            m.content == "在" && m.state == MessageState::Complete
+        })
+        .await;
+    assert_eq!(host.requests().len(), 1);
+    let heard = heard(&host);
+    assert!(heard.iter().any(|h| h.contains("在吗")));
+    assert!(!heard.iter().any(|h| h.contains("看看有什么新消息")));
     t.rig.orchestrator.shutdown().await;
 }
 

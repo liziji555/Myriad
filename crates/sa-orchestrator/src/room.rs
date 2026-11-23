@@ -949,6 +949,11 @@ impl Inbox for RoomInbox {
                     self.see(message.seq, waiting);
                     continue;
                 }
+                // 上次没做完的定时任务：调度器在租约过期后会重做这一次，这里看了就做了两遍。
+                MessageKind::Routine if message.created_at < self.shared.started_at => {
+                    self.see(message.seq, waiting);
+                    continue;
+                }
                 MessageKind::Routine | MessageKind::Event => {}
                 // 任务的运行过程不进对话：结果会以交付卡的形式出现。它没写完也不挡着后面的消息。
                 MessageKind::Run => continue,
