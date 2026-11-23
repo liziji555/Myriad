@@ -1874,6 +1874,34 @@ async fn a_mentioned_bot_still_queued_answers_after_restart_when_another_was_sto
     t.rig.orchestrator.shutdown().await;
 }
 
+/// 同上，但之后人又说了一句：之前为上一句排着的不算了，重启后也不答上一句。
+#[tokio::test]
+async fn a_mention_superseded_before_shutdown_is_not_answered_after_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let t = team_with(dir.path(), vec![], vec![], 1);
+        t.script("Coder", vec![shell("c1", "echo coder")]);
+        t.rig.say("@Coder 跑一条命令").await;
+        t.rig.waiting_approvals(1).await;
+        t.rig.say("@Reviewer @助手 看看").await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        t.rig.say("@Reviewer 换个事").await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(t.rig.orchestrator.stop_bot(&t.rig.room, &t.reviewer));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        t.rig.orchestrator.shutdown().await;
+    }
+
+    let t = team_with(dir.path(), vec![], vec![], 1);
+    let host = t.script("助手", vec![MockReply::text("看过了")]);
+    let reviewer = t.script("Reviewer", vec![MockReply::text("我也看过了")]);
+    t.rig.orchestrator.resume_rooms().unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(host.requests().is_empty(), "上一句已经不算了");
+    assert!(reviewer.requests().is_empty(), "停下的那个不再答");
+    t.rig.orchestrator.shutdown().await;
+}
+
 /// 关掉时还没人看的定时任务消息：重启后别的话叫醒了房间，也不答它（调度器在租约过期后会重做）。
 #[tokio::test]
 async fn an_unfinished_routine_is_left_to_the_scheduler_after_restart() {
