@@ -713,9 +713,12 @@ async fn shell_waits_for_approval_and_always_is_remembered() {
     );
     let rules = rig.engine.list_rules(&rig.room).unwrap();
     assert_eq!(rules.len(), 1);
-    assert_eq!(
-        (rules[0].tool.as_str(), rules[0].pattern.as_str()),
-        ("shell", "echo ok")
+    // 记的是在哪个工作目录里跑的这条命令。
+    assert_eq!(rules[0].tool, "shell");
+    assert!(
+        rules[0].pattern.ends_with("\necho ok"),
+        "{}",
+        rules[0].pattern
     );
 }
 

@@ -983,6 +983,21 @@ impl Inbox for RoomInbox {
                 return vec![];
             }
         };
+        // 独立评议中人又说了话：上一轮结束了，那一轮别人的答案可以看了；这句新话的答案照样不看。
+        if let Some(after) = self.blind {
+            let followed_up = messages
+                .iter()
+                .filter(|message| {
+                    message.seq > after
+                        && message.kind == MessageKind::Chat
+                        && matches!(message.sender, Sender::User)
+                })
+                .map(|message| message.seq)
+                .max();
+            if let Some(seq) = followed_up {
+                self.blind = Some(seq);
+            }
+        }
         let mut inputs = vec![];
         let started = !self.first_drain;
         self.first_drain = false;
