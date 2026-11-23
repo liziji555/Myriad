@@ -111,19 +111,29 @@ impl Fence {
         if input.is_empty() {
             return Err(ToolError::new("没有给出要写入的路径。"));
         }
+        if input.ends_with('/') || input.ends_with('\\') {
+            return Err(ToolError(format!(
+                "路径 {input} 以分隔符结尾，是目录，不能当文件写。"
+            )));
+        }
         let joined = self.root.join(input);
         // 工作目录本身已经是真实路径，从它下面开始走；绝对路径从头走。
         let (mut real, rest) = match joined.strip_prefix(&self.root) {
             Ok(rest) => (self.root.clone(), rest),
             Err(_) => (PathBuf::new(), joined.as_path()),
         };
+        // 在围栏外面往上退过：外面那一截可能是文件（操作系统会拒绝），也可能退回围栏里另一个文件。
+        // 有没有、是不是文件都不看（不透露），一律算外面的，要问人。
+        let mut left = false;
         for component in rest.components() {
             match component {
                 Component::CurDir => {}
                 Component::ParentDir => {
                     // 和操作系统一样：文件后面不能跟 `..`。只对围栏里面的路径这么说：
-                    // 外面的和数据目录里的，有没有、是不是文件都不透露，照旧算出路径交给上层去问人或拒绝。
-                    if self.allows(&real) && real.exists() && !real.is_dir() {
+                    // 外面的和数据目录里的，有没有、是不是文件都不透露，原样交给上层去问人或拒绝。
+                    if !self.allows(&real) {
+                        left = true;
+                    } else if real.exists() && !real.is_dir() {
                         return Err(ToolError(format!(
                             "路径 {input} 没法解析：`..` 前面的不是目录。"
                         )));
@@ -148,7 +158,7 @@ impl Fence {
                 "路径 {input} 在苦乐自己的数据目录里，不能写。"
             )));
         }
-        let inside = real.starts_with(&self.root);
+        let inside = !left && real.starts_with(&self.root);
         Ok((real, inside))
     }
 
@@ -261,6 +271,15 @@ mod tests {
         // 外面的路径不管存不存在，回答都一样。
         let ghost = fence.resolve("../没有这个文件").unwrap_err();
         assert!(ghost.0.contains("工作目录之外"), "{ghost}");
+        // 以分隔符结尾的是目录，不能当文件写，也不能把同名文件覆盖掉。
+        for dir in ["src/a.rs/", "新目录/", "src\\a.rs\\"] {
+            assert!(fence.resolve_for_write(dir).is_err(), "{dir}");
+        }
+        // 外面的文件后面跟 `..`：操作系统不认，不能退回来算成工作目录里的文件。
+        let (back, inside) = fence
+            .resolve_for_write("../secret.txt/../work/src/a.rs")
+            .unwrap();
+        assert!(!inside, "{back:?}");
     }
 
     #[test]
