@@ -433,7 +433,19 @@ fn demo_lead(request: &ChatRequest, last: &crate::ChatMessage, said: &str) -> Op
     }
     // 多 Bot 房间里人说的话带「【用户】」前缀，成员交回的结果带成员的名字。
     let from_member = |m: &crate::ChatMessage| {
-        m.role == Role::User && m.content.starts_with('【') && !m.content.starts_with("【用户")
+        let from_user = m
+            .content
+            .strip_prefix("【用户")
+            .is_some_and(|rest| rest.starts_with(['】', '（']));
+        m.role == Role::User && m.content.starts_with('【') && !from_user
+    };
+    // 成员没做完时，交回的结果最后一行是房间补上的说明。
+    let unfinished = |m: &crate::ChatMessage| {
+        m.content.rsplit_once('\n').is_some_and(|(_, note)| {
+            ["[这一轮出错了：", "[这一轮被用户停下了", "[这一轮中途断了"]
+                .iter()
+                .any(|marker| note.starts_with(marker))
+        })
     };
     if from_member(last) {
         let from: Vec<&str> = request
@@ -441,7 +453,7 @@ fn demo_lead(request: &ChatRequest, last: &crate::ChatMessage, said: &str) -> Op
             .iter()
             .rev()
             .take_while(|m| from_member(m))
-            .filter(|m| !m.content.contains("\n[这一轮"))
+            .filter(|m| !unfinished(m))
             .filter_map(|m| m.content[3..].split_once('】').map(|(name, _)| name))
             .collect();
         if from.is_empty() {
