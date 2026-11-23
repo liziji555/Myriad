@@ -22,10 +22,9 @@ pub struct TreeGuard(pub Option<u32>);
 impl Drop for TreeGuard {
     fn drop(&mut self) {
         if let Some(pid) = self.0.take() {
-            // 丢弃发生在异步线程上，不能在这里等；另起一个线程去杀。
-            std::thread::spawn(move || {
-                let _ = kill_command(pid).status();
-            });
+            // 在这里等它杀完：调用方（比如房间的写锁）在守卫之后才放手，下一个命令开始时这一个的进程都已经没了。
+            // 杀进程很快，短暂占住这个线程可以接受。
+            let _ = kill_command(pid).status();
         }
     }
 }
