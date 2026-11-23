@@ -52,6 +52,8 @@ interface Props {
   onLightDemo(source: HTMLElement): void;
   /** 空房间里点了一句示例：把它填进输入框，由人自己决定发不发。 */
   onExample(text: string): void;
+  /** 切到协作视图时主线藏起来；藏着的时候滚不动，回来时补滚一次。 */
+  hidden?: boolean;
 }
 
 /** 离底部这么近就算「在看最新的」，新内容来了自动跟着滚。 */
@@ -78,6 +80,7 @@ export function Timeline({
   onDecide,
   onLightDemo,
   onExample,
+  hidden = false,
 }: Props) {
   const scroller = useRef<HTMLElement>(null);
   const stick = useRef(true);
@@ -105,6 +108,11 @@ export function Timeline({
       el.scrollTop = el.scrollHeight;
     }
   }, [messages.length, messages[0]?.id, last?.rev, last?.content.length]);
+
+  useLayoutEffect(() => {
+    const el = scroller.current;
+    if (!hidden && el && stick.current) el.scrollTop = el.scrollHeight;
+  }, [hidden]);
 
   // 最后一条消息里有没有在等批准的步骤：卡片出现时要滚到看得见。
   const asking = last?.steps.some((step) => step.state === "waiting") ?? false;

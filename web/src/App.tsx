@@ -551,6 +551,7 @@ function Shell() {
                 onDecide={workspace.decideApproval}
                 onLightDemo={runLightDemo}
                 onExample={setPrefill}
+                hidden={view === "flow" && !!flow}
               />
             </div>
             {roomChat?.activity?.routing ? (
