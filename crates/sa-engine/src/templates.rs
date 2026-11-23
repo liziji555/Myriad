@@ -17,9 +17,7 @@ pub const MAX_TEMPLATE_BYTES: usize = 1024 * 1024;
 /// 模板写成文件的样子（TOML）。
 pub fn template_text(team: &TeamTemplate) -> String {
     let body = toml::to_string_pretty(team).expect("模板里只有字符串、数字和布尔值，总能写成 TOML");
-    format!(
-        "# Myriad 的 Bot 模板。在「成员」页导入，或者用 `sa bot import <这个文件>`。\n\n{body}"
-    )
+    format!("# Myriad 的 Bot 模板。在「成员」页导入，或者用 `sa bot import <这个文件>`。\n\n{body}")
 }
 
 /// 读一份模板文件。认 TOML；以 `{` 开头的按 JSON 读。
