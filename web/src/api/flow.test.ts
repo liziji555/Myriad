@@ -198,4 +198,102 @@ describe("flowOf", () => {
       "bot:main",
     );
   });
+  it("成员找主 Agent 接手算交接，不算交回结果", () => {
+    const flow = flowOf(
+      [
+        message({ id: "u1", seq: 1, content: "@A 查一下", mentions: ["a"] }),
+        message({
+          id: "a1",
+          seq: 2,
+          sender: bot("a"),
+          steps: [step("s1", "ask_bot")],
+        }),
+        message({
+          id: "h1",
+          seq: 3,
+          sender: bot("a"),
+          mentions: ["main"],
+          hop: 1,
+        }),
+        message({ id: "m1", seq: 4, sender: bot("main"), hop: 1 }),
+      ],
+      bots,
+      "main",
+      ["main", "a"],
+    );
+    const into = flow.edges.find((edge) => edge.to === "m1:start");
+    expect(into?.kind).toBe("peer");
+    expect(
+      flow.edges
+        .filter((edge) => edge.kind === "return")
+        .map((edge) => edge.to),
+    ).toEqual(["a1:back:user", "m1:back:bot:a"]);
+  });
+
+  it("定时任务叫起来的回复不连到你上一句话", () => {
+    const flow = flowOf(
+      [
+        message({ id: "u1", seq: 1, content: "早" }),
+        message({ id: "m1", seq: 2, sender: bot("main") }),
+        message({ id: "r1", seq: 3, kind: "routine", content: "日报" }),
+        message({ id: "m2", seq: 4, sender: bot("main") }),
+      ],
+      bots,
+      "main",
+      ["main"],
+    );
+    expect(flow.edges.some((edge) => edge.to === "m2:start")).toBe(false);
+    expect(flow.edges.some((edge) => edge.from === "m2:end")).toBe(false);
+    expect(flow.nodes.find((node) => node.id === "m2:start")?.label).toBe(
+      "接到定时任务",
+    );
+  });
+
+  it("人打回任务不算新开任务卡，重做和交付还接在 Bot 开的卡上", () => {
+    const flow = flowOf(
+      [
+        message({ id: "u1", seq: 1, content: "做个功能" }),
+        message({ id: "m1", seq: 2, sender: bot("main") }),
+        message({
+          id: "card",
+          seq: 3,
+          sender: bot("main"),
+          kind: "task",
+          task_id: "t1",
+          content: "开了任务「功能」：做",
+        }),
+        message({
+          id: "no",
+          seq: 4,
+          kind: "task",
+          task_id: "t1",
+          content: "打回了任务「功能」：不行",
+        }),
+        message({
+          id: "run2",
+          seq: 5,
+          sender: bot("a"),
+          kind: "run",
+          task_id: "t1",
+        }),
+        message({
+          id: "dl",
+          seq: 6,
+          sender: bot("a"),
+          kind: "delivery",
+          task_id: "t1",
+        }),
+      ],
+      bots,
+      "main",
+      ["main", "a"],
+    );
+    expect(flow.nodes.some((node) => node.id === "no")).toBe(false);
+    expect(flow.edges.find((edge) => edge.to === "run2:start")?.from).toBe(
+      "card",
+    );
+    expect(flow.nodes.find((node) => node.id === "dl:inbox")?.lane).toBe(
+      "bot:main",
+    );
+  });
 });

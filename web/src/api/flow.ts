@@ -1,4 +1,5 @@
 import { handoffsOf } from "./handoffs";
+import { taskDecision } from "./taskNotes";
 import type {
   Bot,
   BotId,
@@ -168,12 +169,11 @@ export function flowOf(
     if (byId.has(from) && byId.has(to))
       edges.push({ id: `${from}>${to}`, from, to, kind, live, at });
   };
-  const kindBetween = (fromLane: string, toLane: string): FlowEdgeKind => {
+  // 交回结果另画（落到「收到…」节点）；连进一段工作的线只有找人和派活。
+  const kindBetween = (fromLane: string): FlowEdgeKind => {
     if (fromLane === USER_LANE) return "ask";
-    const toMain = lanes.find((lane) => lane.key === toLane)?.role === "main";
     const fromMain =
       lanes.find((lane) => lane.key === fromLane)?.role === "main";
-    if (toMain) return "return";
     return fromMain ? "dispatch" : "peer";
   };
 
@@ -226,6 +226,7 @@ export function flowOf(
   /** 一件事从哪条竖线派来，做完把结果交回那里。 */
   const origin = new Map<string, string>();
   let lastAsk: string | null = null;
+  let trigger = "接到你的话";
 
   const handoffNode = (message: Message, run: string) => {
     if (message.sender.kind !== "bot") return;
@@ -256,11 +257,19 @@ export function flowOf(
     }
   };
 
-  for (const message of shown) {
+  for (const message of messages) {
     const { sender } = message;
+    // 定时任务、外部事件叫起来的回复，不是在回你上一句话。
+    if (message.kind === "routine" || message.kind === "event") {
+      lastAsk = null;
+      trigger = message.kind === "routine" ? "接到定时任务" : "接到外部事件";
+      continue;
+    }
     if (sender.kind === "user") {
       if (message.kind === "task") {
-        taskCard(message, USER_LANE, message.id);
+        // 验收、打回、取消是人对任务的决定，不是新开的任务卡。
+        if (taskDecision(message.content) === null)
+          taskCard(message, USER_LANE, message.id);
         continue;
       }
       if (message.kind !== "chat") continue;
@@ -283,6 +292,7 @@ export function flowOf(
         true,
       );
       lastAsk = message.id;
+      trigger = "接到你的话";
       continue;
     }
 
@@ -312,7 +322,7 @@ export function flowOf(
       label = `接手 ${incoming.map((handoff) => name(handoff.fromBot)).join("、")} 的活`;
     } else {
       if (lastAsk) sources.push(lastAsk);
-      label = "接到你的话";
+      label = trigger;
     }
 
     if (message.kind === "delivery") {
@@ -363,8 +373,7 @@ export function flowOf(
     for (const source of sources) {
       const from = byId.get(source);
       if (!from) continue;
-      const kind =
-        message.kind === "run" ? "dispatch" : kindBetween(from.lane, lane);
+      const kind = message.kind === "run" ? "dispatch" : kindBetween(from.lane);
       link(
         source,
         start.id,
