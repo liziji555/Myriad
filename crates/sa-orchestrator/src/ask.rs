@@ -22,6 +22,8 @@ pub(crate) struct AskBotTool {
     /// 它这次发言是转到第几手。
     /// 这次发言转到了第几手。人中途说了新的话会被清零，所以是共享的。
     pub hop: Arc<AtomicU32>,
+    /// 独立评议：被找的 Bot 也只看到这条之前的，和这一轮的别人一样。
+    pub blind: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -119,7 +121,7 @@ impl Tool for AskBotTool {
         };
 
         // 先过上限再发消息：被拒绝的话不会出现在房间里。发出去了才排队：对方开始时要看得到这句话。
-        let pending = self
+        let mut pending = self
             .link
             .episode()
             .ask(
@@ -129,6 +131,7 @@ impl Tool for AskBotTool {
                 &message,
             )
             .map_err(ToolError)?;
+        pending.job.blind = self.blind;
         let engine = self.shared.engine.clone();
         let (room_id, from, to) = (
             self.room_id.clone(),

@@ -831,6 +831,7 @@ async fn turn(
                     room_id: room_id.clone(),
                     from: bot.clone(),
                     hop: live_hop,
+                    blind: job.blind,
                 });
             }
             let provider = crate::budget::guard(shared, model.provider.clone(), None);
@@ -1061,7 +1062,10 @@ impl Inbox for RoomInbox {
             };
             // 别人还没写完的先不看：它写完了再看，后面写完的照常看。
             // 独立评议时别人对这句话的回答也一样，这一轮不看。
-            let hidden = speaker.is_some() && self.blind.is_some_and(|after| message.seq > after);
+            // 点名找它的（`ask_bot`）照样看：那是交给它的事。
+            let hidden = speaker.is_some()
+                && self.blind.is_some_and(|after| message.seq > after)
+                && !message.mentions.contains(&self.bot_id);
             if message.state == MessageState::Streaming || hidden {
                 waiting = true;
                 continue;

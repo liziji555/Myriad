@@ -2415,3 +2415,58 @@ async fn in_blind_mode_bots_do_not_see_each_others_answers_until_the_next_messag
     assert!(heard.iter().any(|m| m.contains("打 8 分")), "{heard:#?}");
     t.rig.orchestrator.shutdown().await;
 }
+
+#[tokio::test]
+async fn in_blind_mode_a_handoff_is_seen_but_the_answers_stay_hidden() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = team_with(dir.path(), vec![], vec![], 1);
+    t.discuss(sa_protocol::Discussion::Blind, 2);
+    let host = t.script(
+        "助手",
+        vec![
+            MockReply::text("助手打 7 分"),
+            MockReply::text("看到了交接"),
+        ],
+    );
+    let coder = t.script(
+        "Coder",
+        vec![
+            ask("c1", "助手", "请再看一眼性能"),
+            MockReply::text("Coder 打 8 分"),
+        ],
+    );
+    t.script("Reviewer", vec![MockReply::text("Reviewer 打 6 分")]);
+    t.rig.say("给这个方案打分").await;
+    t.rig.settled(5).await;
+    t.rig.until_idle().await;
+
+    // 轮到 Coder 时助手已经答完了：它看不到。
+    let coder_heard: Vec<String> = coder.requests()[0]
+        .messages
+        .iter()
+        .map(|m| m.content.clone())
+        .collect();
+    assert!(
+        coder_heard.iter().all(|m| !m.contains("打 7 分")),
+        "{coder_heard:#?}"
+    );
+    // 助手已经评过了，被 Coder 找回来：看得到这句交接，看不到别人的分数。
+    let requests = host.requests();
+    assert_eq!(requests.len(), 2);
+    let heard: Vec<&str> = requests[1]
+        .messages
+        .iter()
+        .map(|m| m.content.as_str())
+        .collect();
+    assert!(
+        heard.iter().any(|m| m.contains("请再看一眼性能")),
+        "{heard:#?}"
+    );
+    assert!(
+        !heard
+            .iter()
+            .any(|m| m.contains("打 8 分") || m.contains("打 6 分")),
+        "{heard:#?}"
+    );
+    t.rig.orchestrator.shutdown().await;
+}
