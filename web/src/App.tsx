@@ -7,6 +7,7 @@ import { STATE_LABEL } from "./api/tasks";
 import { api } from "./api/client";
 import type { RoomId, TaskId } from "./api/types";
 import { useWorkspace } from "./api/useWorkspace";
+import { desktopInfo, openConnect } from "./api/desktop";
 import { noticesFor } from "./api/workspace";
 import { CommandPalette, type PaletteEntry } from "./components/CommandPalette";
 import { Composer } from "./components/Composer";
@@ -56,6 +57,7 @@ function Shell() {
   const [tab, setTab] = useState<PanelTab>("execution");
   const [roomsOpen, setRoomsOpen] = useState(false);
   const docked = useMedia(DOCKED);
+  const [desktop] = useState(() => desktopInfo());
   const [prefill, setPrefill] = useState<string | null>(null);
   const [layout, setLayout] = useState(loadLayout);
   const panelOpen = layout.panelOpen;
@@ -381,6 +383,16 @@ function Shell() {
           },
         ]
       : []),
+    ...(desktop && !desktop.pinned
+      ? [
+          {
+            id: "action:connect",
+            group: "action" as const,
+            title: "连接本机或服务器",
+            run: openConnect,
+          },
+        ]
+      : []),
     ...(room && replying
       ? [
           {
@@ -478,6 +490,7 @@ function Shell() {
               setRoomsOpen(false);
             }}
             createSignal={createSignal}
+            desktop={desktop}
           />
         </>
       )}

@@ -1,4 +1,5 @@
 import { useEffect, useState, type FormEvent } from "react";
+import { connectionLabel, openConnect, type DesktopInfo } from "../api/desktop";
 import type { Presence, PresenceState } from "../api/presence";
 import type { Bot, Room, RoomId } from "../api/types";
 import { BotAvatar } from "./BotAvatar";
@@ -55,6 +56,8 @@ interface Props {
   onCreateRoom(name: string): Promise<void>;
   /** 每加一就打开「新建房间」的输入框（命令面板里点的）。 */
   createSignal: number;
+  /** 在桌面版里时：连的是本机还是哪台服务器。 */
+  desktop: DesktopInfo | null;
 }
 
 export function Sidebar({
@@ -74,6 +77,7 @@ export function Sidebar({
   onSelect,
   onCreateRoom,
   createSignal,
+  desktop,
 }: Props) {
   const [creating, setCreating] = useState(false);
   useEffect(() => {
@@ -112,7 +116,7 @@ export function Sidebar({
   return (
     <nav className="sa-sidebar" aria-label="左栏" data-collapsed={narrow}>
       <header className="sa-sidebar-head">
-        <span className="sa-brand-mark" aria-hidden="true" />
+        <BrandMark />
         <span className="sa-brand">苦乐</span>
         {docked && (
           <button
@@ -237,7 +241,32 @@ export function Sidebar({
         <span className="sa-dot" data-state={connected ? "idle" : "warn"} aria-hidden="true" />
         <span className="sa-nav-label">{connected ? "已连接" : "连接中断，正在重连…"}</span>
         {version && <span className="sa-row-meta sa-nav-label">v{version}</span>}
+        {desktop && (
+          <button
+            type="button"
+            className="sa-connect"
+            disabled={desktop.pinned}
+            title={desktop.pinned ? "启动时用 --workdir 或 --server 定死了，换不了" : "连接本机或服务器"}
+            aria-label={`连接：${connectionLabel(desktop)}`}
+            onClick={openConnect}
+          >
+            <Icon name={desktop.current?.mode === "server" ? "server" : "plug"} />
+            <span className="sa-nav-label sa-connect-label">{connectionLabel(desktop)}</span>
+          </button>
+        )}
       </footer>
     </nav>
+  );
+}
+
+/** 苦乐的标：一个太极。 */
+function BrandMark() {
+  return (
+    <svg className="sa-brand-mark" viewBox="0 0 16 16" aria-hidden="true">
+      <circle cx="8" cy="8" r="7.5" fill="var(--sa-fg)" />
+      <path d="M8 .5a7.5 7.5 0 0 1 0 15 3.75 3.75 0 0 1 0-7.5 3.75 3.75 0 0 0 0-7.5Z" fill="var(--sa-bg)" />
+      <circle cx="8" cy="4.25" r="1.2" fill="var(--sa-bg)" />
+      <circle cx="8" cy="11.75" r="1.2" fill="#c8402f" />
+    </svg>
   );
 }

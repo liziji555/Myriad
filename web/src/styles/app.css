@@ -100,10 +100,37 @@ button.sa-stage-room:hover,
 /* 苦乐的记号：一个圆，一半深一半亮。 */
 .sa-brand-mark {
   flex: none;
-  width: 16px;
-  height: 16px;
-  border-radius: 50%;
-  background: linear-gradient(135deg, var(--sa-fg) 50%, var(--sa-accent) 50%);
+  width: 18px;
+  height: 18px;
+  transform: rotate(-30deg);
+}
+.sa-connect {
+  display: flex;
+  align-items: center;
+  gap: var(--sa-space-1);
+  min-width: 0;
+  margin-left: auto;
+  padding: 2px var(--sa-space-2);
+  border: 1px solid var(--sa-border);
+  border-radius: var(--sa-radius-md);
+  background: none;
+  font: inherit;
+  color: var(--sa-fg-muted);
+  cursor: pointer;
+}
+.sa-connect:hover:not(:disabled) {
+  color: var(--sa-fg);
+  border-color: var(--sa-fg-faint);
+}
+.sa-connect:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+.sa-connect-label {
+  overflow: hidden;
+  max-width: 9em;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 .sa-stage-sep {
   color: var(--sa-fg-faint);

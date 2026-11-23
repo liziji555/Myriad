@@ -7,7 +7,11 @@
 //!   窗口开的是隧道这头的地址。关掉窗口只断开隧道，服务器上的任务照常跑。
 //!
 //! 主窗口里的页面拿不到任何桌面能力，它能做的事和在浏览器里一样多。
-//! 只有内置的启动页（选本机还是服务器、说明为什么没起来）能调下面几个命令。
+//! 只有内置的启动页（换本机还是服务器、说明为什么没起来）能调下面几个命令。
+//!
+//! 打开就是本机：没选过工作目录就用「文稿」下的 `苦乐` 文件夹。
+//! 要连服务器、换目录，点左栏底下的连接按钮（主窗口里的页面跳到 [`CONNECT_PATH`]，
+//! 这边拦下来开「连接」窗口），或者菜单「文件 → 连接本机 / 服务器…」。
 
 // 发布版在 Windows 上不带黑色的终端窗口。
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
@@ -32,7 +36,7 @@ struct Args {
     /// 数据目录（配置、数据库、会话记录都在这里），和 sa 用的是同一个
     #[arg(long, env = "SA_DATA_DIR", value_name = "目录")]
     data_dir: Option<PathBuf>,
-    /// Bot 能读取的工作目录。不给就用上次选的；第一次启动会让你选
+    /// Bot 能读取的工作目录。不给就用上次选的；没选过就用「文稿」下的「苦乐」文件夹
     #[arg(long, value_name = "目录")]
     workdir: Option<PathBuf>,
     /// 用不联网的假模型，不需要密钥（用来试流程）
@@ -56,14 +60,20 @@ enum Launch {
     Local(PathBuf),
     /// 连服务器。
     Server(SshTarget),
-    /// 还没选过（或者上次选的不能用了）：先让人选。
-    Choose,
+    /// 还没选过（或者上次选的不能用了）：用本机的默认工作目录。
+    FirstRun,
     /// 命令行给的服务器地址不对。
     Invalid(String),
 }
 
 /// 启动页（`ui/index.html`）的窗口名。只有它能调下面的命令。
 const START: &str = "start";
+
+/// 主窗口里的页面跳到这个地址，就是要开「连接」窗口。服务那边没有这个地址，只有桌面版拦。
+const CONNECT_PATH: &str = "/__desktop/connect";
+
+/// 默认工作目录：在「文稿」（没有就在主目录）下面。
+const DEFAULT_WORKDIR: &str = "苦乐";
 
 /// 正在跑的服务：怎么让它停，以及它停好了没有。
 struct Server {
@@ -102,7 +112,7 @@ impl Shell {
         self.data_dir.root().join("desktop.json")
     }
 
-    /// 命令行给的 > 上次选的 > 现在让人选。
+    /// 命令行给的 > 上次选的 > 本机的默认工作目录。
     fn decide(&self) -> Launch {
         if let Some(host) = &self.args.server {
             return match SshTarget::parse(host, self.args.ssh_port) {
@@ -119,7 +129,7 @@ impl Shell {
             // 上次选的目录后来被删了、挪了，就当没选过。
             None => match remembered.workdir.filter(|dir| dir.is_dir()) {
                 Some(dir) => Launch::Local(dir),
-                None => Launch::Choose,
+                None => Launch::FirstRun,
             },
         }
     }
@@ -143,7 +153,7 @@ fn main() {
     let mut shell = Shell {
         args,
         data_dir,
-        launch: Launch::Choose,
+        launch: Launch::FirstRun,
         server: Mutex::new(None),
         tunnel: Mutex::new(None),
         connecting: TunnelStop::default(),
@@ -177,7 +187,15 @@ fn start(handle: &AppHandle) {
     let opened = match shell.launch.clone() {
         Launch::Local(workdir) => start_local(handle, &shell, workdir),
         Launch::Server(target) => start_server(handle, &shell, &target),
-        Launch::Choose => open_start(handle, &shell, serde_json::json!({ "view": "choose" })),
+        Launch::FirstRun => match default_workdir(handle) {
+            Ok(workdir) => {
+                remember(&shell, |remembered| {
+                    remembered.workdir = Some(workdir.clone())
+                });
+                start_local(handle, &shell, workdir)
+            }
+            Err(reason) => open_failed(handle, &shell, &reason, None),
+        },
         Launch::Invalid(reason) => open_failed(handle, &shell, &reason, None),
     };
     if let Err(error) = opened {
@@ -213,7 +231,7 @@ fn start_local(handle: &AppHandle, shell: &Shell, workdir: PathBuf) -> tauri::Re
     *shell.server.lock().unwrap() = Some(Server { stop, stopped });
 
     match started.recv() {
-        Ok(Ok(url)) => open_main(handle, &url, "苦乐"),
+        Ok(Ok(url)) => open_main(handle, shell, &url, "苦乐"),
         Ok(Err(reason)) => open_failed(handle, shell, &reason, None),
         Err(_) => open_failed(handle, shell, "服务还没开始就退出了", None),
     }
@@ -231,7 +249,7 @@ fn start_server(handle: &AppHandle, shell: &Shell, target: &SshTarget) -> tauri:
         Ok(tunnel) => {
             let url = tunnel.url().to_string();
             *shell.tunnel.lock().unwrap() = Some(tunnel);
-            open_main(handle, &url, &format!("苦乐 · {}", target.host))?;
+            open_main(handle, shell, &url, &format!("苦乐 · {}", target.host))?;
             if let Some(start) = handle.get_webview_window(START) {
                 start.close()?;
             }
@@ -239,6 +257,19 @@ fn start_server(handle: &AppHandle, shell: &Shell, target: &SshTarget) -> tauri:
         }
         Err(error) => open_failed(handle, shell, &format!("{error:#}"), Some(&server)),
     }
+}
+
+/// 「文稿/苦乐」，没有就建一个。
+fn default_workdir(handle: &AppHandle) -> Result<PathBuf, String> {
+    let path = handle.path();
+    let parent = path
+        .document_dir()
+        .or_else(|_| path.home_dir())
+        .map_err(|error| format!("找不到「文稿」文件夹和主目录：{error}"))?;
+    let dir = parent.join(DEFAULT_WORKDIR);
+    std::fs::create_dir_all(&dir)
+        .map_err(|error| format!("没能建好默认工作目录 {}：{error}", dir.display()))?;
+    Ok(dir)
 }
 
 fn pick_folder(handle: &AppHandle) -> tauri_plugin_dialog::FileDialogBuilder<tauri::Wry> {
@@ -321,21 +352,37 @@ fn from_start_page(window: &WebviewWindow) -> Result<(), String> {
     }
 }
 
-/// 启动页上点「用本机」：选一个工作目录，然后用它重新启动。没选就什么都不做。
+/// 启动页上点「用本机」：用记着的工作目录（`pick` 时先另选一个），重新启动。
+/// 没选、或者现在就是用这个目录的本机，就只关掉窗口。
 #[tauri::command]
-async fn choose_local(window: WebviewWindow) -> Result<(), String> {
+async fn choose_local(window: WebviewWindow, pick: bool) -> Result<(), String> {
     from_start_page(&window)?;
     let handle = window.app_handle().clone();
-    let picked = {
-        let handle = handle.clone();
-        tauri::async_runtime::spawn_blocking(move || pick_folder(&handle).blocking_pick_folder())
-            .await
-            .map_err(|error| error.to_string())?
+    let shell = handle.state::<Shell>();
+    let dir = if pick {
+        let picker = handle.clone();
+        let picked = tauri::async_runtime::spawn_blocking(move || {
+            pick_folder(&picker).blocking_pick_folder()
+        })
+        .await
+        .map_err(|error| error.to_string())?;
+        match picked.and_then(|picked| picked.into_path().ok()) {
+            Some(dir) => dir,
+            None => return Ok(()),
+        }
+    } else {
+        match read_remembered(&shell.remembered())
+            .workdir
+            .filter(|dir| dir.is_dir())
+        {
+            Some(dir) => dir,
+            None => default_workdir(&handle)?,
+        }
     };
-    let Some(dir) = picked.and_then(|picked| picked.into_path().ok()) else {
-        return Ok(());
-    };
-    remember(&handle.state::<Shell>(), |remembered| {
+    if matches!(&shell.launch, Launch::Local(current) if *current == dir) {
+        return window.close().map_err(|error| error.to_string());
+    }
+    remember(&shell, |remembered| {
         remembered.workdir = Some(dir);
         remembered.use_server = false;
     });
@@ -366,16 +413,23 @@ fn retry(window: WebviewWindow) -> Result<(), String> {
 }
 
 /// 主窗口：直接打开服务的页面（本机的，或者隧道这头的）。
-fn open_main(handle: &AppHandle, url: &str, title: &str) -> tauri::Result<()> {
+fn open_main(handle: &AppHandle, shell: &Shell, url: &str, title: &str) -> tauri::Result<()> {
     let url: Url = url.parse().map_err(tauri::Error::InvalidUrl)?;
     let home = url.origin();
     let (links, popups, downloads) = (handle.clone(), handle.clone(), handle.clone());
+    // 页面靠它知道自己在桌面版里：左栏底下显示「本机」还是哪台服务器，给不给换。
+    let desktop = serde_json::json!({ "current": current(shell), "pinned": shell.pinned() });
     WebviewWindowBuilder::new(handle, "main", WebviewUrl::External(url))
         .title(title)
         .inner_size(1280.0, 820.0)
         .min_inner_size(720.0, 480.0)
+        .initialization_script(format!("window.__SA_DESKTOP__ = {desktop};"))
         // 窗口里只看苦乐自己的页面；别的网址（PR 链接之类）交给系统的浏览器。
         .on_navigation(move |to| {
+            if to.origin() == home && to.path() == CONNECT_PATH {
+                open_connect(&links);
+                return false;
+            }
             if to.origin() == home || matches!(to.scheme(), "about" | "blob" | "data") {
                 return true;
             }
@@ -451,6 +505,35 @@ fn open_outside(handle: &AppHandle, url: &Url) {
     }
 }
 
+/// 现在用的是哪个：给页面和「连接」窗口看。
+fn current(shell: &Shell) -> serde_json::Value {
+    match &shell.launch {
+        Launch::Local(dir) => {
+            serde_json::json!({ "mode": "local", "workdir": dir.to_string_lossy() })
+        }
+        Launch::Server(target) => {
+            serde_json::json!({ "mode": "server", "server": target.to_string() })
+        }
+        Launch::FirstRun | Launch::Invalid(_) => serde_json::Value::Null,
+    }
+}
+
+/// 「连接」窗口：选本机还是服务器。表单里先填上记着的。
+fn open_connect(handle: &AppHandle) {
+    // Windows 上在菜单、导航回调里直接建窗口会卡死（WebView2），换个线程建。
+    let handle = handle.clone();
+    std::thread::spawn(move || {
+        let shell = handle.state::<Shell>();
+        // 用 --workdir、--server 启动的，重启后还是那样，换了也不算数。
+        if shell.pinned() {
+            return;
+        }
+        if let Err(error) = open_start(&handle, &shell, serde_json::json!({ "view": "connect" })) {
+            tracing::warn!("打不开连接窗口：{error}");
+        }
+    });
+}
+
 /// 服务没起来、服务器没连上：在启动页里说明原因。`server` 是连的哪台服务器，本机就是 `None`。
 fn open_failed(
     handle: &AppHandle,
@@ -474,6 +557,19 @@ fn open_start(
     mut details: serde_json::Value,
 ) -> tauri::Result<()> {
     details["pinned"] = shell.pinned().into();
+    details["current"] = current(shell);
+    // 「连接」那一屏的表单先填上记着的（连不上时也能从这里换）。
+    let remembered = read_remembered(&shell.remembered());
+    details["workdir"] = remembered
+        .workdir
+        .map(|dir| dir.to_string_lossy().into_owned())
+        .into();
+    details["host"] = remembered
+        .server
+        .as_ref()
+        .map(|target| target.host.clone())
+        .into();
+    details["sshPort"] = remembered.server.and_then(|target| target.port).into();
     if let Some(window) = handle.get_webview_window(START) {
         // 页面可能还没载完：先记下，载完时 main.js 会照它显示。
         window.eval(format!(
@@ -482,8 +578,8 @@ fn open_start(
         return window.set_focus();
     }
     WebviewWindowBuilder::new(handle, START, WebviewUrl::App("index.html".into()))
-        .title("苦乐")
-        .inner_size(760.0, 520.0)
+        .title("苦乐 · 连接")
+        .inner_size(800.0, 560.0)
         .initialization_script(format!("window.__SA_START__ = {details};"))
         .build()
         .map(drop)
@@ -497,7 +593,7 @@ fn set_menu(handle: &AppHandle) -> tauri::Result<()> {
         if matches!(shell.launch, Launch::Local(_)) {
             file = file.text("workdir", "更换工作目录…");
         }
-        file = file.text("switch", "本机 / 服务器…");
+        file = file.text("switch", "连接本机 / 服务器…");
     }
     let file = file
         .text("data-dir", "打开数据目录")
@@ -520,17 +616,7 @@ fn set_menu(handle: &AppHandle) -> tauri::Result<()> {
                 relaunch(&handle);
             });
         }
-        // Windows 上在菜单回调里直接建窗口会卡死（WebView2），换个线程建。
-        "switch" => {
-            let handle = handle.clone();
-            std::thread::spawn(move || {
-                let shell = handle.state::<Shell>();
-                let choose = serde_json::json!({ "view": "choose" });
-                if let Err(error) = open_start(&handle, &shell, choose) {
-                    tracing::warn!("打不开启动页：{error}");
-                }
-            });
-        }
+        "switch" => open_connect(handle),
         "data-dir" => {
             let dir = handle
                 .state::<Shell>()
