@@ -2405,3 +2405,176 @@ button.sa-row:hover {
   flex-wrap: wrap;
   gap: var(--sa-space-2);
 }
+
+/* ---- 执行页：每个 Bot 一张卡片 ------------------------------------------ */
+.sa-exec-list {
+  display: grid;
+  gap: var(--sa-space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.sa-exec {
+  display: grid;
+  gap: var(--sa-space-2);
+  min-width: 0;
+  padding: var(--sa-space-3);
+  border: 1px solid var(--sa-border);
+  border-radius: var(--sa-radius-lg);
+  background: var(--sa-bg-raised);
+}
+.sa-exec[data-busy="true"] {
+  border-color: color-mix(in srgb, var(--sa-accent) 35%, var(--sa-border));
+  box-shadow: 0 1px 0 color-mix(in srgb, var(--sa-accent) 12%, transparent);
+}
+.sa-exec[data-state="approval"],
+.sa-exec[data-state="asking"] {
+  border-color: color-mix(in srgb, var(--sa-warn) 55%, var(--sa-border));
+  background: color-mix(in srgb, var(--sa-warn) 6%, var(--sa-bg-raised));
+}
+.sa-exec[data-state="idle"],
+.sa-exec[data-state="off"] {
+  padding: var(--sa-space-2) var(--sa-space-3);
+  background: transparent;
+}
+.sa-exec-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sa-space-2);
+  min-width: 0;
+}
+.sa-exec-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+.sa-exec-tier {
+  flex: none;
+  padding: 0 6px;
+  border: 1px solid var(--sa-border);
+  border-radius: var(--sa-radius-pill);
+  color: var(--sa-fg-faint);
+  font-size: var(--sa-text-xs);
+}
+.sa-exec-state {
+  flex: none;
+  color: var(--sa-fg-muted);
+  font-size: var(--sa-text-xs);
+}
+.sa-exec[data-busy="true"] .sa-exec-state {
+  color: var(--sa-accent);
+}
+.sa-exec[data-state="approval"] .sa-exec-state,
+.sa-exec[data-state="asking"] .sa-exec-state {
+  color: var(--sa-warn);
+  font-weight: 600;
+}
+.sa-exec-time {
+  flex: none;
+  margin-left: auto;
+  color: var(--sa-fg-faint);
+  font-size: var(--sa-text-xs);
+  font-variant-numeric: tabular-nums;
+}
+.sa-exec-text {
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--sa-fg);
+  font-size: var(--sa-text-sm);
+}
+.sa-exec-task {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  justify-self: start;
+  max-width: 100%;
+  padding: 1px 8px;
+  border: 1px solid var(--sa-border);
+  border-radius: var(--sa-radius-pill);
+  background: none;
+  color: var(--sa-fg-muted);
+  font-size: var(--sa-text-xs);
+  cursor: pointer;
+}
+.sa-exec-task span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sa-exec-task:hover {
+  background: var(--sa-hover);
+}
+.sa-exec-progress {
+  display: flex;
+  align-items: center;
+  gap: var(--sa-space-2);
+  color: var(--sa-fg-faint);
+  font-size: var(--sa-text-xs);
+}
+.sa-exec-progress em {
+  color: var(--sa-danger);
+  font-style: normal;
+}
+/* 一步一格：绿的做成了，红的没成，蓝的在做，橙的等你。 */
+.sa-exec-bar {
+  display: flex;
+  flex: 1;
+  gap: 2px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.sa-exec-bar li {
+  flex: 1;
+  max-width: 28px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--sa-border-strong);
+}
+.sa-exec-bar li[data-state="ok"] {
+  background: var(--sa-ok);
+}
+.sa-exec-bar li[data-state="error"],
+.sa-exec-bar li[data-state="denied"] {
+  background: var(--sa-danger);
+}
+.sa-exec-bar li[data-state="running"] {
+  background: var(--sa-accent);
+  animation: sa-pulse 1.2s ease-in-out infinite;
+}
+.sa-exec-bar li[data-state="waiting"] {
+  background: var(--sa-warn);
+}
+.sa-exec-steps {
+  margin: 0;
+}
+.sa-exec-more {
+  padding: 0 var(--sa-space-2);
+  color: var(--sa-fg-faint);
+  font-size: var(--sa-text-xs);
+}
+.sa-exec-actions {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: var(--sa-space-3);
+}
+.sa-exec-stop {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-right: auto;
+  color: var(--sa-fg-faint);
+}
+.sa-exec-stop:hover {
+  color: var(--sa-danger);
+}
+.sa-exec-approve {
+  height: 28px;
+  background: var(--sa-warn);
+}

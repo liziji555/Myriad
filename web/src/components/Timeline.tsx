@@ -1,7 +1,7 @@
 import { approvalChoices, type ApprovalChoice } from "../api/approvals";
 import { chainParts, type ChainPart } from "../api/chain";
 import { taskDecision } from "../api/taskNotes";
-import { outputPreview, stepIcon, stepKinds } from "../api/steps";
+import { outputPreview, STEP_LABEL, stepIcon, stepKinds } from "../api/steps";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { RoomChat } from "../api/chat";
 import { safeUrl, sourceName, splitEvent } from "../api/links";
@@ -429,7 +429,9 @@ function MessageItem({
     sender.kind === "user"
       ? (origin?.label ?? "你")
       : (bots.find((bot) => bot.id === sender.bot_id)?.name ?? "Bot");
-  const steeredBot = steer ? (bots.find((bot) => bot.id === steer.botId)?.name ?? "Bot") : "";
+  const steeredBot = steer
+    ? steer.botIds.map((id) => bots.find((bot) => bot.id === id)?.name ?? "Bot").join("、")
+    : "";
   const waiting = state === "streaming" && message.content === "" && message.steps.length === 0;
   // 这条消息里有一步在等人批准：它不是在写，是在等你。
   const asking = message.steps.some((step) => step.state === "waiting");
@@ -539,15 +541,6 @@ function MessageItem({
     </li>
   );
 }
-
-const STEP_LABEL: Record<ToolStep["state"], string> = {
-  waiting: "等你批准",
-  running: "进行中",
-  ok: "完成",
-  error: "失败",
-  cancelled: "已停止",
-  denied: "没有批准",
-};
 
 /** 需要人看一眼的步骤：还在进行、等批准，或者没做成。 */
 const NEEDS_ATTENTION: readonly ToolStep["state"][] = ["waiting", "running", "error", "denied"];

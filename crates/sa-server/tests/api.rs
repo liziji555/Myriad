@@ -41,6 +41,7 @@ fn app_with(configure: impl FnOnce(AppState) -> AppState) -> (Router, Arc<Engine
         fence: Fence::new(&dir.join("work"), &[]).unwrap(),
         prompt: None,
         max_steps: 6,
+        max_parallel_bots: 3,
         allow_private_network: false,
         approval_timeout: std::time::Duration::from_secs(600),
         work_dir: dir.join("tasks"),
@@ -491,6 +492,11 @@ async fn message_endpoints_validate_input() {
             "not_found",
         ),
         (
+            post(&format!("{missing}/bots/bot_nobody/stop"), ""),
+            StatusCode::NOT_FOUND,
+            "not_found",
+        ),
+        (
             Request::post(&path)
                 .header(CONTENT_TYPE, "application/json")
                 .body(Body::from(r#"{"content":"没带令牌"}"#))
@@ -510,6 +516,17 @@ async fn message_endpoints_validate_input() {
     let response = app
         .clone()
         .oneshot(post(&format!("/api/rooms/{}/stop", room.id), ""))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(!json::<StopResponse>(response).await.stopped);
+    // 单独停一个不在说话的 Bot 也是空操作。
+    let response = app
+        .clone()
+        .oneshot(post(
+            &format!("/api/rooms/{}/bots/bot_nobody/stop", room.id),
+            "",
+        ))
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);

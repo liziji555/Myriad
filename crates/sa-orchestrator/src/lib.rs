@@ -1,6 +1,7 @@
 //! 编排层：房间里来了消息，找到该接话的 Bot，跑一轮对话，把过程和结果写回房间。
 //!
-//! 每个有活动的房间一个后台任务，房间里的 Bot 一个一个说话；不同房间互不等待。
+//! 每个有活动的房间一个后台任务。房间里每个 Bot 一条道：几个 Bot 可以同时说话（有上限，多的排队），
+//! 每个 Bot 同时只说一轮；不同房间互不等待。
 //!
 //! 谁来接话：人 `@` 了谁就是谁；没有点名时，房间里只有一个 Bot 就是它，
 //! 有几个就让便宜的模型按分工挑一个（见 [`router`]）。Bot 之间用 `ask_bot` 互相点名，
@@ -16,6 +17,7 @@ mod github;
 mod room;
 mod router;
 mod routines;
+mod serial;
 mod telegram;
 mod watchdog;
 mod work;
@@ -89,7 +91,12 @@ pub struct Settings {
     pub watchdog: Watchdog,
     /// 定时任务多久看一遍、等多久。
     pub routines: Routines,
+    /// 一个房间里最多几个 Bot 同时说话。多的排队。
+    pub max_parallel_bots: usize,
 }
+
+/// 一个房间里默认最多 3 个 Bot 同时说话。
+pub const DEFAULT_MAX_PARALLEL_BOTS: usize = 3;
 
 /// 审批卡默认等 10 分钟。
 pub const DEFAULT_APPROVAL_TIMEOUT: Duration = Duration::from_secs(600);
@@ -135,18 +142,32 @@ pub(crate) struct Shared {
 }
 
 struct RoomHandle {
-    wake: Arc<Notify>,
     link: Arc<RoomLink>,
     task: JoinHandle<()>,
 }
 
 /// 房间的后台任务和外面（发消息、停止、`ask_bot`）共用的状态。
+/// 说话的、排队的、是不是在挑人。
+pub(crate) type Announced = (Vec<BotId>, Vec<BotId>, bool, i64);
+
 pub(crate) struct RoomLink {
-    /// 正在进行的那一步的取消开关，以及是哪个 Bot 在说话（正在挑人接话时是 `None`）。空闲时整个是 `None`。
-    pub current: Mutex<Option<(Option<BotId>, CancellationToken)>>,
+    /// 正在说话的 Bot 和各自的取消开关，按开始的先后排。几个 Bot 可以同时说，每个 Bot 同时只说一轮。
+    pub lanes: Mutex<Vec<(BotId, CancellationToken)>>,
+    /// 已经开始写回复的那几个 Bot（有道但还没开口的不算），按开口的先后排。
+    pub speaking: Mutex<Vec<BotId>>,
+    /// 最近一次告诉外面的「谁在说、谁在排、是不是在挑人」：没变就不再发。
+    pub announced: Mutex<Option<Announced>>,
+    /// 正在挑由谁来接话时，那次挑人的取消开关。
+    pub routing: Mutex<Option<CancellationToken>>,
+    /// 对话里改文件、执行命令的那一下要拿着它：同一个房间里的 Bot 一个一个来，不会同时改同一个工作目录。
+    pub writing: tokio::sync::Mutex<()>,
+    /// 叫醒房间的后台任务（有新的 Bot 要开始说话时）。
+    pub wake: Arc<Notify>,
     episode: Mutex<Episode>,
     /// 人发的消息已经处理到哪一条（`seq`）。`-1` 表示还没从会话记录里算出来。
     pub handled: AtomicI64,
+    /// 次数上限按人说的哪一条重新算过了：同一句话被几个 Bot 先后读到，只重新算一次。
+    pub renewed: AtomicI64,
     /// 房间的后台任务是不是正在干活（挑人、Bot 说话、排着队）。
     pub active: std::sync::atomic::AtomicBool,
 }
@@ -154,15 +175,32 @@ pub(crate) struct RoomLink {
 impl RoomLink {
     fn new() -> Self {
         Self {
-            current: Mutex::new(None),
+            lanes: Mutex::default(),
+            speaking: Mutex::default(),
+            announced: Mutex::new(Some((vec![], vec![], false, 0))),
+            routing: Mutex::default(),
+            writing: tokio::sync::Mutex::new(()),
+            wake: Arc::new(Notify::new()),
             episode: Mutex::new(Episode::default()),
             handled: AtomicI64::new(-1),
+            renewed: AtomicI64::new(0),
             active: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
     pub fn episode(&self) -> std::sync::MutexGuard<'_, Episode> {
         self.episode.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// 正在说话的 Bot，按开始的先后排。
+    pub fn running(&self) -> Vec<BotId> {
+        let lanes = self.lanes.lock().unwrap();
+        lanes.iter().map(|(bot_id, _)| bot_id.clone()).collect()
+    }
+
+    /// 有没有 Bot 在说话、或者正在挑人。
+    pub fn busy(&self) -> bool {
+        !self.lanes.lock().unwrap().is_empty() || self.routing.lock().unwrap().is_some()
     }
 }
 
@@ -255,45 +293,60 @@ impl Orchestrator {
         Ok(woken)
     }
 
-    /// 房间里来了一条要有人回应的消息：叫醒房间。
+    /// 房间里来了一条要有人回应的消息：叫醒房间。不打断正在说话的 Bot：
+    /// 点名找别的 Bot 的，被点到的会同时开始；没点名的，正在说的 Bot 在下一步会看到。
     fn arrived(&self, message: &Message) {
-        // 人点名找的不是正在说话的那个 Bot：打断它，让被点到的来接。
-        // 没有点名、或者点的就是它：不打断，它在下一步会看到这条新消息。
-        // 外面来的事不是人在叫：不打断，等正在说话的说完。
-        if let (MessageKind::Chat, Some(target)) = (message.kind, message.mentions.first()) {
-            let rooms = self.rooms.lock().unwrap();
-            if let Some(handle) = rooms.get(&message.room_id) {
-                let current = handle.link.current.lock().unwrap();
-                if let Some((speaking, cancel)) = current.as_ref() {
-                    if speaking.as_ref() != Some(target) {
-                        cancel.cancel();
-                    }
-                }
-            }
-        }
         self.wake(&message.room_id);
     }
 
-    /// 停下房间里正在进行的回复，排着队的 Bot 也不再说话。返回是否真的有东西被停下。
+    /// 停下房间里所有正在进行的回复，排着队的 Bot 也不再说话。返回是否真的有东西被停下。
     pub fn stop(&self, room_id: &RoomId) -> bool {
         let rooms = self.rooms.lock().unwrap();
         let Some(handle) = rooms.get(room_id) else {
             return false;
         };
+        let link = &handle.link;
         let queued = {
-            let mut episode = handle.link.episode();
+            let mut episode = link.episode();
             let queued = !episode.queued().is_empty();
             episode.clear_queue();
             queued
         };
-        let current = handle.link.current.lock().unwrap();
-        match current.as_ref() {
-            Some((_, cancel)) => {
-                cancel.cancel();
-                true
-            }
-            None => queued,
+        let mut stopped = queued;
+        if let Some(cancel) = link.routing.lock().unwrap().as_ref() {
+            cancel.cancel();
+            stopped = true;
         }
+        for (_, cancel) in link.lanes.lock().unwrap().iter() {
+            cancel.cancel();
+            stopped = true;
+        }
+        stopped
+    }
+
+    /// 只停下房间里这一个 Bot：它正在说的停下，它排着的不再说。别的 Bot 照常。
+    pub fn stop_bot(&self, room_id: &RoomId, bot_id: &BotId) -> bool {
+        let rooms = self.rooms.lock().unwrap();
+        let Some(handle) = rooms.get(room_id) else {
+            return false;
+        };
+        let link = &handle.link;
+        let queued = {
+            let mut episode = link.episode();
+            let queued = episode.queued().contains(bot_id);
+            episode.drop_bot(bot_id);
+            queued
+        };
+        let speaking = {
+            let lanes = link.lanes.lock().unwrap();
+            let lane = lanes.iter().find(|(id, _)| id == bot_id);
+            lane.inspect(|(_, cancel)| cancel.cancel()).is_some()
+        };
+        if queued {
+            // 排队的情况变了：让房间重新报一次。
+            link.wake.notify_one();
+        }
+        speaking || queued
     }
 
     /// 人答复一张审批卡。返回 `false` 表示这张卡已经不在等了（答过了、过期了，或者那一轮已经停了）。
@@ -335,18 +388,16 @@ impl Orchestrator {
     fn wake(&self, room_id: &RoomId) {
         let mut rooms = self.rooms.lock().unwrap();
         let handle = rooms.entry(room_id.clone()).or_insert_with(|| {
-            let wake = Arc::new(Notify::new());
             let link = Arc::new(RoomLink::new());
             let task = tokio::spawn(room::run(
                 self.shared.clone(),
                 room_id.clone(),
-                wake.clone(),
                 link.clone(),
             ));
-            RoomHandle { wake, link, task }
+            RoomHandle { link, task }
         });
         // notify_one 会存一个许可：房间正忙时也不会漏掉这次唤醒。
-        handle.wake.notify_one();
+        handle.link.wake.notify_one();
     }
 }
 

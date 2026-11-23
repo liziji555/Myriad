@@ -20,7 +20,7 @@ interface Props {
   disabledReason: string | null;
   /** Bot 是否正在回复。 */
   replying: boolean;
-  /** 正在回复的 Bot：这时发的话是插话，它不会停下，下一次想之前会看到。 */
+  /** 正在回复的 Bot（几个用「、」连起来）：这时发的话是插话，它们不会停下，下一次想之前会看到。 */
   steerTo: string | null;
   /** 房间里可以点名的 Bot。输入 `@` 时列出来。 */
   members: readonly Bot[];
@@ -254,7 +254,7 @@ export function Composer({
             placeholder={
               disabledReason ??
               (steerTo
-                ? `插话：${steerTo}不会停下，下一次想之前会看到（@别的 Bot 会先打断）`
+                ? `插话：${steerTo}不会停下，下一次想之前会看到（@谁就只给谁）`
                 : "说点什么，或者交代一件事…")
             }
             onChange={(event) => {

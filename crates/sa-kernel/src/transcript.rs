@@ -5,6 +5,7 @@
 
 use sa_llm::{ChatMessage, ToolCall};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -248,6 +249,17 @@ impl Transcript {
     }
 
     /// 已经进过会话的房间消息里最大的 `seq`；一条都没有时是 0。
+    /// 进过会话的房间消息的序号，从小到大。
+    pub fn message_seqs(&self) -> BTreeSet<i64> {
+        self.entries
+            .iter()
+            .filter_map(|entry| match &entry.body {
+                EntryBody::User { message_seq, .. } => *message_seq,
+                _ => None,
+            })
+            .collect()
+    }
+
     pub fn last_message_seq(&self) -> i64 {
         self.entries
             .iter()

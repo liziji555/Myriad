@@ -80,6 +80,7 @@ fn start(
         fence: Fence::new(&workspace, std::slice::from_ref(&data)).unwrap(),
         prompt: None,
         max_steps: 8,
+        max_parallel_bots: 3,
         allow_private_network: false,
         approval_timeout: Duration::from_secs(600),
         work_dir: data.join("work"),

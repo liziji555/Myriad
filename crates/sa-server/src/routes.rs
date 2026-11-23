@@ -101,6 +101,18 @@ pub async fn stop(
     }))
 }
 
+/// 只停下房间里这一个 Bot 正在写的回复（它排着的也不再说），别的 Bot 照常。
+pub async fn stop_bot(
+    State(state): State<AppState>,
+    Path((room_id, bot_id)): Path<(RoomId, BotId)>,
+) -> Result<Json<StopResponse>, AppError> {
+    let room = room_id.clone();
+    blocking(&state, move |engine| engine.get_room(&room)).await?;
+    Ok(Json(StopResponse {
+        stopped: state.orchestrator.stop_bot(&room_id, &bot_id),
+    }))
+}
+
 /// 答复一张审批卡。卡片已经不在等了（答过、过期、那一轮停了）时返回 409。
 pub async fn decide_approval(
     State(state): State<AppState>,

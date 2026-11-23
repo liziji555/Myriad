@@ -53,6 +53,7 @@ fn boot_with(dir: &Path, approval_timeout: Duration, replies: Vec<MockReply>) ->
         fence: Fence::new(&workspace, std::slice::from_ref(&data)).unwrap(),
         prompt: None,
         max_steps: 8,
+        max_parallel_bots: 3,
         allow_private_network: false,
         approval_timeout,
         work_dir: data.join("work"),

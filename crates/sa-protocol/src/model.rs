@@ -546,7 +546,11 @@ pub struct Run {
 #[ts(export)]
 pub struct RoomActivity {
     pub room_id: RoomId,
+    /// 最先开始说话的那个 Bot。几个 Bot 同时说时看 `speakers`；留着它给旧的界面用。
     pub speaking: Option<BotId>,
+    /// 正在说话的所有 Bot，按开始的先后排。
+    #[serde(default)]
+    pub speakers: Vec<BotId>,
     pub queued: Vec<BotId>,
     /// 正在挑由谁来接话（还没有 Bot 开始说）。这时也可以点「停止」。
     #[serde(default)]

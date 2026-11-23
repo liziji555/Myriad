@@ -27,6 +27,30 @@ pub struct Config {
     /// 老的配置文件里没有这一节，用内置的偏高的价格。
     #[serde(default)]
     pub prices: BTreeMap<String, Price>,
+    /// 房间里的对话。老的配置文件里没有这一节，用默认值。
+    #[serde(default)]
+    pub rooms: Rooms,
+}
+
+/// 房间里的对话怎么跑。
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Rooms {
+    /// 一个房间里最多几个 Bot 同时说话，多的排队。
+    #[serde(default = "default_max_parallel_bots")]
+    pub max_parallel_bots: usize,
+}
+
+impl Default for Rooms {
+    fn default() -> Self {
+        Self {
+            max_parallel_bots: default_max_parallel_bots(),
+        }
+    }
+}
+
+fn default_max_parallel_bots() -> usize {
+    sa_orchestrator::DEFAULT_MAX_PARALLEL_BOTS
 }
 
 /// 一个模型的价格：每一百万 token 多少钱，单位是 `[budget]` 的货币。

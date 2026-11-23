@@ -38,8 +38,8 @@ impl Tool for AskBotTool {
 
     fn description(&self) -> String {
         "点名房间里的另一个 Bot，请它接手或回答。你的话会作为一条消息出现在房间里，所有人都看得到。\
-         这个工具只负责把话带到，不会等对方回答：对方的回答之后会作为新消息出现。\
-         所以调用之后把你这边的话说完就结束这一轮，不要替对方回答，也不要再调一次去催。\
+         这个工具只负责把话带到，不会等对方回答：对方马上会在自己那边开始，回答之后会作为新消息出现。\
+         你可以接着做你这边的事，但不要替对方回答，也不要再调一次去催。\
          message 要写清楚请它做什么、需要的背景是什么，对方看不到你的思考过程。"
             .into()
     }
@@ -118,8 +118,8 @@ impl Tool for AskBotTool {
             }));
         };
 
-        // 先过上限再发消息：被拒绝的话不会出现在房间里。记账和排队在同一把锁里完成。
-        let job = self
+        // 先过上限再发消息：被拒绝的话不会出现在房间里。发出去了才排队：对方开始时要看得到这句话。
+        let pending = self
             .link
             .episode()
             .ask(
@@ -136,16 +136,32 @@ impl Tool for AskBotTool {
             target.id.clone(),
         );
         let content = format!("@{} {message}", target.name);
-        let hop = job.hop;
-        let posted =
-            db(move || engine.post_bot_message(&room_id, &from, &content, vec![to], hop)).await;
-        if let Err(error) = posted {
-            // 话没发出去，对方就不该被叫起来。
-            self.link.episode().cancel(&job);
-            return Err(ToolError(format!("这句话没发出去：{error}")));
-        }
+        let hop = pending.job.hop;
+        let link = self.link.clone();
+        // 发消息和排队放在一起做完：这一步被停下（工具调用被丢掉）时，话已经落了库，对方也照样排上，
+        // 不会留下一句没人接的交接，也不会一直占着上限。
+        let posted = tokio::spawn(async move {
+            let posted =
+                db(move || engine.post_bot_message(&room_id, &from, &content, vec![to], hop)).await;
+            match posted {
+                // 对方在自己的道上马上开始，不用等这边说完。
+                Ok(_) => {
+                    link.episode().deliver(pending);
+                    link.wake.notify_one();
+                    Ok(())
+                }
+                // 话没发出去，对方就不该被叫起来。
+                Err(error) => {
+                    link.episode().cancel(&pending);
+                    Err(error.to_string())
+                }
+            }
+        })
+        .await
+        .map_err(|error| ToolError(format!("这句话没发出去：{error}")))?;
+        posted.map_err(|error| ToolError(format!("这句话没发出去：{error}")))?;
         Ok(format!(
-            "已经把话带给 {}。它的回答会作为新消息出现在房间里，不用等，也不用再问一次。",
+            "已经把话带给 {}，它已经开始了。它的回答会作为新消息出现在房间里，不用等，也不用再问一次。",
             target.name
         ))
     }
