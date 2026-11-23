@@ -441,8 +441,14 @@ fn demo_lead(request: &ChatRequest, last: &crate::ChatMessage, said: &str) -> Op
             .iter()
             .rev()
             .take_while(|m| from_member(m))
+            .filter(|m| !m.content.contains("\n[这一轮"))
             .filter_map(|m| m.content[3..].split_once('】').map(|(name, _)| name))
             .collect();
+        if from.is_empty() {
+            return Some(MockReply::text(
+                "（Mock 主 Agent）成员没做完，这件事先停在这里。",
+            ));
+        }
         return Some(MockReply::text(&format!(
             "（Mock 主 Agent）{} 都交回来了，这件事做完了。",
             from.into_iter().rev().collect::<Vec<_>>().join("、")

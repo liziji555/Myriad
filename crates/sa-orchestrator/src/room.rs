@@ -1113,12 +1113,20 @@ impl Inbox for RoomInbox {
             // 成员没做成也要交回主 Agent：它要知道这件事失败了，才能决定下一步。
             let mut message = message;
             let leading = self.link.episode().lead() == Some(&self.bot_id);
-            if leading && speaker.is_some() && message.state == MessageState::Failed {
+            let unfinished = match message.state {
+                MessageState::Failed => Some(format!(
+                    "这一轮出错了：{}",
+                    message.error.as_deref().unwrap_or("出错了")
+                )),
+                MessageState::Cancelled => Some("这一轮被用户停下了，没做完".into()),
+                MessageState::Interrupted => Some("这一轮中途断了，没做完".into()),
+                _ => None,
+            };
+            if let Some(note) = unfinished.filter(|_| leading && speaker.is_some()) {
                 if message.content.trim().is_empty() {
                     message.content = "（没做成）".into();
                 }
-                let error = message.error.as_deref().unwrap_or("出错了");
-                message.content = format!("{}\n[这一轮出错了：{error}]", message.content);
+                message.content = format!("{}\n[{note}]", message.content);
             }
             if message.content.trim().is_empty() {
                 continue;
