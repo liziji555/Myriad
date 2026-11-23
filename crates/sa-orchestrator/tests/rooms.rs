@@ -412,6 +412,8 @@ async fn stop_cancels_the_reply_and_the_room_keeps_working() {
     let stopped = rig.settled(2).await.pop().unwrap();
     assert_eq!(stopped.state, MessageState::Cancelled);
     assert_eq!(stopped.content, "写到一半");
+    // 停下的消息先存好，房间再报空闲：等它报完再看。
+    rig.until_idle().await;
     assert!(!rig.orchestrator.stop(&rig.room));
 
     rig.say("换个话题").await;
@@ -2230,8 +2232,13 @@ async fn the_watchdog_stops_bots_that_keep_saying_the_same_thing() {
     assert_eq!(found[0].room_id.as_ref(), Some(&t.rig.room));
 
     // 正在说话的那个被停下，房间安静下来；再看一遍没有新的提醒。
+    // 几个 Bot 同时在说，被停下的那条不一定排在最后。
     let messages = t.rig.settled(5).await;
-    assert_eq!(messages.last().unwrap().state, MessageState::Cancelled);
+    let cancelled = messages
+        .iter()
+        .filter(|m| m.state == MessageState::Cancelled)
+        .count();
+    assert_eq!(cancelled, 1, "{messages:#?}");
     assert!(t.rig.orchestrator.watchdog_tick().await.is_empty());
     t.rig.orchestrator.shutdown().await;
 }
