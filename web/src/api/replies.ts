@@ -17,11 +17,18 @@ export function repliesOf(
   const busy =
     speakersOf(activity).length > 0 || Boolean(activity?.routing) || (activity?.queued.length ?? 0) > 0;
   const handled = activity?.handled_seq ?? 0;
-  const chats = messages.filter((message) => message.kind === "chat");
+  // 人说的话、定时任务、外面来的事都会叫 Bot 开口：下一条这样的消息之后开始的回复不算给这一句。
+  const said = messages.filter(
+    (message) => message.sender.kind !== "bot" && ["chat", "routine", "event"].includes(message.kind),
+  );
+  // Bot 用 `ask_bot` 找别人的那句话一发出来就是写完的，不算它回答了。
+  const chats = messages.filter(
+    (message) => message.kind === "chat" && !(message.sender.kind === "bot" && message.mentions.length > 0),
+  );
   const replies = new Map<MessageId, Reply>();
-  chats.forEach((said, index) => {
-    if (said.sender.kind !== "user") return;
-    const next = chats.slice(index + 1).find((message) => message.sender.kind === "user");
+  said.forEach((said, index, all) => {
+    if (said.kind !== "chat" || said.sender.kind !== "user") return;
+    const next = all[index + 1];
     const steeredBots = steered(said.id);
     const answers = chats.filter(
       (message) =>

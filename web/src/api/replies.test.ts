@@ -86,4 +86,30 @@ describe("repliesOf", () => {
     );
     expect(replies.size).toBe(0);
   });
+
+  it("交接的那句不算回答：交出去的和接的都被停下就是已停止", () => {
+    const replies = repliesOf(
+      [
+        message({ id: "u1", seq: 1 }),
+        message({ id: "m1", seq: 2, sender: bot("b1"), mentions: ["b2"], hop: 1 }),
+        message({ id: "m2", seq: 3, sender: bot("b1"), state: "cancelled" }),
+        message({ id: "m3", seq: 4, sender: bot("b2"), state: "cancelled", hop: 1 }),
+      ],
+      idle,
+    );
+    expect(replies.get("u1")).toBe("stopped");
+  });
+
+  it("定时任务叫起来的回复不算给前一句", () => {
+    const replies = repliesOf(
+      [
+        message({ id: "u1", seq: 1 }),
+        message({ id: "m1", seq: 2, sender: bot("b1"), state: "cancelled" }),
+        message({ id: "t1", seq: 3, kind: "routine" }),
+        message({ id: "m2", seq: 4, sender: bot("b1") }),
+      ],
+      idle,
+    );
+    expect(replies.get("u1")).toBe("stopped");
+  });
 });
