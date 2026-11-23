@@ -2,9 +2,11 @@
 
 use crate::RoomLink;
 use async_trait::async_trait;
-use sa_tools::{Permission, Tool, ToolCtx, ToolRegistry, ToolResult};
+use sa_tools::{Permission, Tool, ToolCtx, ToolError, ToolRegistry, ToolResult};
 use serde_json::Value;
 use std::sync::Arc;
+
+const CHANGED: &str = "等别的 Bot 改完的时候，这一步要动的东西变了，没有执行。请重新确认后再做。";
 
 /// 把 `tools` 里每个会动东西的调用都包一层：执行的那一下要拿到房间的写锁。
 /// 审批在执行之前，不拿锁：一个 Bot 等批准时别的 Bot 照样能改。
@@ -62,7 +64,13 @@ impl Tool for Serial {
         if self.inner.is_read_only(&input) {
             return self.inner.call(input, ctx).await;
         }
+        // 排队等别的 Bot 改完时，它可能把这次要动的路径改了（比如换成指向别处的链接）：
+        // 拿到锁之后再查一遍，和排队前不一样就不做，免得批准的是一件事、做的是另一件。
+        let before = self.inner.check_permission(&input, ctx).await;
         let _writing = self.link.writing.lock().await;
+        if self.inner.check_permission(&input, ctx).await != before {
+            return Err(ToolError(CHANGED.into()));
+        }
         self.inner.call(input, ctx).await
     }
 }
