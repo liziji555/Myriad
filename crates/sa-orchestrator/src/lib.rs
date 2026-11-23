@@ -166,6 +166,8 @@ pub(crate) struct RoomLink {
     episode: Mutex<Episode>,
     /// 人发的消息已经处理到哪一条（`seq`）。`-1` 表示还没从会话记录里算出来。
     pub handled: AtomicI64,
+    /// 次数上限按人说的哪一条重新算过了：同一句话被几个 Bot 先后读到，只重新算一次。
+    pub renewed: AtomicI64,
     /// 房间的后台任务是不是正在干活（挑人、Bot 说话、排着队）。
     pub active: std::sync::atomic::AtomicBool,
 }
@@ -181,6 +183,7 @@ impl RoomLink {
             wake: Arc::new(Notify::new()),
             episode: Mutex::new(Episode::default()),
             handled: AtomicI64::new(-1),
+            renewed: AtomicI64::new(0),
             active: std::sync::atomic::AtomicBool::new(false),
         }
     }

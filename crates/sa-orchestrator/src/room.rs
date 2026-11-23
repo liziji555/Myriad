@@ -277,6 +277,9 @@ async fn work(
                 .map(|bot_id| Job { bot_id, hop: 0 })
                 .collect();
             episode.restart(first, running.len());
+            if let Some(chat) = fresh.iter().rfind(|m| m.kind == MessageKind::Chat) {
+                link.renewed.fetch_max(chat.seq, Ordering::SeqCst);
+            }
         }
         // 定时任务和外面来的事各有指定的 Bot，别的 Bot 看不到它们：每个被指定的都要轮到。
         // 它们不是人说的话，不打断排着队的。
@@ -919,7 +922,9 @@ impl Inbox for RoomInbox {
                 } else {
                     self.link.handled.load(Ordering::SeqCst)
                 };
-                if started || message.seq > before {
+                let renew = started || message.seq > before;
+                if renew && self.link.renewed.fetch_max(message.seq, Ordering::SeqCst) < message.seq
+                {
                     // 人中途说了新的话，由正在说话的 Bot 接着答：和新开一轮一样，上限重新算。
                     let running = self.link.running().len();
                     self.link.episode().renew(running);
