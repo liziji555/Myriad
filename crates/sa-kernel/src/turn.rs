@@ -53,6 +53,16 @@ pub trait Inbox: Send {
     async fn drain(&mut self) -> Vec<UserInput>;
 }
 
+/// 一步是怎么结束的。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StepEnd {
+    Ok,
+    /// 这一步自己没做成，原因交给了模型。
+    Failed,
+    /// 人点了停止，这一步没做完。
+    Stopped,
+}
+
 /// 这一轮的过程报给谁。
 #[async_trait]
 pub trait Observer: Send + Sync {
@@ -61,7 +71,7 @@ pub trait Observer: Send + Sync {
     /// 一步开始了。`arguments` 是模型给这个工具的参数原文（JSON），内部的步骤（压缩）是空的。
     async fn tool_started(&self, call_id: &str, tool: &str, title: &str, arguments: &str);
     /// 一步结束了。`output` 是工具交回来的结果（失败时是原因）；被停下的、内部的步骤是空的。
-    async fn tool_finished(&self, call_id: &str, ok: bool, output: &str);
+    async fn tool_finished(&self, call_id: &str, end: StepEnd, output: &str);
     /// 一次模型调用结束，报告用量。
     async fn usage(&self, model: &str, usage: Usage);
     /// 这次调用要人点头才能执行。返回 `true` 表示批准。默认不批准。
@@ -333,7 +343,12 @@ impl Turn {
             let summary = self
                 .summarise(provider, config, plan.text, observer, cancel)
                 .await;
-            observer.tool_finished(&step, summary.is_ok(), "").await;
+            let end = match &summary {
+                Ok(_) => StepEnd::Ok,
+                Err(LlmError::Cancelled) => StepEnd::Stopped,
+                Err(_) => StepEnd::Failed,
+            };
+            observer.tool_finished(&step, end, "").await;
             match summary {
                 Ok(content) => {
                     transcript.append(EntryBody::Summary {
@@ -614,13 +629,12 @@ async fn run_one(
             }
         }
     };
-    let output = match &result {
-        Some(Ok(text)) | Some(Err(text)) => text.as_str(),
-        None => "",
+    let (end, output) = match &result {
+        Some(Ok(text)) => (StepEnd::Ok, text.as_str()),
+        Some(Err(text)) => (StepEnd::Failed, text.as_str()),
+        None => (StepEnd::Stopped, ""),
     };
-    observer
-        .tool_finished(&call.id, matches!(result, Some(Ok(_))), output)
-        .await;
+    observer.tool_finished(&call.id, end, output).await;
     result
 }
 
@@ -725,11 +739,16 @@ mod tests {
                 .unwrap()
                 .push(format!("start:{call_id}:{tool}:{title}"));
         }
-        async fn tool_finished(&self, call_id: &str, ok: bool, _output: &str) {
+        async fn tool_finished(&self, call_id: &str, end: StepEnd, _output: &str) {
+            let end = match end {
+                StepEnd::Ok => "true",
+                StepEnd::Failed => "false",
+                StepEnd::Stopped => "stopped",
+            };
             self.log
                 .lock()
                 .unwrap()
-                .push(format!("finish:{call_id}:{ok}"));
+                .push(format!("finish:{call_id}:{end}"));
         }
         async fn usage(&self, model: &str, usage: Usage) {
             self.log
@@ -1166,7 +1185,7 @@ mod tests {
         // 记录里没有悬空的调用：重新打开不需要再补。
         assert_eq!(rig.transcript.close_open_tool_calls("x").unwrap(), 0);
         let log = observer.log();
-        assert!(log.contains(&"finish:c2:false".to_string()));
+        assert!(log.contains(&"finish:c2:stopped".to_string()));
         assert!(!log.iter().any(|l| l.starts_with("start:c3")), "{log:?}");
     }
 
@@ -1518,7 +1537,7 @@ mod tests {
         assert!(!rig.kinds().contains(&"summary"));
         assert_eq!(
             compact_steps(&observer),
-            ["start:compact:对话太长，压缩前面的内容", "finish:false"]
+            ["start:compact:对话太长，压缩前面的内容", "finish:stopped"]
         );
     }
 
@@ -1563,7 +1582,7 @@ mod tests {
         assert_eq!(outcome.end, TurnEnd::Cancelled);
         assert_eq!(rig.tool_results(), [(CANCELLED_RESULT.to_string(), true)]);
         assert_eq!(rig.peak.load(Ordering::SeqCst), 0);
-        assert!(observer.log().contains(&"finish:c1:false".to_string()));
+        assert!(observer.log().contains(&"finish:c1:stopped".to_string()));
     }
 
     #[tokio::test]

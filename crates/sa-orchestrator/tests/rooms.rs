@@ -914,6 +914,8 @@ async fn stop_kills_the_running_command_and_its_children() {
     assert!(rig.orchestrator.stop(&rig.room));
     let reply = rig.settled(2).await.pop().unwrap();
     assert_eq!(reply.state, MessageState::Cancelled);
+    // 是人停下的，不是命令自己出了错：这一步和回复说的要是同一件事。
+    assert_eq!(reply.steps[0].state, StepState::Cancelled);
     for _ in 0..300 {
         if !child.exists() {
             break;

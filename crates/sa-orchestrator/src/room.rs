@@ -7,7 +7,7 @@ use crate::{render_prompt, router, RoomLink, Shared};
 use async_trait::async_trait;
 use sa_engine::{Audit, EngineError};
 use sa_kernel::{
-    run_turn, ApprovalRequest, Inbox, Observer, Transcript, TurnConfig, TurnEnd, UserInput,
+    run_turn, ApprovalRequest, Inbox, Observer, StepEnd, Transcript, TurnConfig, TurnEnd, UserInput,
 };
 use sa_llm::{RetryPolicy, Usage};
 use sa_protocol::{
@@ -865,7 +865,7 @@ impl Observer for RoomObserver {
         self.save_steps().await;
     }
 
-    async fn tool_finished(&self, call_id: &str, ok: bool, output: &str) {
+    async fn tool_finished(&self, call_id: &str, end: StepEnd, output: &str) {
         self.beat();
         {
             let mut steps = self.steps.lock().unwrap();
@@ -875,7 +875,11 @@ impl Observer for RoomObserver {
                 .rev()
                 .find(|s| s.id == call_id && s.state == StepState::Running)
             {
-                step.state = if ok { StepState::Ok } else { StepState::Error };
+                step.state = match end {
+                    StepEnd::Ok => StepState::Ok,
+                    StepEnd::Failed => StepState::Error,
+                    StepEnd::Stopped => StepState::Cancelled,
+                };
                 step.output = step_output(output);
             }
             trim_outputs(&mut steps);
