@@ -138,7 +138,7 @@ pub fn serve_until(
 
 /// 等到有人要它停：Ctrl+C，或者（Linux、macOS 上）`kill` 发来的 SIGTERM——
 /// 用 systemd 之类管着它的时候，停服务发的就是这个，也要好好收尾。
-async fn stop_signal() {
+pub(crate) async fn stop_signal() {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{signal, SignalKind};
@@ -162,7 +162,7 @@ fn env_value(name: &str) -> Option<String> {
 }
 
 /// 访问令牌保存在数据目录里，重启后链接不变。
-fn load_or_create_token(path: &Path) -> Result<String> {
+pub(crate) fn load_or_create_token(path: &Path) -> Result<String> {
     let fresh = format!(
         "{}{}",
         uuid::Uuid::new_v4().simple(),
@@ -183,7 +183,7 @@ fn load_or_create_token(path: &Path) -> Result<String> {
     Ok(token)
 }
 
-fn open_browser(url: &str) -> std::io::Result<()> {
+pub(crate) fn open_browser(url: &str) -> std::io::Result<()> {
     let mut command = if cfg!(windows) {
         let mut c = std::process::Command::new("cmd");
         c.args(["/C", "start", ""]);

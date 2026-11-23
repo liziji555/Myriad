@@ -9,14 +9,17 @@ mod extensions;
 mod link;
 mod models;
 mod paths;
+mod remote;
 mod routine;
 mod serve;
+mod service;
 mod task;
 mod team;
 mod usage;
 
 pub use app::{init_logging, RunArgs};
 pub use paths::DataDir;
+pub use remote::{SshTarget, Tunnel};
 pub use serve::serve_until;
 
 use clap::{Parser, Subcommand};
@@ -38,6 +41,15 @@ struct Cli {
 enum Command {
     /// 启动本机服务，在浏览器里打开界面
     Serve(serve::ServeArgs),
+    /// 打印这台机器上苦乐的连接地址（带令牌），给 sa connect 和桌面版用
+    Url(remote::UrlArgs),
+    /// 通过 SSH 连另一台机器上的苦乐：开一条隧道，在本机浏览器里打开
+    Connect(remote::ConnectArgs),
+    /// 在 Linux 服务器上让 sa serve 常驻（systemd 用户服务）：开机自启，退出登录也不停
+    Service {
+        #[command(subcommand)]
+        command: service::ServiceCommand,
+    },
     /// 在终端里和 Bot 对话（和 sa serve 用同一份数据，不能同时运行）
     Chat(chat::ChatArgs),
     /// 管理 Bot：列出、新建、修改、删除
@@ -85,6 +97,11 @@ pub fn run() -> ExitCode {
     let cli = Cli::parse();
     let result = paths::DataDir::resolve(cli.data_dir).and_then(|data_dir| match cli.command {
         Command::Serve(args) => serve::run(&data_dir, args).map(|()| ExitCode::SUCCESS),
+        Command::Url(args) => remote::url(&data_dir, args).map(|()| ExitCode::SUCCESS),
+        Command::Connect(args) => remote::connect(args).map(|()| ExitCode::SUCCESS),
+        Command::Service { command } => {
+            service::run(&data_dir, command).map(|()| ExitCode::SUCCESS)
+        }
         Command::Chat(args) => chat::run(&data_dir, args),
         Command::Bot { command } => team::run(&data_dir, team::Command::Bot(command)),
         Command::Room { command } => team::run(&data_dir, team::Command::Room(command)),
