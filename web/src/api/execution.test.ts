@@ -101,7 +101,7 @@ describe("executionOf", () => {
   it("另一个任务等验收时，不把正在做的任务的步骤算到它头上", () => {
     const room = chat([message(1, { kind: "run", task_id: "task_2", steps: [step("running", "执行 make")] })]);
     const [card] = cards([bot(1)], room, [task(1, { state: "review" }), task(2)]);
-    expect(card).toMatchObject({ state: "asking", taskId: "task_1", taskTitle: "任务 1", steps: [], since: undefined });
+    expect(card).toMatchObject({ state: "asking", taskId: "task_1", taskTitle: "任务 1", steps: [], since: undefined, lastAt: undefined });
   });
 
   it("停用的 Bot 也有一张卡", () => {

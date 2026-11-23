@@ -63,7 +63,9 @@ export function executionOf(
     const tier =
       live?.kind === "run" ? "strong" : (members.find((bot) => bot.id === row.botId)?.tier ?? "mid");
     const steps = live?.steps ?? [];
-    const last = live ? undefined : [...messages].reverse().find((message) => byBot(message, row.botId));
+    const last = live
+      ? undefined
+      : [...messages].reverse().find((message) => message.state !== "streaming" && byBot(message, row.botId));
     const taskId = row.taskId ?? live?.task_id;
     return {
       ...row,
