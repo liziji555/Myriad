@@ -5,7 +5,15 @@ import type { RoomId } from "./RoomId";
 /**
  * 房间里现在谁在说话、谁在排队。没有人说话、没有人排队、也不在挑人，表示这一轮交流结束了。
  */
-export type RoomActivity = { room_id: RoomId, speaking: BotId | null, queued: Array<BotId>, 
+export type RoomActivity = { room_id: RoomId, 
+/**
+ * 最先开始说话的那个 Bot。几个 Bot 同时说时看 `speakers`；留着它给旧的界面用。
+ */
+speaking: BotId | null, 
+/**
+ * 正在说话的所有 Bot，按开始的先后排。
+ */
+speakers: Array<BotId>, queued: Array<BotId>, 
 /**
  * 正在挑由谁来接话（还没有 Bot 开始说）。这时也可以点「停止」。
  */

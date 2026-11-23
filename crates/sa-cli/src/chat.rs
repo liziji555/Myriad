@@ -25,10 +25,15 @@ pub struct ChatArgs {
     run: RunArgs,
 }
 
+/// 终端里一次只打得下一条回复：房间里的 Bot 一个一个说，别的排队。
+fn one_at_a_time(settings: &mut sa_orchestrator::Settings) {
+    settings.max_parallel_bots = 1;
+}
+
 pub fn run(data_dir: &DataDir, args: ChatArgs) -> Result<ExitCode> {
     // 终端里是对话，日志默认只留警告，免得插进回复中间。
     init_logging(tracing::Level::WARN);
-    let app = App::open(data_dir, &args.run)?;
+    let app = App::open_and_tune(data_dir, &args.run, one_at_a_time)?;
     let room = pick_room(&app, args.room.as_deref())?;
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -556,7 +561,11 @@ mod tests {
                 context_window: None,
             }))
         };
-        App::open_tuned(&data_dir, &args, models, tune).unwrap()
+        App::open_tuned(&data_dir, &args, models, |settings| {
+            one_at_a_time(settings);
+            tune(settings);
+        })
+        .unwrap()
     }
 
     async fn say(app: &App, text: &str) -> (MessageState, String) {

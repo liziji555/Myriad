@@ -47,7 +47,7 @@ const chat = (messages: Message[]): RoomChat => ({
   messages,
   hasMore: false,
   loaded: true,
-  activity: { room_id: ROOM, speaking: null, queued: [], routing: false, handled_seq: 0 },
+  activity: { room_id: ROOM, speaking: null, speakers: [], queued: [], routing: false, handled_seq: 0 },
 });
 const cards = (members: Bot[], room: RoomChat, tasks: Task[] = []) =>
   executionOf(presenceOf(members, room, tasks), members, room, tasks);
@@ -102,6 +102,39 @@ describe("executionOf", () => {
     const room = chat([message(1, { kind: "run", task_id: "task_2", steps: [step("running", "执行 make")] })]);
     const [card] = cards([bot(1)], room, [task(1, { state: "review" }), task(2)]);
     expect(card).toMatchObject({ state: "asking", taskId: "task_1", taskTitle: "任务 1", steps: [], since: undefined, lastAt: undefined });
+  });
+
+  it("几个 Bot 同时在说各一张卡；对话里在说的、排着队的能单独停，做任务的不能", () => {
+    const members = [bot(1), bot(2), bot(3), bot(4)];
+    const room: RoomChat = {
+      ...chat([
+        message(1, { steps: [step("running", "执行 ls")] }),
+        message(2, { sender: { kind: "bot", bot_id: "bot_2" } }),
+        message(3, { sender: { kind: "bot", bot_id: "bot_3" }, kind: "run", task_id: "task_1" }),
+      ]),
+    };
+    room.activity!.queued.push("bot_4");
+    const all = cards(members, room, [task(1, { owner_bot_id: "bot_3" })]);
+    const of = (id: string) => all.find((card) => card.botId === id)!;
+    expect([of("bot_1").state, of("bot_2").state, of("bot_3").state, of("bot_4").state]).toEqual([
+      "tool",
+      "writing",
+      "writing",
+      "queued",
+    ]);
+    expect([of("bot_1").stoppable, of("bot_2").stoppable, of("bot_3").stoppable, of("bot_4").stoppable]).toEqual([
+      true,
+      true,
+      false,
+      true,
+    ]);
+  });
+
+  it("卡片显示它的任务等验收时，它在房间里说着的那一份照样能单独停", () => {
+    const room = chat([message(1)]);
+    room.activity!.speakers.push("bot_1");
+    const [card] = cards([bot(1)], room, [task(1, { state: "review" })]);
+    expect(card).toMatchObject({ state: "asking", taskId: "task_1", stoppable: true });
   });
 
   it("停用的 Bot 也有一张卡", () => {

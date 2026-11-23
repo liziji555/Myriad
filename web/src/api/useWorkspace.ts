@@ -114,6 +114,8 @@ export interface WorkspaceView extends Workspace {
   loadOlder(roomId: RoomId): Promise<void>;
   sendMessage(roomId: RoomId, content: string): Promise<void>;
   stopReply(roomId: RoomId): Promise<void>;
+  /** 只停房间里的一个 Bot。 */
+  stopBot(roomId: RoomId, botId: BotId): Promise<void>;
   decideApproval(id: ApprovalId, decision: ApprovalDecision): Promise<void>;
   /** 收起一条提醒。 */
   dismissNotice(id: NoticeId): Promise<void>;
@@ -375,6 +377,10 @@ export function useWorkspace(): WorkspaceView {
     await api.stopReply(roomId);
   }, []);
 
+  const stopBot = useCallback(async (roomId: RoomId, botId: BotId) => {
+    await api.stopBot(roomId, botId);
+  }, []);
+
   const decideApproval = useCallback(async (id: ApprovalId, decision: ApprovalDecision) => {
     // 结果（步骤变成进行中或没有批准）由事件流送来，这里不用改状态。
     await api.decideApproval(id, decision);
@@ -409,6 +415,7 @@ export function useWorkspace(): WorkspaceView {
     loadOlder,
     sendMessage,
     stopReply,
+    stopBot,
     decideApproval,
     dismissNotice,
   };

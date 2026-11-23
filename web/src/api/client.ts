@@ -110,6 +110,12 @@ export const api = {
     postJson<Message>(`/api/rooms/${encodeURIComponent(roomId)}/messages`, { content }),
   stopReply: (roomId: RoomId) =>
     postJson<StopResponse>(`/api/rooms/${encodeURIComponent(roomId)}/stop`, {}),
+  /** 只停房间里的一个 Bot：它正在说的这一轮和排着的队，别的 Bot 照常。 */
+  stopBot: (roomId: RoomId, botId: BotId) =>
+    postJson<StopResponse>(
+      `/api/rooms/${encodeURIComponent(roomId)}/bots/${encodeURIComponent(botId)}/stop`,
+      {},
+    ),
   /** 答复一张审批卡。卡片已经处理过或过期时抛出 `approval_closed`。 */
   decideApproval: (id: ApprovalId, decision: ApprovalDecision) =>
     postJson<void>(`/api/approvals/${encodeURIComponent(id)}/decide`, { decision }),

@@ -1,5 +1,5 @@
 import type { RoomChat } from "./chat";
-import type { Presence, PresenceState } from "./presence";
+import { speakersOf, type Presence, type PresenceState } from "./presence";
 import type { Bot, Message, ModelTier, Task, ToolStep } from "./types";
 
 /** 执行面板上一个 Bot 的卡片：现场栏那一句之外，再加它这一次做到哪了。 */
@@ -17,6 +17,8 @@ export interface ExecCard extends Presence {
   failed: number;
   /** 上一次说完话是什么时候（毫秒）。空着的 Bot 才看这个。 */
   lastAt?: number;
+  /** 能单独停下：它在房间里说着话或者排着队（任务有自己的停止按钮）。 */
+  stoppable: boolean;
 }
 
 export const EXEC_LABEL: Record<PresenceState, string> = {
@@ -47,6 +49,7 @@ export function executionOf(
   tasks: readonly Task[],
 ): ExecCard[] {
   const messages = chat?.messages ?? [];
+  const inRoom = [...speakersOf(chat?.activity), ...(chat?.activity?.queued ?? [])];
   return presence.map((row): ExecCard => {
     // 卡片说的是哪个任务，就只数那个任务里的步骤，别把另一个任务的串进来。
     const live =
@@ -78,6 +81,10 @@ export function executionOf(
       done: steps.filter((step) => FINISHED.includes(step.state)).length,
       failed: steps.filter((step) => step.state === "error" || step.state === "denied").length,
       lastAt: last?.updated_at,
+      // 卡片显示的可能是它的任务，但它同时在房间里说着或排着：照样能只停它在房间里的这一份。
+      stoppable:
+        inRoom.includes(row.botId) ||
+        messages.some((message) => message.state === "streaming" && message.kind === "chat" && byBot(message, row.botId)),
     };
   });
 }

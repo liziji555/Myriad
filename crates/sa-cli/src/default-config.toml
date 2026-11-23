@@ -36,6 +36,10 @@ daily_limit = 50.0
 task_limit = 10.0
 currency = "CNY"
 
+[rooms]
+# 一个房间里同时最多几个 Bot 在说话，多的排队。几个一起说时花费也成倍上升。
+max_parallel_bots = 3
+
 [prices]
 # 算花费用的价格：每一百万 token 多少钱，单位同上。
 # 下面的数不是哪家的真实价格，是故意偏高的占位：请按你用的模型服务的价目表改，

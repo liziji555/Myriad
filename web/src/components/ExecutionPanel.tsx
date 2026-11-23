@@ -12,6 +12,7 @@ const RECENT = 4;
 interface Props {
   cards: readonly ExecCard[];
   onJump(card: ExecCard): void;
+  onStop(card: ExecCard): void;
   onShowTask(taskId: TaskId): void;
 }
 
@@ -28,19 +29,19 @@ function useNow(ticking: boolean): number {
 }
 
 /** 右边的「执行」页：每个 Bot 一张卡片，写着它此刻在做什么、做到第几步、用了多久。 */
-export function ExecutionPanel({ cards, onJump, onShowTask }: Props) {
+export function ExecutionPanel({ cards, onJump, onStop, onShowTask }: Props) {
   const now = useNow(cards.some((card) => card.since !== undefined));
   if (cards.length === 0) return <p className="sa-panel-empty">这个房间还没有 Bot。</p>;
   return (
     <ul className="sa-exec-list" aria-label="每个 Bot 在做什么">
       {cards.map((card) => (
-        <ExecItem key={card.botId} card={card} now={now} onJump={onJump} onShowTask={onShowTask} />
+        <ExecItem key={card.botId} card={card} now={now} onJump={onJump} onStop={onStop} onShowTask={onShowTask} />
       ))}
     </ul>
   );
 }
 
-function ExecItem({ card, now, onJump, onShowTask }: { card: ExecCard; now: number } & Omit<Props, "cards">) {
+function ExecItem({ card, now, onJump, onStop, onShowTask }: { card: ExecCard; now: number } & Omit<Props, "cards">) {
   const busy = card.since !== undefined;
   const recent = card.steps.slice(-RECENT);
   const hidden = card.steps.length - recent.length;
@@ -100,15 +101,28 @@ function ExecItem({ card, now, onJump, onShowTask }: { card: ExecCard; now: numb
           </ul>
         </>
       )}
-      {card.messageId && busy && (
+      {((card.messageId && busy) || card.stoppable) && (
         <div className="sa-exec-actions">
-          <button
-            type="button"
-            className={card.state === "approval" ? "sa-button sa-exec-approve" : "sa-link"}
-            onClick={() => onJump(card)}
-          >
-            {card.state === "approval" ? "去批准" : "在主线上看"}
-          </button>
+          {card.stoppable && (
+            <button
+              type="button"
+              className="sa-link sa-exec-stop"
+              title={`只停${card.name}，别的 Bot 照常`}
+              onClick={() => onStop(card)}
+            >
+              <Icon name="stop" size={12} />
+              停止
+            </button>
+          )}
+          {card.messageId && busy && (
+            <button
+              type="button"
+              className={card.state === "approval" ? "sa-button sa-exec-approve" : "sa-link"}
+              onClick={() => onJump(card)}
+            >
+              {card.state === "approval" ? "去批准" : "在主线上看"}
+            </button>
+          )}
         </div>
       )}
     </li>
