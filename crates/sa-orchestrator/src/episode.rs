@@ -303,10 +303,13 @@ impl Episode {
             ));
         }
         let normalized = normalize(message);
-        if self
-            .recent
-            .iter()
-            .any(|earlier| similarity(earlier, &normalized) >= REPEAT_SIMILARITY)
+        // 主 Agent 把同一件事分给几个成员是正常派活；它来回找人还有每对上限和轮数上限管着。
+        let leading = self.lead.as_ref() == Some(from);
+        if !leading
+            && self
+                .recent
+                .iter()
+                .any(|earlier| similarity(earlier, &normalized) >= REPEAT_SIMILARITY)
         {
             return Err(
                 "这句话和刚才说过的几乎一样，没有发出去。没有新的内容就不要再找别的 Bot 了。"
@@ -660,5 +663,18 @@ mod tests {
         episode.drop_bot(&bot("r"));
         let lead = episode.next(&[]).unwrap();
         assert_eq!((lead.bot_id, lead.reply_to), (bot("lead"), vec![done]));
+    }
+
+    #[test]
+    fn the_lead_may_hand_the_same_brief_to_several_members() {
+        let mut episode = Episode::default();
+        episode.set_lead(Some(bot("lead")));
+        for to in ["c", "r"] {
+            let pending = episode
+                .ask(&bot("lead"), 0, &bot(to), "做一个登录页")
+                .unwrap();
+            episode.deliver(pending);
+        }
+        assert_eq!(episode.queued(), vec![bot("c"), bot("r")]);
     }
 }
