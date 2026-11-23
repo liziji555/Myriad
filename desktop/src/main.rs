@@ -85,6 +85,8 @@ struct Shell {
     args: Args,
     data_dir: DataDir,
     launch: Launch,
+    /// 本机服务起来了、主窗口开着时，它读写的工作目录。
+    serving: Mutex<Option<PathBuf>>,
     server: Mutex<Option<Server>>,
     tunnel: Mutex<Option<Tunnel>>,
     /// 还在连服务器时，退出要靠它杀掉 ssh。
@@ -154,6 +156,7 @@ fn main() {
         args,
         data_dir,
         launch: Launch::FirstRun,
+        serving: Mutex::new(None),
         server: Mutex::new(None),
         tunnel: Mutex::new(None),
         connecting: TunnelStop::default(),
@@ -209,7 +212,7 @@ fn start_local(handle: &AppHandle, shell: &Shell, workdir: PathBuf) -> tauri::Re
     let (stop, stop_asked) = tokio::sync::oneshot::channel::<()>();
     let (done, stopped) = mpsc::channel::<()>();
     let run = RunArgs {
-        workdir: Some(workdir),
+        workdir: Some(workdir.clone()),
         mock: shell.args.mock,
     };
     let (data_dir, port) = (shell.data_dir.clone(), shell.args.port);
@@ -231,7 +234,10 @@ fn start_local(handle: &AppHandle, shell: &Shell, workdir: PathBuf) -> tauri::Re
     *shell.server.lock().unwrap() = Some(Server { stop, stopped });
 
     match started.recv() {
-        Ok(Ok(url)) => open_main(handle, shell, &url, "苦乐"),
+        Ok(Ok(url)) => {
+            *shell.serving.lock().unwrap() = Some(workdir);
+            open_main(handle, shell, &url, "苦乐")
+        }
         Ok(Err(reason)) => open_failed(handle, shell, &reason, None),
         Err(_) => open_failed(handle, shell, "服务还没开始就退出了", None),
     }
@@ -379,7 +385,7 @@ async fn choose_local(window: WebviewWindow, pick: bool) -> Result<(), String> {
             None => default_workdir(&handle)?,
         }
     };
-    if matches!(&shell.launch, Launch::Local(current) if *current == dir) {
+    if shell.serving.lock().unwrap().as_ref() == Some(&dir) {
         return window.close().map_err(|error| error.to_string());
     }
     remember(&shell, |remembered| {
@@ -507,14 +513,14 @@ fn open_outside(handle: &AppHandle, url: &Url) {
 
 /// 现在用的是哪个：给页面和「连接」窗口看。
 fn current(shell: &Shell) -> serde_json::Value {
+    if let Some(dir) = shell.serving.lock().unwrap().as_ref() {
+        return serde_json::json!({ "mode": "local", "workdir": dir.to_string_lossy() });
+    }
     match &shell.launch {
-        Launch::Local(dir) => {
-            serde_json::json!({ "mode": "local", "workdir": dir.to_string_lossy() })
-        }
         Launch::Server(target) => {
             serde_json::json!({ "mode": "server", "server": target.to_string() })
         }
-        Launch::FirstRun | Launch::Invalid(_) => serde_json::Value::Null,
+        _ => serde_json::Value::Null,
     }
 }
 
