@@ -1,13 +1,28 @@
 use crate::error::AppError;
 use crate::AppState;
 use axum::extract::{Query, Request, State};
-use axum::http::header::{AUTHORIZATION, COOKIE, LOCATION, SET_COOKIE};
+use axum::http::header::{AUTHORIZATION, COOKIE, HOST, LOCATION, SET_COOKIE};
 use axum::http::{HeaderMap, StatusCode};
 use axum::middleware::Next;
 use axum::response::{Html, IntoResponse, Response};
 use serde::Deserialize;
 
 const COOKIE_NAME: &str = "sa_token";
+
+/// Cookie 不分端口：同一台电脑上 `127.0.0.1:4517` 的本机服务和 `127.0.0.1:随便` 的隧道
+/// 会互相覆盖同名 Cookie。所以名字里带上浏览器看到的端口。
+fn cookie_name(headers: &HeaderMap) -> String {
+    let port = headers
+        .get(HOST)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|host| host.rsplit_once(':'))
+        .map(|(_, port)| port)
+        .filter(|port| !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()));
+    match port {
+        Some(port) => format!("{COOKIE_NAME}_{port}"),
+        None => COOKIE_NAME.to_string(),
+    }
+}
 
 pub async fn require_token(
     State(state): State<AppState>,
@@ -29,10 +44,12 @@ pub struct ExchangeQuery {
 pub async fn exchange_token(
     State(state): State<AppState>,
     Query(query): Query<ExchangeQuery>,
+    headers: HeaderMap,
 ) -> Response {
     match query.token {
         Some(token) if tokens_match(&token, &state.token) => {
-            let cookie = format!("{COOKIE_NAME}={token}; Path=/; HttpOnly; SameSite=Strict");
+            let name = cookie_name(&headers);
+            let cookie = format!("{name}={token}; Path=/; HttpOnly; SameSite=Strict");
             (
                 StatusCode::SEE_OTHER,
                 [(SET_COOKIE, cookie), (LOCATION, "/".to_string())],
@@ -56,13 +73,14 @@ fn presented_token(headers: &HeaderMap) -> Option<&str> {
             return Some(token.trim());
         }
     }
+    let name = cookie_name(headers);
     headers
         .get_all(COOKIE)
         .iter()
         .filter_map(|v| v.to_str().ok())
         .flat_map(|v| v.split(';'))
         .filter_map(|pair| pair.trim().split_once('='))
-        .find(|(name, _)| *name == COOKIE_NAME)
+        .find(|(cookie, _)| *cookie == name)
         .map(|(_, value)| value)
 }
 
@@ -85,6 +103,22 @@ mod tests {
         headers.insert(AUTHORIZATION, HeaderValue::from_static("Bearer xyz"));
         assert_eq!(presented_token(&headers), Some("xyz"));
         assert_eq!(presented_token(&HeaderMap::new()), None);
+    }
+
+    #[test]
+    fn the_cookie_is_named_after_the_port_the_browser_sees() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HOST, HeaderValue::from_static("127.0.0.1:50123"));
+        headers.insert(
+            COOKIE,
+            HeaderValue::from_static("sa_token_4517=local; sa_token_50123=remote"),
+        );
+        assert_eq!(cookie_name(&headers), "sa_token_50123");
+        assert_eq!(presented_token(&headers), Some("remote"));
+        headers.insert(HOST, HeaderValue::from_static("[::1]:4517"));
+        assert_eq!(presented_token(&headers), Some("local"));
+        headers.insert(HOST, HeaderValue::from_static("example.com"));
+        assert_eq!(cookie_name(&headers), "sa_token");
     }
 
     #[test]

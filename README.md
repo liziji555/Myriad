@@ -49,7 +49,7 @@ pnpm --dir web build     # 先构建前端，它会被编进可执行文件
 cargo run -p sa-cli -- serve --mock
 ```
 
-启动后终端会打印一个带令牌的链接，用它打开页面。服务只监听 `127.0.0.1`。
+启动后终端会打印一个带令牌的链接，用它打开页面。服务只监听 `127.0.0.1`；放在服务器上用见 `docs/安装.md` 第 7 节。
 
 `--mock` 用的是不联网的假模型，不需要密钥，回复按固定规则生成，用来先把流程走一遍。
 假模型看消息里反引号前面的动词决定调哪个工具：
@@ -528,6 +528,9 @@ auto_approve = ["read_file"]          # 这些工具不用问；别的每次调�
 | `sa usage` | 今天和最近 7 天花了多少，按模型、Bot、任务分 |
 | `sa audit [--room 房间] [--task 任务] [--action 动作名开头] [--limit 条数] [--json]` | 审计日志：谁在什么时候批准了什么、执行了什么、改了什么 |
 | `sa doctor` | 体检 |
+| `sa service install [--workdir 目录] [--mock]` / `uninstall` | Linux 上装成 systemd 用户服务常驻：开机自启、崩了拉起、退出 SSH 也不停 |
+| `sa url` | 打印本机这个服务的地址和令牌（`sa connect` 在服务器上调它） |
+| `sa connect <用户@主机> [-p SSH 端口] [--local-port 端口] [--open]` | 通过 SSH 隧道连服务器上的苦乐，打印本机链接；断了自动重连 |
 
 所有命令都可以加 `--data-dir <目录>` 指定数据目录。`sa serve`、`sa chat`、`sa task`、`sa routine`、`sa link`、`sa usage`、`sa audit`、`sa bot`、`sa room` 用同一份数据，同一个数据目录同一时刻只能有一个在运行；
 `sa serve` 开着的时候，Bot 和房间在界面的「成员」面板里管理，定时任务在「定时」面板里管理。
@@ -550,9 +553,10 @@ cargo run -- --mock                                   # 直接运行
 pnpm dlx @tauri-apps/cli@2.12.4 build --bundles nsis  # 出安装包：Windows 用 nsis，Linux 用 deb
 ```
 
-- 第一次启动让你选 Bot 能读写的工作目录，之后记着；菜单「文件 → 更换工作目录」可以改（会重新启动）。
+- 第一次启动先选「本机」还是「服务器」，之后记着；菜单「文件 → 本机 / 服务器…」可以换，「更换工作目录」改本机的目录（都会重新启动）。
+- 选「服务器」填 `用户@主机`：桌面版用系统的 `ssh` 开隧道连服务器上常驻的苦乐（见 `docs/安装.md` 第 7 节），要能用密钥登录。关掉窗口只断开隧道，服务器上的任务照跑。也可以 `--server 用户@主机 [--ssh-port 端口]` 直接启动。
 - 窗口里只显示苦乐自己的页面，PR 之类的外部链接交给系统的浏览器；导出的 Bot 模板存进「下载」文件夹。
-- 关掉窗口就停下服务，正在写的回复会标成「中断」，和 `Ctrl+C` 停 `sa serve` 一样。
+- 用本机时，关掉窗口就停下服务，正在写的回复会标成「中断」，和 `Ctrl+C` 停 `sa serve` 一样。
 - 模型密钥、GitHub 令牌仍然从环境变量读。从开始菜单或桌面图标启动时读的是系统里的用户环境变量，不是某个终端里临时 `set` 的。
 - 页面没有被授予任何桌面能力，它能做的事和在浏览器里一样多。
 - 它是单独的一个 Cargo workspace，`cargo test --workspace` 不会编它；Linux 上编它要先装 WebKitGTK 等系统库（见 `.github/workflows/desktop.yml`）。
