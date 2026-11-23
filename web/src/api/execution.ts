@@ -48,10 +48,20 @@ export function executionOf(
 ): ExecCard[] {
   const messages = chat?.messages ?? [];
   return presence.map((row): ExecCard => {
-    const tier = members.find((bot) => bot.id === row.botId)?.tier ?? "mid";
+    // 卡片说的是哪个任务，就只数那个任务里的步骤，别把另一个任务的串进来。
     const live =
       messages.find((message) => message.id === row.messageId && message.state === "streaming") ??
-      [...messages].reverse().find((message) => message.state === "streaming" && byBot(message, row.botId));
+      [...messages]
+        .reverse()
+        .find(
+          (message) =>
+            message.state === "streaming" &&
+            byBot(message, row.botId) &&
+            (row.taskId === undefined || message.task_id === row.taskId),
+        );
+    // 做任务一律用强档模型（见 sa-orchestrator 的 work.rs）。
+    const tier =
+      live?.kind === "run" ? "strong" : (members.find((bot) => bot.id === row.botId)?.tier ?? "mid");
     const steps = live?.steps ?? [];
     const last = live ? undefined : [...messages].reverse().find((message) => byBot(message, row.botId));
     const taskId = row.taskId ?? live?.task_id;
