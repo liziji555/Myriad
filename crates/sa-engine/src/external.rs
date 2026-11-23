@@ -459,7 +459,7 @@ fn is_task_of(task: &Task, repo: &str, pr: Option<u64>, branch: Option<&str>) ->
 /// 送不送看它在回谁：回 Telegram 里说的话，送回那个聊天；定时任务和外面来的事引出的话没有人在界面前等着，
 /// 送到房间连着的每个 Telegram 聊天；回界面里说的话，不送。
 ///
-/// 「在回谁」取它前面最近的一条可能引出这句话的：人说的话（点了别的 Bot 的名、而它又不是经交接来说的，不算），
+/// 「在回谁」取它前面最近的一条可能引出这句话的：人说的话（Telegram 里点了别的 Bot 的名、而它又不是经交接来说的，不算），
 /// 或者指定交给这个 Bot 的定时任务和事件。只摆在时间线上的事、交给别的 Bot 的事不算数，
 /// 否则回界面里的话会被当成它们引出来的，送到所有聊天里去。
 pub(crate) fn relay(tx: &Transaction<'_>, message: &Message) -> sa_store::Result<()> {
@@ -479,7 +479,8 @@ pub(crate) fn relay(tx: &Transaction<'_>, message: &Message) -> sa_store::Result
         }
         _ => return Ok(()),
     };
-    let Some(trigger) = messages::last_trigger_before(tx, &message.room_id, message.seq, bot_id)?
+    let Some(trigger) =
+        messages::last_trigger_before(tx, &message.room_id, message.seq, bot_id, message.hop)?
     else {
         return Ok(());
     };
@@ -759,6 +760,35 @@ mod tests {
         let out = engine.pending_outbound(Source::Telegram, 10).unwrap();
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].target, "99");
+    }
+
+    #[test]
+    fn a_telegram_message_for_another_bot_does_not_take_a_reply_to_the_web() {
+        let (engine, room, bot) = engine();
+        let other = engine
+            .create_bot("Coder", sa_protocol::ModelTier::Mid, "")
+            .unwrap();
+        engine.add_room_member(&room, &other.id).unwrap();
+        let pairing = engine.create_pairing(&room).unwrap();
+        engine.redeem_pairing(&pairing.code, "42", "张三").unwrap();
+
+        // 人在界面里问入口 Bot；它回之前，Telegram 里有人点名问 Coder。入口 Bot 回的是界面里的话，不送。
+        engine
+            .post_user_message(&room, "账单里那笔钱是怎么回事")
+            .unwrap();
+        let Receipt::Stored(asked) = engine
+            .receive(said("u-1", "42", "@Coder 看看日志"))
+            .unwrap()
+        else {
+            panic!("应该收下");
+        };
+        assert_eq!(asked.mentions, vec![other.id.clone()]);
+        reply(&engine, &room, &bot, "那笔是退款。");
+        let queued = || engine.pending_outbound(Source::Telegram, 10).unwrap();
+        assert!(queued().is_empty());
+        // Coder 回的是 Telegram 里的话：送回去。
+        reply(&engine, &room, &other.id, "日志没问题。");
+        assert_eq!(queued().len(), 1);
     }
 
     fn review(key: &str, pr: u64) -> Incoming {

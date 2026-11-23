@@ -125,27 +125,32 @@ pub fn list_in_state(conn: &Connection, state: MessageState) -> Result<Vec<Messa
     rows.map(|row| row?).collect()
 }
 
-/// `seq` 之前最近的一条可能引出 `bot_id` 这句回复的话。
+/// `seq` 之前最近的一条可能引出 `bot_id` 这句回复（它是转到第 `hop` 手说的）的话。
 ///
-/// - 人说的话：不管点没点名都算。房间里的话每个 Bot 都看得到，点了别人的话也可能写进这句回复，
+/// - 界面里人说的话：不管点没点名都算。房间里的话每个 Bot 都看得到，点了别人的话也可能写进这句回复，
 ///   所以不能跳过它、算到更早的外部事件头上（那样会把网页上的话转发到外面）。
+/// - 外面（Telegram）来的人说的话：没点名的谁都可能来答；点了名的，只有被点到的 Bot 会直接来答，
+///   别的 Bot 要经过交接（`hop > 0`）才会接着说。否则回界面里的话会被送到那个聊天里去。
 /// - 定时任务、外面来的事：只算指定交给它的。交给别的 Bot 的、谁都没交给的（只摆在时间线上的事）不算。
 pub fn last_trigger_before(
     conn: &Connection,
     room_id: &RoomId,
     seq: i64,
     bot_id: &BotId,
+    hop: u32,
 ) -> Result<Option<Message>> {
     let sql = format!(
         "SELECT {COLUMNS} FROM messages
          WHERE room_id = ?1 AND seq < ?2 AND sender_kind = 'user'
-           AND (kind = 'chat'
+           AND ((kind = 'chat'
+                 AND (origin IS NULL OR ?4 > 0 OR mentions_json = '[]'
+                      OR EXISTS (SELECT 1 FROM json_each(mentions_json) WHERE value = ?3)))
                 OR (kind IN ('routine', 'event') AND json_extract(mentions_json, '$[0]') = ?3))
          ORDER BY seq DESC LIMIT 1"
     );
     conn.query_row(
         &sql,
-        params![room_id.as_str(), seq, bot_id.as_str()],
+        params![room_id.as_str(), seq, bot_id.as_str(), hop],
         read_row,
     )
     .optional()?
