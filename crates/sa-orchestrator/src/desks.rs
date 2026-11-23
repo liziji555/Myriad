@@ -84,6 +84,15 @@ impl Orchestrator {
             workdir::back_to_branch(&dir)
                 .await
                 .map_err(OrchestratorError::Conflict)?;
+            let outside = workdir::outside_changes(&dir)
+                .await
+                .map_err(OrchestratorError::Conflict)?;
+            if !outside.is_empty() {
+                return Err(OrchestratorError::Conflict(format!(
+                    "它还改了工作目录外面的文件，不能带回：{}",
+                    outside.join("、")
+                )));
+            }
             workdir::apply_to_workspace(&dir)
                 .await
                 .map_err(OrchestratorError::Conflict)?;
