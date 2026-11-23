@@ -907,8 +907,13 @@ impl Inbox for RoomInbox {
             }
             // 正在说话的 Bot 看到了这条给它的人类消息：不用再另外挑人来接。
             // 同时点了别的 Bot 的不算处理过：被点到的别人还要靠房间叫起来。
+            // 没点名的，别的 Bot 也在说时也不算：它们也该看到，要由房间记下（见 dispatch）。
             if speaker.is_none() && for_me {
-                let only_me = named.iter().all(|id| **id == self.bot_id);
+                let only_me = if named.is_empty() {
+                    self.link.running().iter().all(|id| *id == self.bot_id)
+                } else {
+                    named.iter().all(|id| **id == self.bot_id)
+                };
                 let before = if only_me {
                     self.link.handled.fetch_max(message.seq, Ordering::SeqCst)
                 } else {
