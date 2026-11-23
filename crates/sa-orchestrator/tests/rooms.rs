@@ -2232,8 +2232,13 @@ async fn the_watchdog_stops_bots_that_keep_saying_the_same_thing() {
     assert_eq!(found[0].room_id.as_ref(), Some(&t.rig.room));
 
     // 正在说话的那个被停下，房间安静下来；再看一遍没有新的提醒。
+    // 几个 Bot 同时在说，被停下的那条不一定排在最后。
     let messages = t.rig.settled(5).await;
-    assert_eq!(messages.last().unwrap().state, MessageState::Cancelled);
+    let cancelled = messages
+        .iter()
+        .filter(|m| m.state == MessageState::Cancelled)
+        .count();
+    assert_eq!(cancelled, 1, "{messages:#?}");
     assert!(t.rig.orchestrator.watchdog_tick().await.is_empty());
     t.rig.orchestrator.shutdown().await;
 }
