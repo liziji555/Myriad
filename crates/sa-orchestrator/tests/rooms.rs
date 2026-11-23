@@ -1540,6 +1540,32 @@ async fn a_message_for_another_bot_is_not_swallowed_by_the_speaker() {
     t.rig.orchestrator.shutdown().await;
 }
 
+/// 点了一个 Bot 的停止：它说话期间收到、还没看到的话也不再答。
+#[tokio::test]
+async fn a_stopped_bot_does_not_come_back_for_an_unread_follow_up() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = team(dir.path(), vec![], vec![]);
+    t.script(
+        "Coder",
+        vec![
+            MockReply::Hang(vec![StreamEvent::TextDelta("Coder 在写".into())]),
+            MockReply::text("不该再说"),
+        ],
+    );
+    t.rig.say("@Coder 讲讲").await;
+    t.rig.until_writing(1).await;
+    t.rig.say("@Coder 再补一句").await;
+    // 等房间把这句话记成 Coder 这一轮该看的（停止之后才到房间的话会另外排队）。
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(t.rig.orchestrator.stop_bot(&t.rig.room, &t.coder));
+    t.rig.until_idle().await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let all = t.rig.messages();
+    assert!(!all.iter().any(|m| m.content == "不该再说"), "{all:#?}");
+    assert!(t.rig.activity().speakers.is_empty(), "房间应该空着");
+    t.rig.orchestrator.shutdown().await;
+}
+
 /// 人中途补了一句、由正在说话的 Bot 接着答：算新的一轮，之前用掉的上限不再算数。
 #[tokio::test]
 async fn a_follow_up_read_by_the_speaker_resets_the_limits() {

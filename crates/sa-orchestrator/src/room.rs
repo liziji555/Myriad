@@ -126,10 +126,13 @@ async fn finished(
         Ok(()) => {}
         Err(error) if error.ends_with(STOPPED) => {
             tracing::info!(room = %room_id, "这一轮停下了：{error}");
+            // 人点了停止：它说话期间收到、还没看到的话也不再答。停止之后才来的另外排队（见 dispatch）。
+            owed.remove(&bot_id);
+            return;
         }
         Err(error) => tracing::error!(room = %room_id, "这一轮没跑成：{error}"),
     }
-    // 停下、出错都一样：人在它说话期间发给它的话，它还没看到的，要另外回答。
+    // 出错了：人在它说话期间发给它的话，它还没看到的，要另外回答。
     let Some(seq) = owed.remove(&bot_id) else {
         return;
     };
@@ -328,6 +331,20 @@ async fn dispatch(
     owed: &mut HashMap<BotId, i64>,
 ) -> Vec<BotId> {
     let is_member = |id: &BotId| members.iter().any(|bot| &bot.id == id);
+    // 已经被停下、还没收尾的 Bot 不算在说：给它的新话要另外排队，不能记成它这一轮该看的。
+    let running: Vec<BotId> = {
+        let lanes = link.lanes.lock().unwrap();
+        running
+            .iter()
+            .filter(|id| {
+                !lanes
+                    .iter()
+                    .any(|(lane, cancel)| lane == *id && cancel.is_cancelled())
+            })
+            .cloned()
+            .collect()
+    };
+    let running = running.as_slice();
     let mut owe = |bot_id: &BotId, seq: i64| {
         let latest = owed.entry(bot_id.clone()).or_default();
         *latest = (*latest).max(seq);
