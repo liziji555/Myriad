@@ -343,8 +343,15 @@ pub(crate) async fn run(
     };
     // 它自己退出了，但开出来的子进程可能还在：一起结束。
     kill_tree(tree.0.take()).await;
+    // 没杀掉的后台进程（Windows 上父进程退出后按进程树找不到它）可能还占着错误输出：也只等一小会儿。
     let said = match stderr {
-        Some(task) => task.await.unwrap_or_default(),
+        Some(mut task) => match tokio::time::timeout(DRAIN, &mut task).await {
+            Ok(said) => said.unwrap_or_default(),
+            Err(_) => {
+                task.abort();
+                String::new()
+            }
+        },
         None => String::new(),
     };
     let end = match (failure, status) {
