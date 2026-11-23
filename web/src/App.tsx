@@ -141,6 +141,7 @@ function Shell() {
   const showPanel = (next: PanelTab) => {
     setTab(next);
     setPanelOpen(true);
+    if (!docked) setRoomsOpen(false);
   };
   // 左栏里点的面板页：已经开着的再点一下是收起。抽屉里点了就把抽屉收起来，让出地方。
   const toggleTab = (next: PanelTab) => {
