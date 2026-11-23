@@ -1,7 +1,7 @@
 import { approvalChoices, type ApprovalChoice } from "../api/approvals";
 import { chainParts, type ChainPart } from "../api/chain";
 import { taskDecision } from "../api/taskNotes";
-import { outputPreview, stepIcon, stepKinds } from "../api/steps";
+import { outputPreview, STEP_LABEL, stepIcon, stepKinds } from "../api/steps";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { RoomChat } from "../api/chat";
 import { safeUrl, sourceName, splitEvent } from "../api/links";
@@ -539,15 +539,6 @@ function MessageItem({
     </li>
   );
 }
-
-const STEP_LABEL: Record<ToolStep["state"], string> = {
-  waiting: "等你批准",
-  running: "进行中",
-  ok: "完成",
-  error: "失败",
-  cancelled: "已停止",
-  denied: "没有批准",
-};
 
 /** 需要人看一眼的步骤：还在进行、等批准，或者没做成。 */
 const NEEDS_ATTENTION: readonly ToolStep["state"][] = ["waiting", "running", "error", "denied"];

@@ -2,6 +2,7 @@ import { useEffect, useState, type CSSProperties } from "react";
 import { loadLayout, saveLayout, type Layout } from "./api/layout";
 import type { SlashCommand } from "./api/slash";
 import { presenceOf, type Presence } from "./api/presence";
+import { executionOf } from "./api/execution";
 import { STATE_LABEL } from "./api/tasks";
 import { api } from "./api/client";
 import type { RoomId, TaskId } from "./api/types";
@@ -44,7 +45,7 @@ function Shell() {
   const workspace = useWorkspace();
   const emit = useLight();
   const [selected, setSelected] = useState<RoomId | null>(null);
-  const [tab, setTab] = useState<PanelTab>("tasks");
+  const [tab, setTab] = useState<PanelTab>("execution");
   const [roomsOpen, setRoomsOpen] = useState(false);
   const docked = useMedia(DOCKED);
   const [prefill, setPrefill] = useState<string | null>(null);
@@ -174,6 +175,7 @@ function Shell() {
   }
   const roomTasks = room ? (workspace.board.rooms[room.id] ?? []) : [];
   const presence = presenceOf(members, roomChat, roomTasks);
+  const execution = executionOf(presence, members, roomChat, roomTasks);
   const pendingTasks = roomTasks.filter((task) => ["review", "waiting", "blocked"].includes(task.state)).length;
   // 点了现场栏上的牌子：主线上有那条消息就滚过去闪一下，否则打开那个任务。
   const jumpTo = (row: Presence) => {
@@ -268,6 +270,7 @@ function Shell() {
     },
     ...(room
       ? [
+          tabAction("execution", "看每个 Bot 此刻在做什么"),
           tabAction("tasks", "打开任务页"),
           tabAction("routines", "打开定时任务"),
           tabAction("members", "管理 Bot 和房间成员"),
@@ -459,6 +462,8 @@ function Shell() {
           linkActions={workspace.linkActions}
           activity={demoNodes}
           usageKey={workspace.notices.length}
+          execution={execution}
+          onJump={jumpTo}
         />
       )}
     </div>

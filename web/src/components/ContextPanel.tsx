@@ -2,7 +2,9 @@ import { clampPanelWidth, panelWidthAt, PANEL_MAX, PANEL_MIN, PANEL_STEP } from 
 import type { TaskBoard } from "../api/tasks";
 import type { LinkActions, RoutineActions, TaskActions, Team } from "../api/useWorkspace";
 import type { Bot, Link, Room, Routine, TaskId } from "../api/types";
+import type { ExecCard } from "../api/execution";
 import { AuditPanel } from "./AuditPanel";
+import { ExecutionPanel } from "./ExecutionPanel";
 import { ExtensionsPanel } from "./ExtensionsPanel";
 import { LinksPanel } from "./LinksPanel";
 import { MembersPanel } from "./MembersPanel";
@@ -12,6 +14,7 @@ import { TasksPanel } from "./TasksPanel";
 import { UsagePanel } from "./UsagePanel";
 
 export type PanelTab =
+  | "execution"
   | "tasks"
   | "routines"
   | "members"
@@ -29,6 +32,7 @@ export interface ActivityNode {
 }
 
 const TABS: readonly { id: PanelTab; label: string }[] = [
+  { id: "execution", label: "执行" },
   { id: "tasks", label: "任务" },
   { id: "routines", label: "定时" },
   { id: "members", label: "成员" },
@@ -65,6 +69,9 @@ interface Props {
   activity: readonly ActivityNode[];
   /** 变了就让「用量」页重新拉一次。 */
   usageKey: number;
+  /** 「执行」页：每个 Bot 一张卡片。 */
+  execution: readonly ExecCard[];
+  onJump(card: ExecCard): void;
 }
 
 export function ContextPanel({
@@ -87,6 +94,8 @@ export function ContextPanel({
   linkActions,
   activity,
   usageKey,
+  execution,
+  onJump,
 }: Props) {
   return (
     <aside className="sa-panel" aria-label="上下文面板">
@@ -144,6 +153,16 @@ export function ContextPanel({
         </button>
       </div>
       <div className="sa-panel-body" role="tabpanel" id="sa-tabpanel" aria-labelledby={`sa-tab-${tab}`}>
+        {tab === "execution" && (
+          <ExecutionPanel
+            cards={execution}
+            onJump={onJump}
+            onShowTask={(taskId) => {
+              onFocusTask(taskId);
+              onTab("tasks");
+            }}
+          />
+        )}
         {tab === "tasks" && (
           <TasksPanel
             room={room}
