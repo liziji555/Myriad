@@ -340,9 +340,16 @@ async fn work(
         let Some(bot) = members.iter().find(|bot| bot.id == job.bot_id).cloned() else {
             continue;
         };
+        // 出队就占上道：下面等会话的时候人点了停止，也找得到它、停得下来。
+        let cancel = shared.shutdown.child_token();
+        link.lanes
+            .lock()
+            .unwrap()
+            .push((bot.id.clone(), cancel.clone()));
         let session = match session_of(shared, room_id, &bot.id, sessions).await {
             Ok(session) => session,
             Err(error) => {
+                link.lanes.lock().unwrap().retain(|(id, _)| id != &bot.id);
                 fail_fast(shared, room_id, &bot.id, error).await;
                 continue;
             }
@@ -352,11 +359,6 @@ async fn work(
             .filter(|other| other.id != bot.id)
             .cloned()
             .collect();
-        let cancel = shared.shutdown.child_token();
-        link.lanes
-            .lock()
-            .unwrap()
-            .push((bot.id.clone(), cancel.clone()));
         let (shared, room_id, link) = (shared.clone(), room_id.clone(), link.clone());
         lanes.spawn(async move {
             let result = turn(
@@ -983,6 +985,21 @@ impl Inbox for RoomInbox {
                 return vec![];
             }
         };
+        // 独立评议中人又说了话：上一轮结束了，那一轮别人的答案可以看了；这句新话的答案照样不看。
+        if let Some(after) = self.blind {
+            let followed_up = messages
+                .iter()
+                .filter(|message| {
+                    message.seq > after
+                        && message.kind == MessageKind::Chat
+                        && matches!(message.sender, Sender::User)
+                })
+                .map(|message| message.seq)
+                .max();
+            if let Some(seq) = followed_up {
+                self.blind = Some(seq);
+            }
+        }
         let mut inputs = vec![];
         let started = !self.first_drain;
         self.first_drain = false;
@@ -1558,9 +1575,10 @@ fn publishes(command: &str) -> bool {
 /// 「总是允许」记的是什么：命令记原文，写文件记文件的完整路径。其他工具不能记。
 fn rule_key(tool: &str, input: &Value, fence: &Fence) -> Option<String> {
     match tool {
+        // 命令按工作目录记：同一条命令在另一个目录里跑的是那里的脚本，要重新问。
         "shell" => {
             let command = input["command"].as_str()?.trim();
-            (!command.is_empty()).then(|| command.to_string())
+            (!command.is_empty()).then(|| format!("{}\n{command}", fence.root().display()))
         }
         "write" | "edit" => {
             let (real, _) = fence.resolve_for_write(input["path"].as_str()?).ok()?;
