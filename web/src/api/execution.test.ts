@@ -130,6 +130,13 @@ describe("executionOf", () => {
     ]);
   });
 
+  it("卡片显示它的任务等验收时，它在房间里说着的那一份照样能单独停", () => {
+    const room = chat([message(1)]);
+    room.activity!.speakers.push("bot_1");
+    const [card] = cards([bot(1)], room, [task(1, { state: "review" })]);
+    expect(card).toMatchObject({ state: "asking", taskId: "task_1", stoppable: true });
+  });
+
   it("停用的 Bot 也有一张卡", () => {
     const [card] = cards([bot(1, { enabled: false })], chat([]));
     expect(card).toMatchObject({ state: "off", steps: [] });
