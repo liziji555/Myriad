@@ -100,9 +100,9 @@ button.sa-stage-room:hover,
 /* Glimmer 的记号：一个圆，一半深一半亮。 */
 .sa-brand-mark {
   flex: none;
-  width: 18px;
-  height: 18px;
-  transform: rotate(-30deg);
+  width: 22px;
+  height: 22px;
+  color: var(--sa-fg);
 }
 .sa-connect {
   display: flex;
