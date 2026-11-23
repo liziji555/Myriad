@@ -17,8 +17,8 @@ export interface Handoff {
 
 /**
  * 主线上的交接连线：Bot 用 `ask_bot` 点名别的 Bot 的那句话，连到对方之后开口的第一条回复。
- * 对方接手时那条回复和交接那句是同一手（`hop` 相同）；在这之前又有人点名了它，后面的回复就算那次的。
- * 对方还没开口（排着队）或者没接这次交接的不画。
+ * 对方排着队时又被别的 Bot 找，它开口的那条回复同时接下这几次交接。
+ * 对方开口之前人又点了它的名，后面的回复算回答人的，这次交接不画；对方还没开口（排着队）的也先不画。
  */
 export function handoffsOf(messages: readonly Message[]): Handoff[] {
   const handoffs: Handoff[] = [];
@@ -30,11 +30,11 @@ export function handoffsOf(messages: readonly Message[]): Handoff[] {
       let reply: Message | undefined;
       for (const later of messages.slice(index + 1)) {
         if (later.kind !== "chat") continue;
-        if (later.sender.kind === "bot" && later.sender.bot_id === toBot && later.hop === message.hop) {
+        if (later.sender.kind === "bot" && later.sender.bot_id === toBot) {
           reply = later;
           break;
         }
-        if (later.mentions.includes(toBot)) break;
+        if (later.sender.kind === "user" && later.mentions.includes(toBot)) break;
       }
       if (!reply) continue;
       handoffs.push({

@@ -56,7 +56,17 @@ describe("handoffsOf", () => {
     expect(links.map(({ to, live }) => [to, live])).toEqual([["b1", false]]);
   });
 
-  it("对方没接这次交接，之后别人点名它的回复不连到这句", () => {
+  it("对方排着队时又被另一个 Bot 找，两句交接都连到它开口的那条回复", () => {
+    expect(
+      handoffsOf([
+        message({ id: "ask1", seq: 1, sender: bot("a"), mentions: ["c"], hop: 1 }),
+        message({ id: "ask2", seq: 2, sender: bot("b"), mentions: ["c"], hop: 2 }),
+        message({ id: "c1", seq: 3, sender: bot("c"), hop: 1 }),
+      ]).map(({ id }) => id),
+    ).toEqual(["ask1>c1", "ask2>c1"]);
+  });
+
+  it("对方没接这次交接，之后人点名它的回复不连到这句", () => {
     expect(
       handoffsOf([
         message({ id: "ask", seq: 1, sender: bot("a"), mentions: ["b"], hop: 1 }),
