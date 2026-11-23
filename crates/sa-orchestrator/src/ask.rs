@@ -118,7 +118,7 @@ impl Tool for AskBotTool {
             }));
         };
 
-        // 先过上限再发消息：被拒绝的话不会出现在房间里。记账和排队在同一把锁里完成。
+        // 先过上限再发消息：被拒绝的话不会出现在房间里。发出去了才排队：对方开始时要看得到这句话。
         let job = self
             .link
             .episode()
@@ -141,10 +141,11 @@ impl Tool for AskBotTool {
             db(move || engine.post_bot_message(&room_id, &from, &content, vec![to], hop)).await;
         if let Err(error) = posted {
             // 话没发出去，对方就不该被叫起来。
-            self.link.episode().cancel(&job);
+            self.link.episode().cancel();
             return Err(ToolError(format!("这句话没发出去：{error}")));
         }
         // 对方在自己的道上马上开始，不用等这边说完。
+        self.link.episode().deliver(job);
         self.link.wake.notify_one();
         Ok(format!(
             "已经把话带给 {}，它已经开始了。它的回答会作为新消息出现在房间里，不用等，也不用再问一次。",

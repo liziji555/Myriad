@@ -29,6 +29,8 @@ pub(crate) struct Episode {
     /// 这一轮里已经开始的 Bot 发言次数。
     turns: usize,
     queue: VecDeque<Job>,
+    /// 已经同意、话还在发的 `ask_bot`：算进上限，发出去了才排队（免得对方先开始、看不到这句话）。
+    asking: usize,
     /// 有定时任务、外面来的事等着它看的 Bot。这些事只有它看得到，所以这一趟欠着它的：
     /// 人说了新的话、又来了别的事都不会把它挤掉，排着队的说完了就轮到它。
     owed: VecDeque<BotId>,
@@ -111,11 +113,9 @@ impl Episode {
         self.queue.clear();
     }
 
-    /// 撤回一次排队（话没发出去）。
-    pub fn cancel(&mut self, job: &Job) {
-        if let Some(index) = self.queue.iter().rposition(|queued| queued == job) {
-            self.queue.remove(index);
-        }
+    /// `ask` 同意的那句话没发出去：不排队，也不占上限。
+    pub fn cancel(&mut self) {
+        self.asking = self.asking.saturating_sub(1);
     }
 
     /// 记下一条 Bot 说过的话。
@@ -138,7 +138,7 @@ impl Episode {
         to: &BotId,
         message: &str,
     ) -> Result<Job, String> {
-        if self.turns + self.queue.len() >= MAX_BOT_TURNS {
+        if self.turns + self.queue.len() + self.asking >= MAX_BOT_TURNS {
             return Err(format!(
                 "这一轮里 Bot 已经发言 {MAX_BOT_TURNS} 次，到上限了，不能再找别的 Bot。请直接把目前的情况告诉用户。"
             ));
@@ -176,9 +176,14 @@ impl Episode {
             bot_id: to.clone(),
             hop: hop + 1,
         };
-        // 对方已经排着队：那一轮里它会看到这句话，不用再排一次。
-        self.push(job.clone());
+        self.asking += 1;
         Ok(job)
+    }
+
+    /// `ask` 同意的那句话发出去了：对方排上队。已经排着的不重复排，那一轮里它会看到这句话。
+    pub fn deliver(&mut self, job: Job) {
+        self.asking = self.asking.saturating_sub(1);
+        self.push(job);
     }
 }
 
@@ -241,6 +246,10 @@ mod tests {
                 hop: 1
             }
         );
+        // 话发出去之前不排队：对方开始时一定看得到这句话。
+        assert_eq!(episode.queued(), []);
+        assert_eq!(episode.next(&[]), None);
+        episode.deliver(job.clone());
         assert_eq!(episode.queued(), [bot("b")]);
         assert_eq!(episode.next(&[]), Some(job));
         assert_eq!(episode.next(&[]), None);
@@ -319,9 +328,10 @@ mod tests {
             .ask(&bot("a"), 0, &bot("b"), "我已经检查过了，没有问题！")
             .unwrap_err();
         assert!(error.contains("几乎一样"), "{error}");
-        episode
+        let job = episode
             .ask(&bot("a"), 0, &bot("b"), "请你检查第二个文件的边界情况")
             .unwrap();
+        episode.deliver(job);
         // 被拒绝的不占名额。
         assert_eq!(episode.queued(), [bot("b")]);
     }
@@ -381,7 +391,8 @@ mod tests {
         // 排着队的先说，欠着的排在后面；轮到它时上限重新算。
         let mut episode = started("a");
         episode.owe(bot("d"));
-        episode.ask(&bot("a"), 0, &bot("b"), "看一下这个").unwrap();
+        let job = episode.ask(&bot("a"), 0, &bot("b"), "看一下这个").unwrap();
+        episode.deliver(job);
         assert_eq!(episode.queued(), [bot("b"), bot("d")]);
         assert_eq!(episode.next(&[]).unwrap().bot_id, bot("b"));
         let job = episode.next(&[]).unwrap();
