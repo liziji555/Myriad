@@ -359,11 +359,6 @@ async fn work(
             .filter(|other| other.id != bot.id)
             .cloned()
             .collect();
-        let cancel = shared.shutdown.child_token();
-        link.lanes
-            .lock()
-            .unwrap()
-            .push((bot.id.clone(), cancel.clone()));
         let (shared, room_id, link) = (shared.clone(), room_id.clone(), link.clone());
         lanes.spawn(async move {
             let result = turn(
@@ -1580,9 +1575,10 @@ fn publishes(command: &str) -> bool {
 /// 「总是允许」记的是什么：命令记原文，写文件记文件的完整路径。其他工具不能记。
 fn rule_key(tool: &str, input: &Value, fence: &Fence) -> Option<String> {
     match tool {
+        // 命令按工作目录记：同一条命令在另一个目录里跑的是那里的脚本，要重新问。
         "shell" => {
             let command = input["command"].as_str()?.trim();
-            (!command.is_empty()).then(|| command.to_string())
+            (!command.is_empty()).then(|| format!("{}\n{command}", fence.root().display()))
         }
         "write" | "edit" => {
             let (real, _) = fence.resolve_for_write(input["path"].as_str()?).ok()?;
