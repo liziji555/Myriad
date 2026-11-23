@@ -431,12 +431,16 @@ fn demo_lead(request: &ChatRequest, last: &crate::ChatMessage, said: &str) -> Op
     if !system.content.contains("你是这个房间的主 Agent") {
         return None;
     }
-    if last.content.starts_with('【') {
+    // 多 Bot 房间里人说的话带「【用户】」前缀，成员交回的结果带成员的名字。
+    let from_member = |m: &crate::ChatMessage| {
+        m.role == Role::User && m.content.starts_with('【') && !m.content.starts_with("【用户")
+    };
+    if from_member(last) {
         let from: Vec<&str> = request
             .messages
             .iter()
             .rev()
-            .take_while(|m| m.role == Role::User && m.content.starts_with('【'))
+            .take_while(|m| from_member(m))
             .filter_map(|m| m.content[3..].split_once('】').map(|(name, _)| name))
             .collect();
         return Some(MockReply::text(&format!(
@@ -817,7 +821,10 @@ mod tests {
         let system = ChatMessage::system(
             "你是助手。\n房间里还有别的 Bot：\n- Coder：写代码\n- Reviewer：审查\n\n你是这个房间的主 Agent：专门和用户对话。",
         );
-        let mut req = request(vec![system.clone(), ChatMessage::user("做一个登录页")]);
+        let mut req = request(vec![
+            system.clone(),
+            ChatMessage::user("【用户】做一个登录页"),
+        ]);
         req.tools = vec![ToolSpec {
             name: "ask_bot".into(),
             description: String::new(),
