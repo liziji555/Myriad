@@ -247,14 +247,20 @@ async fn work(
 
     if link.handled.load(Ordering::SeqCst) < 0 {
         // 刚启动：哪些人类消息已经有 Bot 看过，从会话记录里算。
-        let mut seen = 0;
+        let (mut seen, mut least) = (0, i64::MAX);
         for bot in &members {
             match session_of(shared, room_id, &bot.id, sessions).await {
-                Ok(session) => seen = seen.max(session.lock().await.answered()),
+                Ok(session) => {
+                    let answered = session.lock().await.answered();
+                    (seen, least) = (seen.max(answered), least.min(answered));
+                }
                 Err(error) => tracing::warn!(room = %room_id, "会话记录打不开：{error}"),
             }
         }
         link.handled.store(seen, Ordering::SeqCst);
+        if least < seen {
+            owe_unread(shared, room_id, &members, sessions, link, least, seen).await;
+        }
     }
 
     let engine = shared.engine.clone();
@@ -400,6 +406,49 @@ fn audit_arguments(tool: &str, arguments: &str) -> String {
 /// 新来的人类消息由谁接，返回要开始说话的 Bot（可以有好几个，同时开始）。
 /// 点了名的：被点到的都要接，正在说的那个会在下一步看到。没点名的：有 Bot 正在说，就由它们看到；
 /// 都空着，就由路由挑一个。`owed` 记下正在说的 Bot 该看到的最新一条。
+/// 重启时：定时任务和外面来的事只有指定的 Bot 看得到，别的 Bot 读过去了不等于它看过。
+/// `after` 到 `upto` 之间这样的事，指定的 Bot 自己没看过（停下时也没说不用答）的，记着要让它说一次。
+async fn owe_unread(
+    shared: &Arc<Shared>,
+    room_id: &RoomId,
+    members: &[Bot],
+    sessions: &Sessions,
+    link: &Arc<RoomLink>,
+    after: i64,
+    upto: i64,
+) {
+    let engine = shared.engine.clone();
+    let id = room_id.clone();
+    let earlier = match db(move || engine.user_messages_after(&id, after)).await {
+        Ok(earlier) => earlier,
+        Err(error) => {
+            tracing::warn!(room = %room_id, "重启时查不到之前的消息：{error}");
+            return;
+        }
+    };
+    for message in earlier.iter().filter(|m| m.seq <= upto) {
+        if !matches!(message.kind, MessageKind::Routine | MessageKind::Event) {
+            continue;
+        }
+        let Some(target) = message.mentions.first() else {
+            continue;
+        };
+        if !members.iter().any(|bot| &bot.id == target) {
+            continue;
+        }
+        let Some(session) = sessions.get(target) else {
+            continue;
+        };
+        let unread = {
+            let session = session.lock().await;
+            !session.seen(message.seq) && message.seq > session.dismissed
+        };
+        if unread {
+            link.episode().owe(target.clone());
+        }
+    }
+}
+
 async fn dispatch(
     shared: &Arc<Shared>,
     room: &Room,

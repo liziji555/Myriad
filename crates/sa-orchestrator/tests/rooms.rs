@@ -1,13 +1,13 @@
 //! 端到端：真实的 Engine（SQLite 文件）+ 会话记录文件 + 脚本化的假模型。
 
-use sa_engine::Engine;
+use sa_engine::{Engine, Incoming, IncomingKind};
 use sa_llm::{
     ChatRequest, EventStream, LlmError, MockProvider, MockReply, ModelCaps, Provider, StopReason,
     StreamEvent,
 };
 use sa_orchestrator::{ModelRouter, Orchestrator, ResolvedModel, Settings, SingleModel};
 use sa_protocol::{
-    ApprovalDecision, ApprovalId, BotId, Message, MessageState, ModelTier, RoomId, Sender,
+    ApprovalDecision, ApprovalId, BotId, Message, MessageState, ModelTier, RoomId, Sender, Source,
     StepState,
 };
 use sa_store::Store;
@@ -1689,6 +1689,68 @@ async fn stop_ends_the_whole_exchange_and_a_restart_does_not_replay_it() {
     assert_eq!(t.rig.provider.requests().len(), 1, "只回答新的这一条");
     t.rig.until_idle().await;
     assert_eq!(t.rig.messages().len(), 6);
+    t.rig.orchestrator.shutdown().await;
+}
+
+/// 关掉时还排着队的 GitHub 事件：正在说的 Bot 读过去了（这件事不是给它的），重启后照样交给指定的 Bot。
+#[tokio::test]
+async fn a_queued_event_another_bot_read_past_is_answered_after_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let t = team_with(dir.path(), vec![], vec![], 1);
+        t.rig.engine.link_repo(&t.rig.room, "me/app").unwrap();
+        let coder = t.script(
+            "Coder",
+            vec![
+                shell("c1", "echo coder"),
+                MockReply::Hang(vec![StreamEvent::TextDelta("还在写".into())]),
+            ],
+        );
+        t.rig.say("@Coder 跑一条命令").await;
+        let cards = t.rig.waiting_approvals(1).await;
+        let event = Incoming {
+            source: Source::Github,
+            key: "d-1".into(),
+            name: "issues.opened".into(),
+            external: "me/app".into(),
+            label: "me/app#12".into(),
+            url: None,
+            kind: IncomingKind::Event {
+                summary: "alice 开了 issue #12".into(),
+                body: "点登录就 500".into(),
+                pr: None,
+                branch: None,
+                task_only: false,
+                notify: true,
+            },
+        };
+        t.rig.orchestrator.receive(event).await.unwrap();
+        // 一次只能一个 Bot 说：入口 Bot 排着队。Coder 接着往下做，读过了这件事。
+        assert!(t
+            .rig
+            .orchestrator
+            .decide(&cards[0].1, ApprovalDecision::Once));
+        for _ in 0..500 {
+            if coder.requests().len() == 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(coder.requests().len(), 2);
+        t.rig.orchestrator.shutdown().await;
+    }
+
+    let t = team_with(dir.path(), vec![], vec![], 1);
+    let host = t.script("助手", vec![MockReply::text("看到 issue 了")]);
+    assert_eq!(t.rig.orchestrator.resume_rooms().unwrap(), 1);
+    t.rig
+        .until("入口 Bot 答了", |m| {
+            m.content == "看到 issue 了" && m.state == MessageState::Complete
+        })
+        .await;
+    assert!(heard(&host)
+        .iter()
+        .any(|h| h.contains("alice 开了 issue #12")));
     t.rig.orchestrator.shutdown().await;
 }
 
