@@ -41,6 +41,52 @@ impl Session {
     fn seen(&self, seq: i64) -> bool {
         seq <= self.cursor || self.ahead.contains(&seq)
     }
+
+    /// 看过的最后一条。
+    fn latest(&self) -> i64 {
+        self.ahead.last().copied().unwrap_or(0).max(self.cursor)
+    }
+
+    /// 看到了哪里存在会话记录旁边：`ahead` 不空时 `cursor` 停在别的 Bot 没写完的回复前面，
+    /// 重启后要从那里接着看，不能只看记录里最后一条消息。
+    fn save_cursor(&self) {
+        let path = cursor_path(self.transcript.path());
+        let saved = SavedCursor {
+            cursor: self.cursor,
+            ahead: self.ahead.clone(),
+        };
+        let write = || -> std::io::Result<()> {
+            let tmp = path.with_extension("cursor.tmp");
+            std::fs::write(&tmp, serde_json::to_vec(&saved)?)?;
+            std::fs::rename(&tmp, &path)
+        };
+        if let Err(error) = write() {
+            tracing::warn!(session = %self.id, "记不下看到了哪里：{error}");
+        }
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SavedCursor {
+    cursor: i64,
+    ahead: BTreeSet<i64>,
+}
+
+fn cursor_path(transcript: &std::path::Path) -> std::path::PathBuf {
+    transcript.with_extension("cursor")
+}
+
+/// 打开会话时看到了哪里：存下的位置为准，记录里比它新的消息都算看过。
+fn load_cursor(transcript: &Transcript) -> (i64, BTreeSet<i64>) {
+    let recorded = transcript.message_seqs();
+    let saved = std::fs::read(cursor_path(transcript.path()))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<SavedCursor>(&bytes).ok());
+    let Some(SavedCursor { cursor, mut ahead }) = saved else {
+        return (recorded.last().copied().unwrap_or(0), BTreeSet::new());
+    };
+    ahead.extend(recorded.into_iter().filter(|seq| *seq > cursor));
+    (cursor, ahead)
 }
 
 type Sessions = HashMap<BotId, Arc<tokio::sync::Mutex<Session>>>;
@@ -177,7 +223,7 @@ async fn work(
         let mut seen = 0;
         for bot in &members {
             match session_of(shared, room_id, &bot.id, sessions).await {
-                Ok(session) => seen = seen.max(session.lock().await.cursor),
+                Ok(session) => seen = seen.max(session.lock().await.latest()),
                 Err(error) => tracing::warn!(room = %room_id, "会话记录打不开：{error}"),
             }
         }
@@ -427,12 +473,12 @@ async fn session_of(
             .map_err(|e| e.to_string())?;
         let path = shared.settings.sessions_dir.join(format!("{id}.jsonl"));
         let transcript = Transcript::open(&path).map_err(|e| e.to_string())?;
-        let cursor = transcript.last_message_seq();
+        let (cursor, ahead) = load_cursor(&transcript);
         let session = Session {
             id,
             transcript,
             cursor,
-            ahead: BTreeSet::new(),
+            ahead,
         };
         sessions.insert(bot_id.clone(), Arc::new(tokio::sync::Mutex::new(session)));
     }
@@ -508,6 +554,7 @@ async fn turn(
     let first = inbox.drain().await;
     if first.is_empty() {
         (*cursor, *ahead) = (inbox.last_seq, inbox.ahead);
+        session.save_cursor();
         return Ok(());
     }
     let mut inbox = Primed {
@@ -604,6 +651,7 @@ async fn turn(
         }
     };
     (*cursor, *ahead) = (inbox.rest.last_seq, std::mem::take(&mut inbox.rest.ahead));
+    session.save_cursor();
 
     let (state, error) = match outcome {
         Ok(TurnEnd::Completed) => (MessageState::Complete, None),
@@ -1356,5 +1404,44 @@ mod output_tests {
         let mut few = vec![step(Some(full.clone())), step(None)];
         trim_outputs(&mut few);
         assert!(few[0].output.is_some());
+    }
+}
+
+#[cfg(test)]
+mod cursor_tests {
+    use super::*;
+    use sa_kernel::EntryBody;
+
+    fn heard(transcript: &mut Transcript, seq: i64) {
+        transcript
+            .append(EntryBody::User {
+                content: format!("第 {seq} 条"),
+                message_id: None,
+                message_seq: Some(seq),
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn a_reply_skipped_while_another_bot_was_writing_is_read_after_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        let mut transcript = Transcript::open(&path).unwrap();
+        heard(&mut transcript, 1);
+        heard(&mut transcript, 3);
+        // 没存过位置的旧记录：和以前一样，从记录里最后一条往后看。
+        assert_eq!(load_cursor(&transcript), (3, BTreeSet::new()));
+
+        // 第 2 条是别的 Bot 还没写完的回复：停在它前面，第 3 条记进 ahead。
+        let saved = SavedCursor {
+            cursor: 1,
+            ahead: BTreeSet::from([3]),
+        };
+        std::fs::write(cursor_path(&path), serde_json::to_vec(&saved).unwrap()).unwrap();
+        // 存完位置之后又进了一条，进程才退出：它也算看过，不会再给一次。
+        heard(&mut transcript, 5);
+        drop(transcript);
+        let transcript = Transcript::open(&path).unwrap();
+        assert_eq!(load_cursor(&transcript), (1, BTreeSet::from([3, 5])));
     }
 }
