@@ -1757,6 +1757,17 @@ async fn a_queued_event_another_bot_read_past_is_answered_after_restart() {
 /// 同上，但关之前人点了停止：排着队的那件事不用答了，重启之后也不答。
 #[tokio::test]
 async fn a_queued_event_stopped_before_shutdown_is_not_answered_after_restart() {
+    stopped_event_is_not_answered_after_restart(true).await;
+}
+
+/// 同上，点了停止马上就关：停止还没来得及记下也一样。
+#[tokio::test]
+async fn a_queued_event_stopped_right_at_shutdown_is_not_answered_after_restart() {
+    stopped_event_is_not_answered_after_restart(false).await;
+}
+
+/// `settle`：停止之后等房间收好尾再关。
+async fn stopped_event_is_not_answered_after_restart(settle: bool) {
     let dir = tempfile::tempdir().unwrap();
     {
         let t = team_with(dir.path(), vec![], vec![], 1);
@@ -1801,6 +1812,9 @@ async fn a_queued_event_stopped_before_shutdown_is_not_answered_after_restart() 
         assert_eq!(coder.requests().len(), 2);
         assert!(t.rig.orchestrator.stop(&t.rig.room));
         for _ in 0..500 {
+            if !settle {
+                break;
+            }
             let messages = t.rig.messages();
             if messages
                 .iter()
@@ -1810,7 +1824,9 @@ async fn a_queued_event_stopped_before_shutdown_is_not_answered_after_restart() 
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        if settle {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
         t.rig.orchestrator.shutdown().await;
     }
 

@@ -5,7 +5,7 @@ use crate::episode::Job;
 use crate::work::CreateTaskTool;
 use crate::{render_prompt, router, RoomLink, Shared};
 use async_trait::async_trait;
-use sa_engine::{Audit, EngineError};
+use sa_engine::{Audit, Engine, EngineError};
 use sa_kernel::{
     run_turn, ApprovalRequest, Inbox, Observer, StepEnd, Transcript, TurnConfig, TurnEnd, UserInput,
 };
@@ -139,6 +139,17 @@ pub(crate) async fn run(shared: Arc<Shared>, room_id: RoomId, link: Arc<RoomLink
                 while let Some(done) = lanes.join_next().await {
                     finished(&room_id, &link, &sessions, &mut owed, done).await;
                 }
+                // 人点了停止又马上关掉：还没记进会话记录的停止现在记上，重启之后才不会再答。
+                if !link.dismissals.lock().unwrap().is_empty() {
+                    let (engine, id) = (shared.engine.clone(), room_id.clone());
+                    match db(move || members_of(&engine, &id)).await {
+                        Ok((_, members)) => {
+                            apply_dismissals(&shared, &room_id, &members, &mut sessions, &link)
+                                .await
+                        }
+                        Err(error) => tracing::warn!(room = %room_id, "停止没记上：{error}"),
+                    }
+                }
                 return;
             }
         }
@@ -217,6 +228,18 @@ async fn finished(
     }
 }
 
+/// 房间和里面没停用的 Bot，按进房间的先后排。
+fn members_of(engine: &Engine, room_id: &RoomId) -> Result<(Room, Vec<Bot>), EngineError> {
+    let room = engine.get_room(room_id)?;
+    let all = engine.list_bots()?;
+    let members: Vec<Bot> = room
+        .member_bot_ids
+        .iter()
+        .filter_map(|id| all.iter().find(|bot| &bot.id == id && bot.enabled).cloned())
+        .collect();
+    Ok((room, members))
+}
+
 /// 新来的人类消息决定由谁接，然后让排着队的 Bot 在各自的道上开始说，同时最多 `max_parallel_bots` 个。
 async fn work(
     shared: &Arc<Shared>,
@@ -231,19 +254,9 @@ async fn work(
     }
     let engine = shared.engine.clone();
     let id = room_id.clone();
-    let (room, members) = db(move || {
-        let room = engine.get_room(&id)?;
-        // 按进房间的先后排。
-        let all = engine.list_bots()?;
-        let members: Vec<Bot> = room
-            .member_bot_ids
-            .iter()
-            .filter_map(|id| all.iter().find(|bot| &bot.id == id && bot.enabled).cloned())
-            .collect();
-        Ok((room, members))
-    })
-    .await
-    .map_err(|e| e.to_string())?;
+    let (room, members) = db(move || members_of(&engine, &id))
+        .await
+        .map_err(|e| e.to_string())?;
 
     if link.handled.load(Ordering::SeqCst) < 0 {
         // 刚启动：哪些人类消息已经有 Bot 看过，从会话记录里算。
