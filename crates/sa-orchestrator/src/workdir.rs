@@ -378,12 +378,16 @@ pub async fn outside_changes(workdir: &Workdir) -> Result<Vec<String>, String> {
     if workdir.kind != KIND_WORKTREE {
         return Ok(vec![]);
     }
+    // 和合并时一样，从分支与人的工作目录分开的地方算起：分支变基到新的提交上之后，
+    // 那些提交里本来就有的改动不算它的。
+    let target = git(Path::new(&workdir.source), &["rev-parse", "HEAD"]).await?;
+    let base = task_git(workdir, &["merge-base", "HEAD", target.trim()]).await?;
     let range = [
         "diff",
         "--name-only",
         "--no-renames",
         "--ignore-submodules=none",
-        &workdir.base_ref,
+        base.trim(),
         "HEAD",
     ];
     let all = task_git(workdir, &range).await?;
@@ -823,6 +827,23 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(outside_changes(&workdir).await.unwrap(), ["a.txt"]);
+
+        // 人的工作目录里也改了外面的文件，分支变基上去再改里面的：外面那些不算分支的。
+        task_git(&workdir, &["reset", "-q", "--hard", "HEAD~1"])
+            .await
+            .unwrap();
+        std::fs::write(outer.join("c.txt"), "人改的\n").unwrap();
+        git(&outer, &["add", "c.txt"]).await.unwrap();
+        git(&outer, &["commit", "-q", "-m", "人改的"])
+            .await
+            .unwrap();
+        let main = git(&outer, &["rev-parse", "HEAD"]).await.unwrap();
+        task_git(&workdir, &["rebase", "-q", main.trim()])
+            .await
+            .unwrap();
+        std::fs::write(Path::new(&workdir.path).join("b.txt"), "三\n").unwrap();
+        commit_and_diff(&workdir, "任务").await.unwrap();
+        assert!(outside_changes(&workdir).await.unwrap().is_empty());
     }
 
     /// 一个有 `origin` 的仓库和它的任务目录，任务分支上有一个提交。`origin` 另有第二个推送地址。
