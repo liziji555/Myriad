@@ -112,7 +112,8 @@ type Sessions = HashMap<BotId, Arc<tokio::sync::Mutex<Session>>>;
 
 /// 一个 Bot 说完一轮：是谁，结果如何。
 /// 每条道结束时交回：谁、它这一轮的回复（开口了才有）、结果。
-type LaneEnd = (BotId, Option<MessageId>, Result<(), String>);
+/// 谁、它这一轮的回复（开口了才有）、这一轮是不是主 Agent 派的活、结果。
+type LaneEnd = (BotId, Option<MessageId>, bool, Result<(), String>);
 type Lanes = JoinSet<LaneEnd>;
 
 /// 在阻塞线程上做数据库操作。
@@ -193,7 +194,7 @@ async fn finished(
     owed: &mut HashMap<BotId, i64>,
     done: Result<LaneEnd, tokio::task::JoinError>,
 ) {
-    let (bot_id, reply, result) = match done {
+    let (bot_id, reply, for_lead, result) = match done {
         Ok(done) => done,
         Err(error) => {
             // 道出了意外（不该发生）：哪个 Bot 不知道了，把已经结束的道都清掉。
@@ -210,7 +211,7 @@ async fn finished(
     link.lanes.lock().unwrap().retain(|(id, _)| id != &bot_id);
     link.speaking.lock().unwrap().retain(|id| id != &bot_id);
     // 主 Agent 派出去的成员做完了（做成、出错都算）：结果交回给它。
-    link.episode().settle(&bot_id, reply);
+    link.episode().settle(&bot_id, reply, for_lead);
     match &result {
         Ok(()) => {}
         Err(error) if error.ends_with(STOPPED) => {
@@ -365,11 +366,12 @@ async fn work(
         let (shared, room_id, link) = (shared.clone(), room_id.clone(), link.clone());
         lanes.spawn(async move {
             let reply = Mutex::new(None);
+            let for_lead = job.for_lead;
             let result = turn(
                 &shared, &room_id, &bot, &job, &others, &link, &session, cancel, &reply,
             )
             .await;
-            (bot.id, reply.into_inner().unwrap(), result)
+            (bot.id, reply.into_inner().unwrap(), for_lead, result)
         });
     }
     Ok(())
