@@ -67,6 +67,9 @@ pub trait ModelRouter: Send + Sync {
     fn resolve(&self, tier: ModelTier) -> Result<ResolvedModel, String>;
 }
 
+/// 重启时往回看房间里最近这么多条消息，找还没交到指定 Bot 手里的事。
+const RESUME_LOOKBACK: u32 = 50;
+
 #[derive(Debug, Clone)]
 pub struct Settings {
     /// 会话记录放在哪个目录。
@@ -280,11 +283,21 @@ impl Orchestrator {
             if room.host_bot_id.is_none() {
                 continue;
             }
-            let page = self.shared.engine.list_messages(&room.id, None, 1)?;
+            let page = self
+                .shared
+                .engine
+                .list_messages(&room.id, None, RESUME_LOOKBACK)?;
             let waiting = page.messages.last().is_some_and(|last| {
                 last.sender == Sender::User
                     && matches!(last.kind, MessageKind::Chat | MessageKind::Event)
             });
+            // 最近有交给某个 Bot 的定时任务或外面来的事：后面有别的 Bot 说过话也可能还没轮到它，
+            // 叫醒房间按各个 Bot 自己看到了哪里查一遍（见 room::owe_unread）。
+            let targeted = page.messages.iter().any(|message| {
+                matches!(message.kind, MessageKind::Routine | MessageKind::Event)
+                    && !message.mentions.is_empty()
+            });
+            let waiting = waiting || targeted;
             if waiting {
                 self.wake(&room.id);
                 woken += 1;
