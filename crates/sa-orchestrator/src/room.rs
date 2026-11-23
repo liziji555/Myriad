@@ -5,7 +5,7 @@ use crate::episode::Job;
 use crate::work::CreateTaskTool;
 use crate::{render_prompt, router, RoomLink, Shared};
 use async_trait::async_trait;
-use sa_engine::{Audit, EngineError};
+use sa_engine::{Audit, Engine, EngineError};
 use sa_kernel::{
     run_turn, ApprovalRequest, Inbox, Observer, StepEnd, Transcript, TurnConfig, TurnEnd, UserInput,
 };
@@ -139,6 +139,17 @@ pub(crate) async fn run(shared: Arc<Shared>, room_id: RoomId, link: Arc<RoomLink
                 while let Some(done) = lanes.join_next().await {
                     finished(&room_id, &link, &sessions, &mut owed, done).await;
                 }
+                // 人点了停止又马上关掉：还没记进会话记录的停止现在记上，重启之后才不会再答。
+                if !link.dismissals.lock().unwrap().is_empty() {
+                    let (engine, id) = (shared.engine.clone(), room_id.clone());
+                    match db(move || members_of(&engine, &id)).await {
+                        Ok((_, members)) => {
+                            apply_dismissals(&shared, &room_id, &members, &mut sessions, &link)
+                                .await
+                        }
+                        Err(error) => tracing::warn!(room = %room_id, "停止没记上：{error}"),
+                    }
+                }
                 return;
             }
         }
@@ -217,6 +228,18 @@ async fn finished(
     }
 }
 
+/// 房间和里面没停用的 Bot，按进房间的先后排。
+fn members_of(engine: &Engine, room_id: &RoomId) -> Result<(Room, Vec<Bot>), EngineError> {
+    let room = engine.get_room(room_id)?;
+    let all = engine.list_bots()?;
+    let members: Vec<Bot> = room
+        .member_bot_ids
+        .iter()
+        .filter_map(|id| all.iter().find(|bot| &bot.id == id && bot.enabled).cloned())
+        .collect();
+    Ok((room, members))
+}
+
 /// 新来的人类消息决定由谁接，然后让排着队的 Bot 在各自的道上开始说，同时最多 `max_parallel_bots` 个。
 async fn work(
     shared: &Arc<Shared>,
@@ -231,19 +254,9 @@ async fn work(
     }
     let engine = shared.engine.clone();
     let id = room_id.clone();
-    let (room, members) = db(move || {
-        let room = engine.get_room(&id)?;
-        // 按进房间的先后排。
-        let all = engine.list_bots()?;
-        let members: Vec<Bot> = room
-            .member_bot_ids
-            .iter()
-            .filter_map(|id| all.iter().find(|bot| &bot.id == id && bot.enabled).cloned())
-            .collect();
-        Ok((room, members))
-    })
-    .await
-    .map_err(|e| e.to_string())?;
+    let (room, members) = db(move || members_of(&engine, &id))
+        .await
+        .map_err(|e| e.to_string())?;
 
     if link.handled.load(Ordering::SeqCst) < 0 {
         // 刚启动：哪些人类消息已经有 Bot 看过，从会话记录里算。
@@ -262,6 +275,7 @@ async fn work(
             owe_unread(shared, room_id, &members, sessions, link, least, seen).await;
         }
     }
+    apply_dismissals(shared, room_id, &members, sessions, link).await;
 
     let engine = shared.engine.clone();
     let (id, after) = (room_id.clone(), link.handled.load(Ordering::SeqCst));
@@ -293,6 +307,10 @@ async fn work(
         // 定时任务和外面来的事各有指定的 Bot，别的 Bot 看不到它们：每个被指定的都要轮到。
         // 它们不是人说的话，不打断排着队的。
         for message in &fresh {
+            // 上次没做完的定时任务：调度器在租约过期后会重做这一次，这里再答就做了两遍。
+            if message.kind == MessageKind::Routine && message.created_at < shared.started_at {
+                continue;
+            }
             let targeted = matches!(message.kind, MessageKind::Routine | MessageKind::Event);
             let Some(target) = message.mentions.first().filter(|_| targeted) else {
                 continue;
@@ -403,10 +421,46 @@ fn audit_arguments(tool: &str, arguments: &str) -> String {
     path.unwrap_or_default()
 }
 
+/// 人点停止时没在说话的 Bot（排着队的、欠着一条的）：到停止那一刻为止没看的，记成不用答。
+/// 正在说话的由 `finished` 记，这里不去抢它们的会话记录。
+async fn apply_dismissals(
+    shared: &Arc<Shared>,
+    room_id: &RoomId,
+    members: &[Bot],
+    sessions: &mut Sessions,
+    link: &Arc<RoomLink>,
+) {
+    let dismissals = std::mem::take(&mut *link.dismissals.lock().unwrap());
+    for (only, upto) in dismissals {
+        let speaking: Vec<BotId> = link
+            .lanes
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(id, _)| id.clone())
+            .collect();
+        for bot in members {
+            if only.as_ref().is_some_and(|id| id != &bot.id) || speaking.contains(&bot.id) {
+                continue;
+            }
+            match session_of(shared, room_id, &bot.id, sessions).await {
+                Ok(session) => {
+                    let mut session = session.lock().await;
+                    if upto > session.answered() {
+                        session.dismissed = upto;
+                        session.save_cursor();
+                    }
+                }
+                Err(error) => tracing::warn!(room = %room_id, "会话记录打不开：{error}"),
+            }
+        }
+    }
+}
+
 /// 新来的人类消息由谁接，返回要开始说话的 Bot（可以有好几个，同时开始）。
 /// 点了名的：被点到的都要接，正在说的那个会在下一步看到。没点名的：有 Bot 正在说，就由它们看到；
 /// 都空着，就由路由挑一个。`owed` 记下正在说的 Bot 该看到的最新一条。
-/// 重启时：定时任务和外面来的事只有指定的 Bot 看得到，别的 Bot 读过去了不等于它看过。
+/// 重启时：外面来的事只有指定的 Bot 看得到，别的 Bot 读过去了不等于它看过；点了名的话也要被点到的自己看过。
 /// `after` 到 `upto` 之间这样的事，指定的 Bot 自己没看过（停下时也没说不用答）的，记着要让它说一次。
 async fn owe_unread(
     shared: &Arc<Shared>,
@@ -427,24 +481,27 @@ async fn owe_unread(
         }
     };
     for message in earlier.iter().filter(|m| m.seq <= upto) {
-        if !matches!(message.kind, MessageKind::Routine | MessageKind::Event) {
-            continue;
-        }
-        let Some(target) = message.mentions.first() else {
-            continue;
+        // 人点名的话也一样：点了两个，人只停了其中一个，另一个还排着。
+        // 没做完的定时任务由调度器重做，这里再补一次就做了两遍。
+        let targets = match message.kind {
+            MessageKind::Event => &message.mentions[..message.mentions.len().min(1)],
+            MessageKind::Chat => &message.mentions[..],
+            _ => continue,
         };
-        if !members.iter().any(|bot| &bot.id == target) {
-            continue;
-        }
-        let Some(session) = sessions.get(target) else {
-            continue;
-        };
-        let unread = {
-            let session = session.lock().await;
-            !session.seen(message.seq) && message.seq > session.dismissed
-        };
-        if unread {
-            link.episode().owe(target.clone());
+        for target in targets {
+            if !members.iter().any(|bot| &bot.id == target) {
+                continue;
+            }
+            let Some(session) = sessions.get(target) else {
+                continue;
+            };
+            let unread = {
+                let session = session.lock().await;
+                !session.seen(message.seq) && message.seq > session.dismissed
+            };
+            if unread {
+                link.episode().owe(target.clone());
+            }
         }
     }
 }

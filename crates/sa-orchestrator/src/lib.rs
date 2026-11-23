@@ -41,7 +41,7 @@ use sa_protocol::{
 use sa_tools::{Fence, ToolRegistry};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicI64;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{oneshot, Notify};
@@ -142,6 +142,8 @@ pub(crate) struct Shared {
     pub telegram_username: Mutex<Option<String>>,
     /// 正在做定时任务的房间。一个房间里的定时任务一个一个来。
     pub routine_rooms: Mutex<std::collections::HashSet<RoomId>>,
+    /// 这个进程什么时候起来的。比它早的定时任务消息是上次没做完的，由调度器重做，房间不再答。
+    pub started_at: i64,
 }
 
 struct RoomHandle {
@@ -173,6 +175,9 @@ pub(crate) struct RoomLink {
     pub renewed: AtomicI64,
     /// 房间的后台任务是不是正在干活（挑人、Bot 说话、排着队）。
     pub active: std::sync::atomic::AtomicBool,
+    /// 人点了停止：这个 Bot（`None` 是房间里每个 Bot）到这一条（`seq`）为止没看的都不用答了，
+    /// 房间的后台任务记进会话记录，重启之后也不再答。
+    pub dismissals: Mutex<Vec<(Option<BotId>, i64)>>,
 }
 
 impl RoomLink {
@@ -188,6 +193,17 @@ impl RoomLink {
             handled: AtomicI64::new(-1),
             renewed: AtomicI64::new(0),
             active: std::sync::atomic::AtomicBool::new(false),
+            dismissals: Mutex::default(),
+        }
+    }
+
+    /// 记下「到现在为止的都不用答了」，叫醒房间的后台任务把它记进会话记录。
+    fn dismiss(&self, bot_id: Option<&BotId>) {
+        let upto = self.handled.load(Ordering::SeqCst);
+        if upto > 0 {
+            let mut dismissals = self.dismissals.lock().unwrap();
+            dismissals.push((bot_id.cloned(), upto));
+            self.wake.notify_one();
         }
     }
 
@@ -223,6 +239,7 @@ impl Orchestrator {
                 owner: format!("sa-{}", sa_protocol::RoutineId::new()),
                 telegram_username: Mutex::default(),
                 routine_rooms: Mutex::default(),
+                started_at: sa_engine::now_ms(),
             }),
             rooms: Mutex::new(HashMap::new()),
         }
@@ -291,10 +308,12 @@ impl Orchestrator {
                 last.sender == Sender::User
                     && matches!(last.kind, MessageKind::Chat | MessageKind::Event)
             });
-            // 最近有交给某个 Bot 的定时任务或外面来的事：后面有别的 Bot 说过话也可能还没轮到它，
+            // 最近有交给某个 Bot 的外面来的事、人点了名的话：后面有别的 Bot 说过话也可能还没轮到它，
             // 叫醒房间按各个 Bot 自己看到了哪里查一遍（见 room::owe_unread）。
+            // 没做完的定时任务不在这里补：调度器会在租约过期后重做这一次。
             let targeted = page.messages.iter().any(|message| {
-                matches!(message.kind, MessageKind::Routine | MessageKind::Event)
+                message.sender == Sender::User
+                    && matches!(message.kind, MessageKind::Event | MessageKind::Chat)
                     && !message.mentions.is_empty()
             });
             let waiting = waiting || targeted;
@@ -325,6 +344,7 @@ impl Orchestrator {
             episode.clear_queue();
             queued
         };
+        link.dismiss(None);
         let mut stopped = queued;
         if let Some(cancel) = link.routing.lock().unwrap().as_ref() {
             cancel.cancel();
@@ -350,6 +370,7 @@ impl Orchestrator {
             episode.drop_bot(bot_id);
             queued
         };
+        link.dismiss(Some(bot_id));
         let speaking = {
             let lanes = link.lanes.lock().unwrap();
             let lane = lanes.iter().find(|(id, _)| id == bot_id);

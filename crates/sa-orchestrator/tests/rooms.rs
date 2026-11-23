@@ -1754,6 +1754,167 @@ async fn a_queued_event_another_bot_read_past_is_answered_after_restart() {
     t.rig.orchestrator.shutdown().await;
 }
 
+/// 同上，但关之前人点了停止：排着队的那件事不用答了，重启之后也不答。
+#[tokio::test]
+async fn a_queued_event_stopped_before_shutdown_is_not_answered_after_restart() {
+    stopped_event_is_not_answered_after_restart(true).await;
+}
+
+/// 同上，点了停止马上就关：停止还没来得及记下也一样。
+#[tokio::test]
+async fn a_queued_event_stopped_right_at_shutdown_is_not_answered_after_restart() {
+    stopped_event_is_not_answered_after_restart(false).await;
+}
+
+/// `settle`：停止之后等房间收好尾再关。
+async fn stopped_event_is_not_answered_after_restart(settle: bool) {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let t = team_with(dir.path(), vec![], vec![], 1);
+        t.rig.engine.link_repo(&t.rig.room, "me/app").unwrap();
+        let coder = t.script(
+            "Coder",
+            vec![
+                shell("c1", "echo coder"),
+                MockReply::Hang(vec![StreamEvent::TextDelta("还在写".into())]),
+            ],
+        );
+        t.rig.say("@Coder 跑一条命令").await;
+        let cards = t.rig.waiting_approvals(1).await;
+        let event = Incoming {
+            source: Source::Github,
+            key: "d-1".into(),
+            name: "issues.opened".into(),
+            external: "me/app".into(),
+            label: "me/app#12".into(),
+            url: None,
+            kind: IncomingKind::Event {
+                summary: "alice 开了 issue #12".into(),
+                body: "点登录就 500".into(),
+                pr: None,
+                branch: None,
+                task_only: false,
+                notify: true,
+            },
+        };
+        t.rig.orchestrator.receive(event).await.unwrap();
+        // 一次只能一个 Bot 说：入口 Bot 排着队。Coder 接着往下做，读过了这件事。
+        assert!(t
+            .rig
+            .orchestrator
+            .decide(&cards[0].1, ApprovalDecision::Once));
+        for _ in 0..500 {
+            if coder.requests().len() == 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(coder.requests().len(), 2);
+        assert!(t.rig.orchestrator.stop(&t.rig.room));
+        for _ in 0..500 {
+            if !settle {
+                break;
+            }
+            let messages = t.rig.messages();
+            if messages
+                .iter()
+                .any(|m| m.content == "还在写" && m.state == MessageState::Cancelled)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        if settle {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        t.rig.orchestrator.shutdown().await;
+    }
+
+    let t = team_with(dir.path(), vec![], vec![], 1);
+    let host = t.script("助手", vec![MockReply::text("看到 issue 了")]);
+    t.rig.orchestrator.resume_rooms().unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(host.requests().is_empty());
+    t.rig.orchestrator.shutdown().await;
+}
+
+/// 一句话点了两个 Bot，都排着队；人只停了其中一个就关了。重启后另一个照样答。
+#[tokio::test]
+async fn a_mentioned_bot_still_queued_answers_after_restart_when_another_was_stopped() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let t = team_with(dir.path(), vec![], vec![], 1);
+        t.script("Coder", vec![shell("c1", "echo coder")]);
+        t.rig.say("@Coder 跑一条命令").await;
+        t.rig.waiting_approvals(1).await;
+        t.rig.say("@Reviewer @助手 看看").await;
+        for _ in 0..500 {
+            if t.rig.orchestrator.stop_bot(&t.rig.room, &t.reviewer) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        t.rig.orchestrator.shutdown().await;
+    }
+
+    let t = team_with(dir.path(), vec![], vec![], 1);
+    let host = t.script("助手", vec![MockReply::text("看过了")]);
+    let reviewer = t.script("Reviewer", vec![MockReply::text("我也看过了")]);
+    assert_eq!(t.rig.orchestrator.resume_rooms().unwrap(), 1);
+    t.rig
+        .until("入口 Bot 答了", |m| {
+            m.content == "看过了" && m.state == MessageState::Complete
+        })
+        .await;
+    t.rig.until_idle().await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(host.requests().len(), 1);
+    assert!(reviewer.requests().is_empty(), "停下的那个不再答");
+    t.rig.orchestrator.shutdown().await;
+}
+
+/// 关掉时还没人看的定时任务消息：重启后别的话叫醒了房间，也不答它（调度器在租约过期后会重做）。
+#[tokio::test]
+async fn an_unfinished_routine_is_left_to_the_scheduler_after_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let t = team(dir.path(), vec![], vec![]);
+        let routine = t
+            .rig
+            .engine
+            .create_routine(&t.rig.room, None, "早报", "看看有什么新消息", "0 9 * * *")
+            .unwrap();
+        let until = sa_engine::now_ms() + 60_000;
+        assert!(t
+            .rig
+            .engine
+            .claim_routine(&routine.id, "old", until)
+            .unwrap());
+        t.rig
+            .engine
+            .post_routine_message(&routine.id, "old")
+            .unwrap();
+        t.rig.orchestrator.shutdown().await;
+    }
+
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    let t = team(dir.path(), vec![], vec![]);
+    let host = t.script("助手", vec![MockReply::text("早报来了")]);
+    let coder = t.script("Coder", vec![MockReply::text("你好")]);
+    t.rig.say("@Coder 你好").await;
+    t.rig
+        .until("Coder 答了", |m| {
+            m.content == "你好" && m.state == MessageState::Complete
+        })
+        .await;
+    t.rig.until_idle().await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(coder.requests().len(), 1);
+    assert!(host.requests().is_empty());
+    t.rig.orchestrator.shutdown().await;
+}
+
 /// 一句话点了两个 Bot：两个同时开始说，房间动态里两个都在说。
 #[tokio::test]
 async fn two_mentioned_bots_answer_the_same_message_together() {
