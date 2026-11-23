@@ -11,7 +11,7 @@ use sa_kernel::{
 };
 use sa_llm::{RetryPolicy, Usage};
 use sa_protocol::{
-    ApprovalDecision, ApprovalId, Bot, BotId, Discussion, Message, MessageId, MessageKind,
+    ApprovalDecision, ApprovalId, Bot, BotId, Discussion, Harness, Message, MessageId, MessageKind,
     MessageState, Room, RoomActivity, RoomId, Sender, SessionId, Source, StepApproval, StepState,
     ToolStep, MAX_ROUNDS,
 };
@@ -819,6 +819,10 @@ async fn turn(
         pulse: None,
     };
     let outcome = match shared.models.resolve(bot.tier) {
+        _ if bot.harness != Harness::Builtin => {
+            let inputs = inbox.drain().await;
+            harness_turn(shared, room_id, bot, transcript, inputs, &observer, &cancel).await
+        }
         Err(reason) => {
             // 模型用不了：这一轮的输入照样记进会话，配置好之后接着聊时模型能看到。
             let recorded = record_inputs(transcript, inbox.drain().await);
@@ -947,6 +951,187 @@ async fn turn(
             return Err(format!("{} 的回复{STOPPED}", bot.name));
         }
         Err(format!("{} 的回复没有正常结束", bot.name))
+    }
+}
+
+/// harness Bot 的一轮：在它自己的工位目录里启动它，把这一轮的话交给它。
+async fn harness_turn(
+    shared: &Arc<Shared>,
+    room_id: &RoomId,
+    bot: &Bot,
+    transcript: &mut Transcript,
+    inputs: Vec<UserInput>,
+    observer: &RoomObserver,
+    cancel: &CancellationToken,
+) -> Result<TurnEnd, String> {
+    let said: Vec<String> = inputs.iter().map(|input| input.content.clone()).collect();
+    record_inputs(transcript, inputs)?;
+    let label = bot.harness.label();
+
+    // 启动前问一次人：harness 里面的每一步苦乐管不到，只能在门口问。
+    let workspace = shared.settings.fence.root_display();
+    let title = format!("让 {}（{label}）在自己的独立目录里动手", bot.name);
+    let input = serde_json::json!({ "bot": bot.id.as_str() });
+    observer
+        .tool_started("harness-start", "harness", &title, &input.to_string())
+        .await;
+    let reason = format!(
+        "{label} 会自己改文件、执行命令，苦乐管不到它里面的每一步。它只在从 {workspace} 开出来的独立目录里干活，改动要你验收后才带回。"
+    );
+    let allowed = observer
+        .request_approval(ApprovalRequest {
+            call_id: "harness-start",
+            tool: "harness",
+            title: &title,
+            reason: &reason,
+            input: &input,
+        })
+        .await;
+    if cancel.is_cancelled() {
+        return Ok(TurnEnd::Cancelled);
+    }
+    if !allowed {
+        observer
+            .tool_finished("harness-start", StepEnd::Stopped, "没有批准")
+            .await;
+        return Ok(TurnEnd::Failed(format!("你没有批准 {} 动手", bot.name)));
+    }
+    observer
+        .tool_finished("harness-start", StepEnd::Ok, "")
+        .await;
+
+    // 同时跑的 harness 有上限：满了就排队。
+    let slots = shared.harness_slots.clone();
+    let _slot = match slots.clone().try_acquire_owned() {
+        Ok(slot) => slot,
+        Err(_) => {
+            let waiting = format!(
+                "排队：同时最多 {} 个 harness 在跑",
+                shared.settings.max_parallel_harness.max(1)
+            );
+            observer
+                .tool_started("harness-queue", "harness", &waiting, "")
+                .await;
+            let slot = tokio::select! {
+                _ = cancel.cancelled() => return Ok(TurnEnd::Cancelled),
+                slot = slots.acquire_owned() => slot.map_err(|e| e.to_string())?,
+            };
+            observer
+                .tool_finished("harness-queue", StepEnd::Ok, "轮到了")
+                .await;
+            slot
+        }
+    };
+
+    let _desk_lock = shared.desk_lock(room_id, &bot.id).lock_owned().await;
+    // 排队和等锁的时候，人可能已经带回或丢弃了这个工位：重新读一次。
+    let engine = shared.engine.clone();
+    let (room, bot_id) = (room_id.clone(), bot.id.clone());
+    let mut desk = db(move || engine.desk(&room, &bot_id))
+        .await
+        .map_err(|e| e.to_string())?;
+    let workdir = match desk.workdir.clone() {
+        Some(workdir) if std::path::Path::new(&workdir.path).is_dir() => workdir,
+        _ => {
+            observer
+                .tool_started("harness-desk", "workdir", "开独立目录", "")
+                .await;
+            let name = format!("desk-{}-{}", bot.id, sa_engine::now_ms());
+            let opened = crate::workdir::provision(
+                shared.settings.fence.root(),
+                &shared.settings.work_dir.join("desks"),
+                &sa_protocol::TaskId::from(name),
+            )
+            .await;
+            let workdir = match opened {
+                Ok(workdir) => workdir,
+                Err(reason) => {
+                    observer
+                        .tool_finished("harness-desk", StepEnd::Failed, &reason)
+                        .await;
+                    return Ok(TurnEnd::Failed(format!("独立目录开不出来：{reason}")));
+                }
+            };
+            observer
+                .tool_finished("harness-desk", StepEnd::Ok, &workdir.path)
+                .await;
+            desk.workdir = Some(workdir.clone());
+            desk.changes.clear();
+            save_desk(shared, room_id, &bot.id, &desk).await;
+            workdir
+        }
+    };
+
+    let mut prompt = String::new();
+    if desk.session.is_none() {
+        prompt.push_str(&format!(
+            "你是「苦乐」房间里的 {}。{}\n你在自己的独立目录里干活，改动要人验收后才会带回。做完用几句话说清做了什么、结果怎样。\n\n",
+            bot.name,
+            bot.persona.trim()
+        ));
+    }
+    prompt.push_str(&said.join("\n\n"));
+    let launch = crate::harness::Launch {
+        harness: bot.harness,
+        command: &bot.harness_command,
+        dir: std::path::Path::new(&workdir.path),
+        prompt: &prompt,
+        session: desk.session.as_deref(),
+    };
+    let finished = crate::harness::run(&launch, observer, cancel).await;
+    if !finished.text.is_empty() {
+        transcript
+            .append(sa_kernel::EntryBody::Assistant {
+                content: finished.text.clone(),
+                reasoning: None,
+                tool_calls: vec![],
+            })
+            .map_err(|e| e.to_string())?;
+    }
+
+    // 不管怎么结束的，目录里的改动都记下来，交回主 Agent 的话里带上改了什么。
+    let summary = format!("{}：{}", bot.name, said.last().map_or("", |s| s.as_str()));
+    let summary: String = summary.chars().take(72).collect();
+    match crate::workdir::commit_and_diff(&workdir, &summary).await {
+        Ok(files) => {
+            desk.changes = files
+                .into_iter()
+                .map(|(path, label)| sa_protocol::DeskChange { path, label })
+                .collect();
+            if !desk.changes.is_empty() {
+                let listed: Vec<String> = desk
+                    .changes
+                    .iter()
+                    .take(20)
+                    .map(|c| format!("- {} {}", c.label, c.path))
+                    .collect();
+                let more = desk.changes.len().saturating_sub(20);
+                let more = if more > 0 {
+                    format!("\n- 还有 {more} 个")
+                } else {
+                    String::new()
+                };
+                observer
+                    .text_delta(&format!(
+                        "\n\n在独立目录里改了 {} 个文件，还没带回：\n{}{more}",
+                        desk.changes.len(),
+                        listed.join("\n")
+                    ))
+                    .await;
+            }
+        }
+        Err(reason) => tracing::warn!(room = %room_id, "harness 目录里的改动没记下来：{reason}"),
+    }
+    desk.session = finished.session;
+    save_desk(shared, room_id, &bot.id, &desk).await;
+    Ok(finished.end)
+}
+
+async fn save_desk(shared: &Arc<Shared>, room_id: &RoomId, bot_id: &BotId, desk: &sa_engine::Desk) {
+    let engine = shared.engine.clone();
+    let (room, bot, desk) = (room_id.clone(), bot_id.clone(), desk.clone());
+    if let Err(error) = db(move || engine.put_desk(&room, &bot, &desk)).await {
+        tracing::error!(room = %room_id, "harness 工位没记下来：{error}");
     }
 }
 
@@ -1623,6 +1808,8 @@ fn rule_key(tool: &str, input: &Value, fence: &Fence) -> Option<String> {
             let (real, _) = fence.resolve_for_write(input["path"].as_str()?).ok()?;
             Some(real.display().to_string())
         }
+        // harness 的「以后都允许」按 Bot 记：这个房间里这个 harness Bot 以后启动都不再问。
+        "harness" => input["bot"].as_str().map(String::from),
         _ => None,
     }
 }

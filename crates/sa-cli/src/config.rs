@@ -39,18 +39,26 @@ pub struct Rooms {
     /// 一个房间里最多几个 Bot 同时说话，多的排队。
     #[serde(default = "default_max_parallel_bots")]
     pub max_parallel_bots: usize,
+    /// 整个服务里最多几个 harness（Claude Code、Codex 这些命令行）同时在跑，多的排队。
+    #[serde(default = "default_max_parallel_harness")]
+    pub max_parallel_harness: usize,
 }
 
 impl Default for Rooms {
     fn default() -> Self {
         Self {
             max_parallel_bots: default_max_parallel_bots(),
+            max_parallel_harness: default_max_parallel_harness(),
         }
     }
 }
 
 fn default_max_parallel_bots() -> usize {
     sa_orchestrator::DEFAULT_MAX_PARALLEL_BOTS
+}
+
+fn default_max_parallel_harness() -> usize {
+    sa_orchestrator::DEFAULT_MAX_PARALLEL_HARNESS
 }
 
 /// 一个模型的价格：每一百万 token 多少钱，单位是 `[budget]` 的货币。

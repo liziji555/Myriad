@@ -193,6 +193,8 @@ mod tests {
             persona: persona.into(),
             enabled: true,
             created_at: 0,
+            harness: Default::default(),
+            harness_command: String::new(),
         }
     }
 

@@ -88,6 +88,15 @@ pub fn router(state: AppState) -> Router {
             "/rooms/{room_id}/bots/{bot_id}/stop",
             post(routes::stop_bot),
         )
+        .route("/rooms/{room_id}/desks", get(routes::list_desks))
+        .route(
+            "/rooms/{room_id}/desks/{bot_id}/accept",
+            post(routes::accept_desk),
+        )
+        .route(
+            "/rooms/{room_id}/desks/{bot_id}/discard",
+            post(routes::discard_desk),
+        )
         .route("/rooms/{room_id}/rules", get(routes::list_rules))
         .route("/rules/{rule_id}", delete(routes::delete_rule))
         .route(

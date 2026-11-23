@@ -42,6 +42,7 @@ fn app_with(configure: impl FnOnce(AppState) -> AppState) -> (Router, Arc<Engine
         prompt: None,
         max_steps: 6,
         max_parallel_bots: 3,
+        max_parallel_harness: sa_orchestrator::DEFAULT_MAX_PARALLEL_HARNESS,
         allow_private_network: false,
         approval_timeout: std::time::Duration::from_secs(600),
         work_dir: dir.join("tasks"),

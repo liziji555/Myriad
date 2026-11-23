@@ -8,6 +8,7 @@ mod migrate;
 
 pub mod audit;
 pub mod bots;
+pub mod desks;
 pub mod effects;
 pub mod events;
 pub mod external;

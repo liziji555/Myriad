@@ -1,4 +1,4 @@
-use crate::{ApprovalDecision, BotId, Discussion, Message, ModelTier, RoomId, Run, Task};
+use crate::{ApprovalDecision, BotId, Discussion, Harness, Message, ModelTier, RoomId, Run, Task};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
@@ -74,6 +74,13 @@ pub struct CreateBotRequest {
     #[serde(default)]
     #[ts(optional)]
     pub persona: Option<String>,
+    /// 不给就是内置。
+    #[serde(default)]
+    #[ts(optional)]
+    pub harness: Option<Harness>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub harness_command: Option<String>,
 }
 
 /// 只改给出的字段。
@@ -92,6 +99,12 @@ pub struct UpdateBotRequest {
     #[serde(default)]
     #[ts(optional)]
     pub enabled: Option<bool>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub harness: Option<Harness>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub harness_command: Option<String>,
 }
 
 /// 只改给出的字段。
@@ -252,6 +265,14 @@ pub struct BotTemplate {
     pub persona: String,
     #[serde(default = "enabled_by_default")]
     pub enabled: bool,
+    #[serde(default, skip_serializing_if = "is_builtin")]
+    pub harness: Harness,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub harness_command: String,
+}
+
+fn is_builtin(harness: &Harness) -> bool {
+    *harness == Harness::Builtin
 }
 
 fn enabled_by_default() -> bool {

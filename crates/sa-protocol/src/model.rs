@@ -49,6 +49,51 @@ str_enum!(BotKind {
     Watchdog => "watchdog",
 });
 
+/// Bot 由谁来干活：内置的（直接调模型），或者本机装好的某个 harness 命令行。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum Harness {
+    #[default]
+    Builtin,
+    ClaudeCode,
+    Codex,
+    OpenCode,
+    /// 自己指定的命令，按苦乐约定的格式一行一个 JSON 报告每一步。
+    Command,
+}
+
+str_enum!(Harness {
+    Builtin => "builtin",
+    ClaudeCode => "claude_code",
+    Codex => "codex",
+    OpenCode => "open_code",
+    Command => "command",
+});
+
+impl Harness {
+    /// 给人看的名字。
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Builtin => "内置",
+            Self::ClaudeCode => "Claude Code",
+            Self::Codex => "Codex",
+            Self::OpenCode => "OpenCode",
+            Self::Command => "自定义命令",
+        }
+    }
+
+    /// 没写命令时默认跑哪个程序。内置和自定义命令没有。
+    pub fn default_program(self) -> Option<&'static str> {
+        match self {
+            Self::ClaudeCode => Some("claude"),
+            Self::Codex => Some("codex"),
+            Self::OpenCode => Some("opencode"),
+            Self::Builtin | Self::Command => None,
+        }
+    }
+}
+
 str_enum!(ModelTier {
     Cheap => "cheap",
     Mid => "mid",
@@ -68,6 +113,12 @@ pub struct Bot {
     pub enabled: bool,
     #[ts(type = "number")]
     pub created_at: Millis,
+    /// 由谁来干活。不是内置的话，`tier` 不用。
+    #[serde(default)]
+    pub harness: Harness,
+    /// harness 的命令：程序和参数，用空格隔开。空的就用这种 harness 的默认程序。
+    #[serde(default)]
+    pub harness_command: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -948,4 +999,25 @@ pub struct AuditEntry {
 pub struct AuditPage {
     pub entries: Vec<AuditEntry>,
     pub has_more: bool,
+}
+
+/// harness 工位里改过的一个文件。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct DeskChange {
+    pub path: String,
+    /// 「新增」「修改」「删除」。
+    pub label: String,
+}
+
+/// 一个 harness Bot 在房间里的工位：它在自己的独立目录里干活，改动由人决定带不带回去。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct HarnessDesk {
+    pub bot_id: BotId,
+    /// 独立目录在哪。还没开（或者已经带回、丢掉）时是空的。
+    pub path: Option<String>,
+    pub branch: Option<String>,
+    /// 和开工时比，改了哪些文件。
+    pub changes: Vec<DeskChange>,
 }

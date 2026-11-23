@@ -124,6 +124,7 @@ impl App {
             },
             routines: Default::default(),
             max_parallel_bots: config.rooms.max_parallel_bots.max(1),
+            max_parallel_harness: config.rooms.max_parallel_harness.max(1),
         };
         tune(&mut settings);
         let orchestrator = Arc::new(Orchestrator::new(engine.clone(), models, settings));

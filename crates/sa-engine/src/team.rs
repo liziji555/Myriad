@@ -2,7 +2,8 @@
 
 use crate::{now_ms, to_json, Audit, Engine, EngineError, Result, MAX_ROOM_NAME_CHARS};
 use sa_protocol::{
-    Bot, BotId, BotKind, BotRef, EventKind, ModelTier, Room, RoomId, UpdateRoomRequest, MAX_ROUNDS,
+    Bot, BotId, BotKind, BotRef, EventKind, Harness, ModelTier, Room, RoomId, UpdateRoomRequest,
+    MAX_ROUNDS,
 };
 use sa_store::{bots, events, rooms};
 
@@ -18,10 +19,25 @@ pub struct BotPatch {
     pub tier: Option<ModelTier>,
     pub persona: Option<String>,
     pub enabled: Option<bool>,
+    pub harness: Option<Harness>,
+    pub harness_command: Option<String>,
 }
 
 impl Engine {
     pub fn create_bot(&self, name: &str, tier: ModelTier, persona: &str) -> Result<Bot> {
+        self.create_harness_bot(name, tier, persona, Harness::Builtin, "")
+    }
+
+    /// 新建一个 Bot，并说好由谁来干活。
+    pub fn create_harness_bot(
+        &self,
+        name: &str,
+        tier: ModelTier,
+        persona: &str,
+        harness: Harness,
+        command: &str,
+    ) -> Result<Bot> {
+        let command = check_harness(harness, command)?;
         let now = now_ms();
         let (bot, seq) = self.store.write(|tx| {
             let existing = bots::list(tx)?;
@@ -38,6 +54,8 @@ impl Engine {
                 persona,
                 enabled: true,
                 created_at: now,
+                harness,
+                harness_command: command.clone(),
             };
             bots::insert(tx, &bot)?;
             let seq = events::append(tx, None, EventKind::BotCreated, &to_json(&bot), now)?;
@@ -68,6 +86,15 @@ impl Engine {
                     Ok(persona) => bot.persona = persona,
                     Err(e) => return Ok(Err(e)),
                 }
+            }
+            let harness = patch.harness.unwrap_or(bot.harness);
+            let command = patch
+                .harness_command
+                .clone()
+                .unwrap_or_else(|| bot.harness_command.clone());
+            match check_harness(harness, &command) {
+                Ok(command) => (bot.harness, bot.harness_command) = (harness, command),
+                Err(e) => return Ok(Err(e)),
             }
             bot.tier = patch.tier.unwrap_or(bot.tier);
             bot.enabled = patch.enabled.unwrap_or(bot.enabled);
@@ -323,6 +350,23 @@ pub fn find_mentions(text: &str, candidates: &[Bot]) -> Vec<BotId> {
     found
 }
 
+/// harness 的命令：内置的没有命令；自定义命令必须写；最长 300 个字。
+fn check_harness(harness: Harness, command: &str) -> Result<String> {
+    let command = command.trim();
+    if harness == Harness::Builtin {
+        return Ok(String::new());
+    }
+    if harness == Harness::Command && command.is_empty() {
+        return Err(EngineError::Invalid("自定义命令要写上跑哪个程序".into()));
+    }
+    if command.chars().count() > 300 || command.contains(['\n', '\r']) {
+        return Err(EngineError::Invalid(
+            "harness 命令要写在一行里，最多 300 个字".into(),
+        ));
+    }
+    Ok(command.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -488,6 +532,8 @@ mod tests {
             persona: String::new(),
             enabled: true,
             created_at: 0,
+            harness: Default::default(),
+            harness_command: String::new(),
         };
         let team = [bot("Coder"), bot("审查"), bot("审查员")];
         let ids = |text: &str| -> Vec<String> {

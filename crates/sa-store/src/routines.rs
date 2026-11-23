@@ -243,6 +243,8 @@ mod tests {
             persona: String::new(),
             enabled: true,
             created_at: 1,
+            harness: Default::default(),
+            harness_command: String::new(),
         };
         let room = Room {
             discussion: Default::default(),

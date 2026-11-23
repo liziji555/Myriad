@@ -5,7 +5,7 @@ use crate::app::open_state;
 use crate::paths::DataDir;
 use anyhow::{bail, Context, Result};
 use sa_engine::{BotPatch, Engine};
-use sa_protocol::{Bot, ModelTier, Room};
+use sa_protocol::{Bot, Harness, ModelTier, Room};
 use std::io::Write;
 use std::process::ExitCode;
 
@@ -26,6 +26,12 @@ pub enum BotCommand {
         /// 建好之后拉进这个房间（名字或 ID）
         #[arg(long, value_name = "房间")]
         room: Option<String>,
+        /// 由谁来干活：builtin、claude_code、codex、open_code、command
+        #[arg(long, default_value = "builtin", value_parser = parse_harness)]
+        harness: Harness,
+        /// harness 的命令和参数。不写就用这种 harness 的默认程序；command 必须写
+        #[arg(long = "command", value_name = "命令", default_value = "")]
+        harness_command: String,
     },
     /// 修改一个 Bot，只改给出的项
     Set {
@@ -44,6 +50,10 @@ pub enum BotCommand {
         /// 停用：不会被点到，也不接话
         #[arg(long)]
         disable: bool,
+        #[arg(long, value_parser = parse_harness)]
+        harness: Option<Harness>,
+        #[arg(long = "command", value_name = "命令")]
+        harness_command: Option<String>,
     },
     /// 删除一个 Bot。它发过的消息会留着
     Rm {
@@ -124,10 +134,13 @@ fn bot(engine: &Engine, command: BotCommand, out: &mut impl Write) -> Result<()>
             tier,
             persona,
             room,
+            harness,
+            harness_command,
         } => {
             // 先确认房间找得到，免得建了 Bot 才发现房间名写错。
             let room = room.map(|wanted| find_room(engine, &wanted)).transpose()?;
-            let bot = engine.create_bot(&name, tier, &persona)?;
+            let bot =
+                engine.create_harness_bot(&name, tier, &persona, harness, &harness_command)?;
             writeln!(out, "已新建 {}（{}）", bot.name, bot.id)?;
             if let Some(room) = room {
                 engine.add_room_member(&room.id, &bot.id)?;
@@ -141,14 +154,22 @@ fn bot(engine: &Engine, command: BotCommand, out: &mut impl Write) -> Result<()>
             persona,
             enable,
             disable,
+            harness,
+            harness_command,
         } => {
             let enabled = match (enable, disable) {
                 (true, _) => Some(true),
                 (_, true) => Some(false),
                 _ => None,
             };
-            if name.is_none() && tier.is_none() && persona.is_none() && enabled.is_none() {
-                bail!("没有要改的内容。可以用 --name、--tier、--persona、--enable、--disable");
+            if name.is_none()
+                && tier.is_none()
+                && persona.is_none()
+                && enabled.is_none()
+                && harness.is_none()
+                && harness_command.is_none()
+            {
+                bail!("没有要改的内容。可以用 --name、--tier、--persona、--enable、--disable、--harness、--command");
             }
             let target = find_bot(engine, &bot)?;
             let patch = BotPatch {
@@ -156,6 +177,8 @@ fn bot(engine: &Engine, command: BotCommand, out: &mut impl Write) -> Result<()>
                 tier,
                 persona,
                 enabled,
+                harness,
+                harness_command,
             };
             let updated = engine.update_bot(&target.id, patch)?;
             let off = if updated.enabled { "" } else { "，已停用" };
@@ -315,6 +338,11 @@ pub fn find_room(engine: &Engine, wanted: &str) -> Result<Room> {
         0 => bail!("没有叫「{wanted}」的房间。现有的房间：{}", names.join("、")),
         _ => bail!("有 {} 个房间都叫「{wanted}」，请改用房间 ID", matches.len()),
     }
+}
+
+fn parse_harness(text: &str) -> std::result::Result<Harness, String> {
+    Harness::parse(text)
+        .ok_or_else(|| "只能是 builtin、claude_code、codex、open_code、command".to_string())
 }
 
 #[cfg(test)]

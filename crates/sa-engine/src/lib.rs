@@ -6,6 +6,7 @@
 mod audit;
 mod budget;
 pub mod cron;
+mod desks;
 mod external;
 mod messages;
 mod queue;
@@ -29,6 +30,7 @@ pub use audit::{
     Audit, AuditFilter, AUDIT_KEEP_DAYS, MAX_AUDIT_DETAIL_CHARS, MAX_AUDIT_SUMMARY_CHARS,
 };
 pub use budget::{micros_to_cost, NewNotice, TaskSpend, UsageBreakdown};
+pub use desks::Desk;
 pub use external::{Incoming, IncomingKind, Receipt, PAIRING_TTL_MS};
 pub use messages::UsageRecord;
 pub use routines::{
@@ -112,6 +114,8 @@ impl Engine {
                 persona: String::new(),
                 enabled: true,
                 created_at: now,
+                harness: Default::default(),
+                harness_command: String::new(),
             };
             bots::insert(tx, &bot)?;
             events::append(tx, None, EventKind::BotCreated, &to_json(&bot), now)?;
