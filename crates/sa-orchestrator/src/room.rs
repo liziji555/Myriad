@@ -480,12 +480,17 @@ async fn owe_unread(
             return;
         }
     };
+    // 人说了新的话，之前为别的话排着的就不算了（见 Episode::restart）：只补最后一句。
+    let last_chat = earlier
+        .iter()
+        .rfind(|m| m.kind == MessageKind::Chat)
+        .map(|m| m.seq);
     for message in earlier.iter().filter(|m| m.seq <= upto) {
         // 人点名的话也一样：点了两个，人只停了其中一个，另一个还排着。
         // 没做完的定时任务由调度器重做，这里再补一次就做了两遍。
         let targets = match message.kind {
             MessageKind::Event => &message.mentions[..message.mentions.len().min(1)],
-            MessageKind::Chat => &message.mentions[..],
+            MessageKind::Chat if Some(message.seq) == last_chat => &message.mentions[..],
             _ => continue,
         };
         for target in targets {
@@ -946,6 +951,11 @@ impl Inbox for RoomInbox {
                 MessageKind::Routine | MessageKind::Event
                     if message.mentions.first() != Some(&self.bot_id) =>
                 {
+                    self.see(message.seq, waiting);
+                    continue;
+                }
+                // 上次没做完的定时任务：调度器在租约过期后会重做这一次，这里看了就做了两遍。
+                MessageKind::Routine if message.created_at < self.shared.started_at => {
                     self.see(message.seq, waiting);
                     continue;
                 }
