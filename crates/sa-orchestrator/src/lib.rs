@@ -308,13 +308,14 @@ impl Orchestrator {
                 last.sender == Sender::User
                     && matches!(last.kind, MessageKind::Chat | MessageKind::Event)
             });
-            // 最近有交给某个 Bot 的外面来的事：后面有别的 Bot 说过话也可能还没轮到它，
+            // 最近有交给某个 Bot 的外面来的事、人点了名的话：后面有别的 Bot 说过话也可能还没轮到它，
             // 叫醒房间按各个 Bot 自己看到了哪里查一遍（见 room::owe_unread）。
             // 没做完的定时任务不在这里补：调度器会在租约过期后重做这一次。
-            let targeted = page
-                .messages
-                .iter()
-                .any(|message| message.kind == MessageKind::Event && !message.mentions.is_empty());
+            let targeted = page.messages.iter().any(|message| {
+                message.sender == Sender::User
+                    && matches!(message.kind, MessageKind::Event | MessageKind::Chat)
+                    && !message.mentions.is_empty()
+            });
             let waiting = waiting || targeted;
             if waiting {
                 self.wake(&room.id);
