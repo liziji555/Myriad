@@ -76,6 +76,10 @@ pub fn router(state: AppState) -> Router {
             get(routes::list_messages).post(routes::post_message),
         )
         .route("/rooms/{room_id}/stop", post(routes::stop))
+        .route(
+            "/rooms/{room_id}/bots/{bot_id}/stop",
+            post(routes::stop_bot),
+        )
         .route("/rooms/{room_id}/rules", get(routes::list_rules))
         .route("/rules/{rule_id}", delete(routes::delete_rule))
         .route(

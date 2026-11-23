@@ -24,11 +24,22 @@ pub(crate) struct Job {
     pub hop: u32,
 }
 
+/// `ask` 同意了、话还在发的一次交接。发出去了交给 [`Episode::deliver`]，没发出去交给 [`Episode::cancel`]。
+#[derive(Debug, Clone)]
+pub(crate) struct Pending {
+    pub job: Job,
+    ticket: u64,
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct Episode {
     /// 这一轮里已经开始的 Bot 发言次数。
     turns: usize,
     queue: VecDeque<Job>,
+    /// 已经同意、话还在发的 `ask_bot`：算进上限，发出去了才排队（免得对方先开始、看不到这句话）。
+    /// 发的时候对方被停下、或者这一轮被重新开始了，就从这里拿掉，发出去了也不再排队。
+    pending: Vec<(u64, BotId)>,
+    tickets: u64,
     /// 有定时任务、外面来的事等着它看的 Bot。这些事只有它看得到，所以这一趟欠着它的：
     /// 人说了新的话、又来了别的事都不会把它挤掉，排着队的说完了就轮到它。
     owed: VecDeque<BotId>,
@@ -39,15 +50,32 @@ pub(crate) struct Episode {
 }
 
 impl Episode {
-    /// 人说了新的话：之前排着的都不算了，重新记账，由 `first` 来接。欠着的还欠着。
-    pub fn restart(&mut self, first: Option<Job>) {
+    /// 人说了新的话：之前排着的都不算了，重新记账，由 `first` 里的这些 Bot 来接（可以同时接）。
+    /// 欠着的还欠着。`running` 是这时还在说的 Bot 有几个：它们照样在说，算在这一轮的次数里。
+    pub fn restart(&mut self, first: Vec<Job>, running: usize) {
         let mut owed = std::mem::take(&mut self.owed);
-        owed.retain(|bot_id| first.as_ref().is_none_or(|job| &job.bot_id != bot_id));
+        owed.retain(|bot_id| !first.iter().any(|job| &job.bot_id == bot_id));
         *self = Self {
             owed,
+            turns: running,
+            tickets: self.tickets,
             ..Self::default()
         };
         self.queue.extend(first);
+    }
+
+    /// 让 `job` 排上队（它该说的话还没看到）。已经排着的不重复排。
+    pub fn push(&mut self, job: Job) {
+        if !self.queue.iter().any(|queued| queued.bot_id == job.bot_id) {
+            self.queue.push_back(job);
+        }
+    }
+
+    /// 这个 Bot 排着的、欠着的都不算了（人点了它的停止）。
+    pub fn drop_bot(&mut self, bot_id: &BotId) {
+        self.queue.retain(|job| &job.bot_id != bot_id);
+        self.owed.retain(|owed| owed != bot_id);
+        self.pending.retain(|(_, to)| to != bot_id);
     }
 
     /// 有一件定时任务或者外面来的事是交给 `bot_id` 的：记着要让它说一次。已经记着、或者它本来就排着队的不重复记。
@@ -61,22 +89,27 @@ impl Episode {
         }
     }
 
-    /// 取下一个该说话的 Bot，并记一次发言。
-    /// 正在说话的 Bot 读到了人说的新话：上限重新算（它这一次发言算新一轮的第一次），已经排上队的照旧。
-    pub fn renew(&mut self) {
-        self.turns = 1;
+    /// 正在说话的 Bot 读到了人说的新话：上限重新算（正在说的这 `running` 个算新一轮的前几次），已经排上队的照旧。
+    pub fn renew(&mut self, running: usize) {
+        self.turns = running.max(1);
         self.pairs.clear();
         self.recent.clear();
     }
 
-    pub fn next(&mut self) -> Option<Job> {
-        if let Some(job) = self.queue.pop_front() {
+    /// 取下一个该说话的 Bot，并记一次发言。`running` 里的 Bot 正在说，轮不到它们：它们排着的留着，等它们说完。
+    pub fn next(&mut self, running: &[BotId]) -> Option<Job> {
+        let free = |bot_id: &BotId| !running.contains(bot_id);
+        if let Some(index) = self.queue.iter().position(|job| free(&job.bot_id)) {
             self.turns += 1;
-            return Some(job);
+            return self.queue.remove(index);
         }
-        // 排着队的都说完了，轮到欠着的。它看的是另一件事：算新的一轮。
-        let bot_id = self.owed.pop_front()?;
-        self.renew();
+        // 排着队的都说完了（或者都在说），轮到欠着的。它看的是另一件事：算新的一轮。
+        if !self.queue.is_empty() {
+            return None;
+        }
+        let index = self.owed.iter().position(free)?;
+        let bot_id = self.owed.remove(index)?;
+        self.renew(running.len() + 1);
         Some(Job { bot_id, hop: 0 })
     }
 
@@ -89,13 +122,12 @@ impl Episode {
     pub fn clear_queue(&mut self) {
         self.owed.clear();
         self.queue.clear();
+        self.pending.clear();
     }
 
-    /// 撤回一次排队（话没发出去）。
-    pub fn cancel(&mut self, job: &Job) {
-        if let Some(index) = self.queue.iter().rposition(|queued| queued == job) {
-            self.queue.remove(index);
-        }
+    /// `ask` 同意的那句话没发出去：不排队，也不占上限。
+    pub fn cancel(&mut self, pending: &Pending) {
+        self.pending.retain(|(ticket, _)| *ticket != pending.ticket);
     }
 
     /// 记下一条 Bot 说过的话。
@@ -117,8 +149,8 @@ impl Episode {
         hop: u32,
         to: &BotId,
         message: &str,
-    ) -> Result<Job, String> {
-        if self.turns + self.queue.len() >= MAX_BOT_TURNS {
+    ) -> Result<Pending, String> {
+        if self.turns + self.queue.len() + self.pending.len() >= MAX_BOT_TURNS {
             return Err(format!(
                 "这一轮里 Bot 已经发言 {MAX_BOT_TURNS} 次，到上限了，不能再找别的 Bot。请直接把目前的情况告诉用户。"
             ));
@@ -156,8 +188,22 @@ impl Episode {
             bot_id: to.clone(),
             hop: hop + 1,
         };
-        self.queue.push_back(job.clone());
-        Ok(job)
+        self.tickets += 1;
+        self.pending.push((self.tickets, to.clone()));
+        Ok(Pending {
+            job,
+            ticket: self.tickets,
+        })
+    }
+
+    /// `ask` 同意的那句话发出去了：对方排上队。已经排着的不重复排，那一轮里它会看到这句话。
+    /// 发的时候它被停下了、或者人说了新的话让这一轮重新开始了，就不再排。
+    pub fn deliver(&mut self, pending: Pending) {
+        let before = self.pending.len();
+        self.pending.retain(|(ticket, _)| *ticket != pending.ticket);
+        if self.pending.len() < before {
+            self.push(pending.job);
+        }
     }
 }
 
@@ -196,30 +242,61 @@ mod tests {
 
     fn started(first: &str) -> Episode {
         let mut episode = Episode::default();
-        episode.restart(Some(Job {
-            bot_id: bot(first),
-            hop: 0,
-        }));
-        assert_eq!(episode.next().unwrap().bot_id, bot(first));
+        episode.restart(
+            vec![Job {
+                bot_id: bot(first),
+                hop: 0,
+            }],
+            0,
+        );
+        assert_eq!(episode.next(&[]).unwrap().bot_id, bot(first));
         episode
     }
 
     #[test]
     fn asks_queue_the_other_bot_one_hop_further() {
         let mut episode = started("a");
-        let job = episode
+        let pending = episode
             .ask(&bot("a"), 0, &bot("b"), "帮我看看这个")
             .unwrap();
         assert_eq!(
-            job,
+            pending.job,
             Job {
                 bot_id: bot("b"),
                 hop: 1
             }
         );
+        // 话发出去之前不排队：对方开始时一定看得到这句话。
+        assert_eq!(episode.queued(), []);
+        assert_eq!(episode.next(&[]), None);
+        episode.deliver(pending.clone());
         assert_eq!(episode.queued(), [bot("b")]);
-        assert_eq!(episode.next(), Some(job));
-        assert_eq!(episode.next(), None);
+        assert_eq!(episode.next(&[]), Some(pending.job));
+        assert_eq!(episode.next(&[]), None);
+    }
+
+    #[test]
+    fn a_handoff_still_being_posted_is_dropped_by_stop_and_restart() {
+        // 发的时候对方被停下了。
+        let mut episode = started("a");
+        let pending = episode.ask(&bot("a"), 0, &bot("b"), "第一件").unwrap();
+        episode.drop_bot(&bot("b"));
+        episode.deliver(pending);
+        assert_eq!(episode.queued(), []);
+        // 整个房间停下了。
+        let pending = episode.ask(&bot("a"), 0, &bot("c"), "第二件").unwrap();
+        episode.clear_queue();
+        episode.deliver(pending);
+        assert_eq!(episode.queued(), []);
+        // 人说了新的话，这一轮重新开始。
+        let pending = episode.ask(&bot("a"), 0, &bot("d"), "第三件").unwrap();
+        episode.restart(vec![], 0);
+        episode.deliver(pending);
+        assert_eq!(episode.queued(), []);
+        // 没发出去的不再占上限。
+        let pending = episode.ask(&bot("a"), 0, &bot("e"), "第四件").unwrap();
+        episode.cancel(&pending);
+        assert!(episode.pending.is_empty());
     }
 
     #[test]
@@ -228,11 +305,11 @@ mod tests {
         episode
             .ask(&bot("a"), 0, &bot("b"), "辛苦看一下第一版")
             .unwrap();
-        episode.next();
+        episode.next(&[]);
         episode
             .ask(&bot("b"), 1, &bot("a"), "看过了，你再确认下细节")
             .unwrap();
-        episode.next();
+        episode.next(&[]);
         let error = episode
             .ask(&bot("a"), 2, &bot("b"), "好的，那再麻烦你一次")
             .unwrap_err();
@@ -242,7 +319,7 @@ mod tests {
         episode
             .ask(&bot("a"), 2, &bot("c"), "你来看看结论对不对")
             .unwrap();
-        episode.next();
+        episode.next(&[]);
         let error = episode
             .ask(&bot("c"), 3, &bot("d"), "再转给你确认一遍")
             .unwrap_err();
@@ -260,7 +337,7 @@ mod tests {
             match episode.ask(&from, 0, &to, &format!("第 {index} 件不同的事情")) {
                 Ok(_) => {
                     asked += 1;
-                    episode.next();
+                    episode.next(&[]);
                 }
                 Err(error) => {
                     assert!(error.contains("发言 6 次"), "{error}");
@@ -295,9 +372,10 @@ mod tests {
             .ask(&bot("a"), 0, &bot("b"), "我已经检查过了，没有问题！")
             .unwrap_err();
         assert!(error.contains("几乎一样"), "{error}");
-        episode
+        let job = episode
             .ask(&bot("a"), 0, &bot("b"), "请你检查第二个文件的边界情况")
             .unwrap();
+        episode.deliver(job);
         // 被拒绝的不占名额。
         assert_eq!(episode.queued(), [bot("b")]);
     }
@@ -306,17 +384,20 @@ mod tests {
     fn a_new_human_message_starts_the_count_again() {
         let mut episode = started("a");
         episode.ask(&bot("a"), 0, &bot("b"), "第一件事").unwrap();
-        episode.restart(Some(Job {
-            bot_id: bot("c"),
-            hop: 0,
-        }));
+        episode.restart(
+            vec![Job {
+                bot_id: bot("c"),
+                hop: 0,
+            }],
+            0,
+        );
         // 之前排着的 b 不再说话。
         assert_eq!(episode.queued(), [bot("c")]);
-        episode.next();
+        episode.next(&[]);
         episode.ask(&bot("c"), 0, &bot("b"), "第一件事").unwrap();
 
         episode.clear_queue();
-        assert_eq!(episode.next(), None);
+        assert_eq!(episode.next(&[]), None);
     }
 
     #[test]
@@ -326,39 +407,46 @@ mod tests {
         episode.owe(bot("b"));
         episode.owe(bot("a"));
         assert_eq!(episode.queued(), [bot("a"), bot("b")]);
-        assert_eq!(episode.next().unwrap().bot_id, bot("a"));
+        assert_eq!(episode.next(&[]).unwrap().bot_id, bot("a"));
 
         // a 说话的时候人说了新的话，由 c 来接；又来了一件没人要看的事。b 还欠着。
-        episode.restart(Some(Job {
-            bot_id: bot("c"),
-            hop: 0,
-        }));
-        episode.restart(None);
+        episode.restart(
+            vec![Job {
+                bot_id: bot("c"),
+                hop: 0,
+            }],
+            0,
+        );
+        episode.restart(vec![], 0);
         assert_eq!(episode.queued(), [bot("b")]);
         // 人点名的正好是欠着的那个：只说一次。
-        episode.restart(Some(Job {
-            bot_id: bot("b"),
-            hop: 0,
-        }));
+        episode.restart(
+            vec![Job {
+                bot_id: bot("b"),
+                hop: 0,
+            }],
+            0,
+        );
         episode.owe(bot("b"));
         assert_eq!(episode.queued(), [bot("b")]);
-        assert_eq!(episode.next().unwrap().bot_id, bot("b"));
-        assert_eq!(episode.next(), None);
+        assert_eq!(episode.next(&[]).unwrap().bot_id, bot("b"));
+        assert_eq!(episode.next(&[]), None);
 
         // 排着队的先说，欠着的排在后面；轮到它时上限重新算。
         let mut episode = started("a");
         episode.owe(bot("d"));
-        episode.ask(&bot("a"), 0, &bot("b"), "看一下这个").unwrap();
+        let job = episode.ask(&bot("a"), 0, &bot("b"), "看一下这个").unwrap();
+        episode.deliver(job);
         assert_eq!(episode.queued(), [bot("b"), bot("d")]);
-        assert_eq!(episode.next().unwrap().bot_id, bot("b"));
-        let job = episode.next().unwrap();
+        assert_eq!(episode.next(&[]).unwrap().bot_id, bot("b"));
+        let job = episode.next(&[]).unwrap();
         assert_eq!((job.bot_id, job.hop), (bot("d"), 0));
         assert_eq!(episode.turns, 1);
 
         // 人点了停止：欠着的也不说了。
         episode.owe(bot("e"));
         episode.clear_queue();
-        assert_eq!(episode.next(), None);
+        assert_eq!(episode.next(&[]), None);
     }
 
     #[test]

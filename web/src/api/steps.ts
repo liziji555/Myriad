@@ -1,3 +1,5 @@
+import type { ToolStep } from "./types";
+
 /** 一步的结果默认只露出开头这么多行、这么多字，其余的点「查看完整」再看。 */
 export const PREVIEW_LINES = 4;
 export const PREVIEW_CHARS = 400;
@@ -31,3 +33,13 @@ export function stepIcon(tool: string): StepIcon {
 export function stepKinds(tools: readonly string[]): StepIcon[] {
   return [...new Set(tools.map(stepIcon))];
 }
+
+/** 一步现在怎么样了，给人看的说法。 */
+export const STEP_LABEL: Record<ToolStep["state"], string> = {
+  waiting: "等你批准",
+  running: "进行中",
+  ok: "完成",
+  error: "失败",
+  cancelled: "已停止",
+  denied: "没有批准",
+};

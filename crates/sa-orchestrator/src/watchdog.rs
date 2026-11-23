@@ -121,7 +121,7 @@ impl Orchestrator {
             let rooms = self.rooms.lock().unwrap();
             rooms
                 .iter()
-                .filter(|(_, handle)| handle.link.current.lock().unwrap().is_some())
+                .filter(|(_, handle)| handle.link.busy())
                 .map(|(id, _)| id.clone())
                 .collect()
         };

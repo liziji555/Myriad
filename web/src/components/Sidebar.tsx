@@ -10,6 +10,7 @@ export type RoomState = "busy" | "warn" | "idle";
 
 /** 左栏里能直接打开的面板页。 */
 const NAV: readonly { tab: PanelTab; label: string; icon: IconName }[] = [
+  { tab: "execution", label: "执行", icon: "graph" },
   { tab: "tasks", label: "任务", icon: "tasks" },
   { tab: "routines", label: "定时任务", icon: "clock" },
   { tab: "members", label: "队员和成员", icon: "users" },

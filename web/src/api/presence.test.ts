@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { RoomChat } from "./chat";
-import { presenceOf, presenceSummary } from "./presence";
+import { speakersOf, presenceOf, presenceSummary } from "./presence";
 import type { Bot, Message, Task, ToolStep } from "./types";
 
 const ROOM = "room_1";
@@ -46,7 +46,7 @@ const chat = (messages: Message[], queued: string[] = []): RoomChat => ({
   messages,
   hasMore: false,
   loaded: true,
-  activity: { room_id: ROOM, speaking: null, queued, routing: false, handled_seq: 0 },
+  activity: { room_id: ROOM, speaking: null, speakers: [], queued, routing: false, handled_seq: 0 },
 });
 
 describe("presenceOf", () => {
@@ -141,5 +141,14 @@ describe("presenceOf", () => {
     ]);
     expect(presenceSummary(rows)).toBe("2 件事等你");
     expect(presenceSummary(rows.slice(2))).toBe("1 个 Bot 在忙");
+  });
+});
+
+describe("speakersOf", () => {
+  const base = { room_id: ROOM, queued: [], routing: false, handled_seq: 0 };
+  it("看 speakers；旧版服务只有 speaking 时退回它", () => {
+    expect(speakersOf({ ...base, speaking: "bot_1", speakers: ["bot_1", "bot_2"] })).toEqual(["bot_1", "bot_2"]);
+    expect(speakersOf({ ...base, speaking: "bot_1" } as never)).toEqual(["bot_1"]);
+    expect(speakersOf(undefined)).toEqual([]);
   });
 });

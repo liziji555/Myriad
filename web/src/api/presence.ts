@@ -1,5 +1,12 @@
 import type { RoomChat } from "./chat";
-import type { Bot, BotId, Message, MessageId, Task, TaskId } from "./types";
+import type { Bot, BotId, Message, MessageId, RoomActivity, Task, TaskId } from "./types";
+
+/** 房间里正在说话的那几个 Bot。旧版服务只报 `speaking` 一个。 */
+export function speakersOf(activity: RoomActivity | null | undefined): BotId[] {
+  if (!activity) return [];
+  if (activity.speakers?.length) return activity.speakers;
+  return activity.speaking ? [activity.speaking] : [];
+}
 
 /** 一个 Bot 此刻在做什么。越靠前越需要人看一眼。 */
 export type PresenceState = "approval" | "tool" | "writing" | "working" | "asking" | "queued" | "idle" | "off";
