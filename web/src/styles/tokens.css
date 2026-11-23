@@ -1,4 +1,8 @@
-/* 设计变量。间距 4px 基准、紧凑字号、细边框，思路参考 Lancer（MIT）的 tokens.css。 */
+/*
+ * 设计变量。
+ * 间距 4px 基准、紧凑字号、细边框、颜色只用来表示状态：思路来自 Lancer（MIT）。
+ * 暖色的纸面、浮起来的卡片、浅色和深色各一套完整的语义色：思路来自 ProkBot Plus（只借思路，没有用它的代码）。
+ */
 :root {
   color-scheme: light dark;
 
@@ -12,6 +16,7 @@
   --sa-radius-sm: 6px;
   --sa-radius-md: 8px;
   --sa-radius-lg: 12px;
+  --sa-radius-xl: 18px;
   --sa-radius-pill: 999px;
 
   --sa-text-xs: 11px;
@@ -22,35 +27,65 @@
   --sa-font: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
   --sa-font-mono: ui-monospace, "Cascadia Code", Consolas, monospace;
 
-  --sa-bg: #ffffff;
-  --sa-bg-side: #f6f6f4;
-  --sa-fg: #1c1c1a;
-  --sa-accent: #2b6fd6;
-  --sa-ok: #2e9d5b;
-  --sa-warn: #c98a12;
-  --sa-danger: #cf4436;
+  /* 三层底色：侧边和顶栏最沉，主线居中，卡片和输入框浮在最上面。 */
+  --sa-bg: #fbfaf8;
+  --sa-bg-side: #f3f1ed;
+  --sa-bg-raised: #ffffff;
+  --sa-fg: #1f1d1a;
+  --sa-accent: #2f6bd8;
+  --sa-on-accent: #ffffff;
+  --sa-ok: #2b9a5a;
+  --sa-warn: #c07f0a;
+  --sa-danger: #cc4334;
+  --sa-shadow: 0 1px 2px rgb(31 29 26 / 6%), 0 8px 24px rgb(31 29 26 / 8%);
+  --sa-avatar-mix: 18%;
 
   --sa-fg-muted: color-mix(in srgb, var(--sa-fg) 62%, transparent);
-  --sa-fg-faint: color-mix(in srgb, var(--sa-fg) 40%, transparent);
+  --sa-fg-faint: color-mix(in srgb, var(--sa-fg) 50%, transparent);
   --sa-border: color-mix(in srgb, var(--sa-fg) 12%, transparent);
+  --sa-border-strong: color-mix(in srgb, var(--sa-fg) 22%, transparent);
   --sa-hover: color-mix(in srgb, var(--sa-fg) 6%, transparent);
   --sa-active: color-mix(in srgb, var(--sa-fg) 10%, transparent);
 
-  --sa-sidebar-width: 248px;
+  --sa-sidebar-width: 264px;
   --sa-panel-width: 360px;
+  /* 主线和输入框一样宽，左边对齐。 */
+  --sa-line-width: 820px;
   --sa-motion: 0.15s ease-out;
 
   --light-color: var(--sa-accent);
 }
 
+/* 明暗：默认跟着系统；人自己选了就照选的来（<html data-theme>）。 */
+:root[data-theme="light"] {
+  color-scheme: light;
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --sa-bg: #181716;
+  --sa-bg-side: #121110;
+  --sa-bg-raised: #222120;
+  --sa-fg: #ece9e4;
+  --sa-accent: #7fa9f5;
+  --sa-on-accent: #10192b;
+  --sa-ok: #5cc48a;
+  --sa-warn: #e2ad4b;
+  --sa-danger: #ee7a6c;
+  --sa-shadow: 0 1px 2px rgb(0 0 0 / 40%), 0 10px 28px rgb(0 0 0 / 36%);
+  --sa-avatar-mix: 26%;
+}
 @media (prefers-color-scheme: dark) {
-  :root {
-    --sa-bg: #1b1b1a;
-    --sa-bg-side: #151514;
-    --sa-fg: #ececea;
-    --sa-accent: #70a7f7;
-    --sa-ok: #57c785;
-    --sa-warn: #e0ad45;
-    --sa-danger: #ef7566;
+  :root:not([data-theme="light"]) {
+    --sa-bg: #181716;
+    --sa-bg-side: #121110;
+    --sa-bg-raised: #222120;
+    --sa-fg: #ece9e4;
+    --sa-accent: #7fa9f5;
+    --sa-on-accent: #10192b;
+    --sa-ok: #5cc48a;
+    --sa-warn: #e2ad4b;
+    --sa-danger: #ee7a6c;
+    --sa-shadow: 0 1px 2px rgb(0 0 0 / 40%), 0 10px 28px rgb(0 0 0 / 36%);
+    --sa-avatar-mix: 26%;
   }
 }

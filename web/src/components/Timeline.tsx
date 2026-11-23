@@ -1,6 +1,7 @@
 import { approvalChoices, type ApprovalChoice } from "../api/approvals";
+import { chainParts, type ChainPart } from "../api/chain";
 import { taskDecision } from "../api/taskNotes";
-import { outputPreview } from "../api/steps";
+import { outputPreview, stepIcon, stepKinds } from "../api/steps";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { RoomChat } from "../api/chat";
 import { safeUrl, sourceName, splitEvent } from "../api/links";
@@ -9,6 +10,8 @@ import { isLatestDelivery, type TaskBoard } from "../api/tasks";
 import type { TaskActions } from "../api/useWorkspace";
 import type { ApprovalDecision, ApprovalId, Bot, Message, Task, TaskId, ToolStep } from "../api/types";
 import { Artifacts, StateBadge, TaskActionBar, deliveryHeading } from "./TaskCards";
+import { BotAvatar } from "./BotAvatar";
+import { Icon } from "./Icon";
 import { splitMentions } from "./mentions";
 
 type Decide = (id: ApprovalId, decision: ApprovalDecision) => Promise<void>;
@@ -105,6 +108,11 @@ export function Timeline({
   }, [last?.id, last?.sender.kind, last?.kind]);
 
   const triggers = useMemo(() => shownTriggers(messages), [messages]);
+  // 开任务、做的过程、交结果挨在一起时连成一串，看得出哪个是哪个引出来的。
+  const chain = useMemo(
+    () => chainParts(messages.filter((message) => message.kind !== "routine" || triggers.has(message.id))),
+    [messages, triggers],
+  );
 
   const loadOlder = async () => {
     setLoadingOlder(true);
@@ -184,6 +192,7 @@ export function Timeline({
                 key={message.id}
                 message={message}
                 task={task}
+                chain={chain.get(message.id)}
                 latest={message.kind === "delivery" && isLatestDelivery(messages, message)}
                 bots={bots}
                 members={members}
@@ -199,6 +208,7 @@ export function Timeline({
               message={message}
               bots={bots}
               onDecide={onDecide}
+              chain={chain.get(message.id)}
               work={
                 message.kind === "run"
                   ? {
@@ -272,6 +282,41 @@ function EventItem({ message }: { message: Message }) {
   );
 }
 
+/**
+ * 主线上的节点：谁说的、谁做的。Bot 是它自己那个颜色的头像，人是「你」，
+ * 从 Telegram 进来的话用那边那个人名字的第一个字。
+ */
+function Node({
+  message,
+  bots,
+  name,
+  asking = false,
+}: {
+  message: Message;
+  bots: readonly Bot[];
+  name: string;
+  /** 这条消息正等着人批准。 */
+  asking?: boolean;
+}) {
+  const { sender } = message;
+  if (sender.kind === "user") {
+    return (
+      <span className="sa-avatar sa-line-node" data-who="user" aria-hidden="true">
+        {message.origin ? [...name.trim()][0] ?? "·" : "你"}
+      </span>
+    );
+  }
+  const bot = bots.find((candidate) => candidate.id === sender.bot_id);
+  return (
+    <BotAvatar
+      className="sa-line-node"
+      id={sender.bot_id}
+      name={bot?.name ?? name}
+      state={message.state !== "streaming" ? undefined : asking ? "approval" : "streaming"}
+    />
+  );
+}
+
 /** 任务的运行过程那条消息多出来的东西：是哪个任务的、能停。 */
 interface Work {
   title: string | undefined;
@@ -284,6 +329,7 @@ interface Work {
 function TaskMessage({
   message,
   task,
+  chain,
   latest,
   bots,
   members,
@@ -292,6 +338,7 @@ function TaskMessage({
 }: {
   message: Message;
   task: Task | undefined;
+  chain: ChainPart | undefined;
   latest: boolean;
   bots: readonly Bot[];
   members: readonly Bot[];
@@ -312,7 +359,14 @@ function TaskMessage({
   // 这张卡上要不要放操作：最新的交付卡，而且任务正等着人（验收、回答、卡住）。
   const actionable = delivery && latest && task && ["review", "waiting", "blocked"].includes(task.state);
   return (
-    <li className="sa-msg" data-sender={sender.kind} data-kind={message.kind}>
+    <li
+      className="sa-msg"
+      data-message-id={message.id}
+      data-sender={sender.kind}
+      data-kind={message.kind}
+      data-chain={chain}
+    >
+      <Node message={message} bots={bots} name={name} />
       <div className="sa-msg-head">
         <span className="sa-msg-name">{name}</span>
         {origin && <span className="sa-tag">{sourceName(origin.source)}</span>}
@@ -353,17 +407,21 @@ function MessageItem({
   bots,
   onDecide,
   work,
+  chain,
 }: {
   message: Message;
   bots: readonly Bot[];
   onDecide: Decide;
   work?: Work;
+  chain?: ChainPart;
 }) {
   const [stopping, setStopping] = useState(false);
   const { sender, state } = message;
   const name =
     sender.kind === "user" ? "你" : (bots.find((bot) => bot.id === sender.bot_id)?.name ?? "Bot");
   const waiting = state === "streaming" && message.content === "" && message.steps.length === 0;
+  // 这条消息里有一步在等人批准：它不是在写，是在等你。
+  const asking = message.steps.some((step) => step.state === "waiting");
   const mentioned = message.mentions.flatMap((id) => bots.find((bot) => bot.id === id)?.name ?? []);
   return (
     <li
@@ -372,9 +430,19 @@ function MessageItem({
       data-sender={sender.kind}
       data-state={state}
       data-kind={message.kind}
+      data-chain={chain}
     >
+      <Node message={message} bots={bots} name={name} asking={asking} />
       <div className="sa-msg-head">
         <span className="sa-msg-name">{name}</span>
+        {state === "streaming" &&
+          (asking ? (
+            <span className="sa-live" data-tone="warn">
+              等你批准
+            </span>
+          ) : (
+            <span className="sa-live">{work ? "正在做" : "正在回复"}</span>
+          ))}
         <time className="sa-msg-time" dateTime={new Date(message.created_at).toISOString()}>
           {formatTime(message.created_at)}
         </time>
@@ -417,7 +485,16 @@ function MessageItem({
           {state === "streaming" && <span className="sa-caret" aria-hidden="true" />}
         </div>
       )}
-      {waiting && <p className="sa-msg-note">{work ? "正在开工…" : "正在回复…"}</p>}
+      {waiting && (
+        <p className="sa-msg-note sa-thinking">
+          <span className="sa-dots" aria-hidden="true">
+            <i />
+            <i />
+            <i />
+          </span>
+          {work ? "正在开工…" : "正在回复…"}
+        </p>
+      )}
       {state === "cancelled" && <p className="sa-msg-note">已停止</p>}
       {state === "interrupted" && (
         <p className="sa-msg-note">
@@ -469,7 +546,14 @@ function Steps({ steps, onDecide }: { steps: readonly ToolStep[]; onDecide: Deci
         onClick={() => setChosen(!open)}
       >
         <span className="sa-steps-arrow" aria-hidden="true" />
-        {summary}
+        <span>{summary}</span>
+        {!open && (
+          <span className="sa-steps-kinds" aria-hidden="true">
+            {stepKinds(steps.map((step) => step.tool)).map((kind) => (
+              <Icon key={kind} name={kind} size={14} />
+            ))}
+          </span>
+        )}
       </button>
       {open && (
         <ul className="sa-steps" aria-label="工具调用">
@@ -488,11 +572,16 @@ function StepItem({ step, onDecide }: { step: ToolStep; onDecide: Decide }) {
   return (
     <li className="sa-step" data-state={step.state}>
       <div className="sa-step-line">
-        <span className="sa-step-dot" aria-hidden="true" />
+        <span className="sa-step-icon" aria-hidden="true">
+          <Icon name={stepIcon(step.tool)} size={14} />
+        </span>
         <span className="sa-step-title" title={step.title}>
           {step.title}
         </span>
-        <span className="sa-step-state">{STEP_LABEL[step.state]}</span>
+        <span className="sa-step-state">
+          <span className="sa-step-dot" aria-hidden="true" />
+          {STEP_LABEL[step.state]}
+        </span>
       </div>
       {preview && (
         <div className="sa-step-output">
@@ -547,6 +636,11 @@ function ApprovalCard({
 
   return (
     <div className="sa-approval" role="group" aria-label="需要你批准">
+      <div className="sa-approval-head">
+        <Icon name="alert" />
+        <span className="sa-approval-title">需要你批准</span>
+        <span className="sa-approval-expiry">{formatTime(expiresAt)} 前不处理按拒绝算</span>
+      </div>
       <p className="sa-approval-reason">{reason}</p>
       <div className="sa-approval-actions">
         {choices.map(({ decision, label, hint }) => (
@@ -562,7 +656,6 @@ function ApprovalCard({
             {sending === decision ? "正在提交…" : label}
           </button>
         ))}
-        <span className="sa-approval-expiry">{formatTime(expiresAt)} 前不处理按拒绝算</span>
       </div>
       {error && (
         <p className="sa-msg-error" role="alert">

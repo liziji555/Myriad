@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { clampPanelWidth, panelWidthAt, parseLayout, PANEL_DEFAULT, PANEL_MAX, PANEL_MIN } from "./layout";
 
 describe("layout", () => {
-  it("右栏的宽度不出范围", () => {
+  it("面板的宽度不出范围", () => {
     expect(clampPanelWidth(100)).toBe(PANEL_MIN);
     expect(clampPanelWidth(9000)).toBe(PANEL_MAX);
     expect(clampPanelWidth(371.6)).toBe(372);
@@ -16,16 +16,16 @@ describe("layout", () => {
   });
 
   it("记下来的摆法能读回来", () => {
-    const stored = JSON.stringify({ sidebarCollapsed: true, panelWidth: 400 });
-    expect(parseLayout(stored)).toEqual({ sidebarCollapsed: true, panelWidth: 400 });
+    const stored = JSON.stringify({ panelOpen: true, panelWidth: 400 });
+    expect(parseLayout(stored)).toEqual({ panelOpen: true, panelWidth: 400 });
   });
 
   it("读到看不懂的东西时用默认的", () => {
-    const fallback = { sidebarCollapsed: false, panelWidth: PANEL_DEFAULT };
+    const fallback = { panelOpen: false, panelWidth: PANEL_DEFAULT };
     for (const stored of [null, "", "不是 JSON", "null", "[1]", '"x"']) {
       expect(parseLayout(stored)).toEqual(fallback);
     }
-    expect(parseLayout('{"sidebarCollapsed":"yes","panelWidth":"宽"}')).toEqual(fallback);
-    expect(parseLayout('{"panelWidth":5000}')).toEqual({ sidebarCollapsed: false, panelWidth: PANEL_MAX });
+    expect(parseLayout('{"panelOpen":"yes","panelWidth":"宽"}')).toEqual(fallback);
+    expect(parseLayout('{"panelWidth":5000}')).toEqual({ panelOpen: false, panelWidth: PANEL_MAX });
   });
 });

@@ -1,13 +1,13 @@
-/** 界面的摆法：左栏收没收起、右栏多宽。记在浏览器里，刷新之后还是这样。 */
+/** 界面的摆法：右边的面板开没开、多宽。记在浏览器里，刷新之后还是这样。 */
 export interface Layout {
-  sidebarCollapsed: boolean;
+  panelOpen: boolean;
   panelWidth: number;
 }
 
 export const PANEL_MIN = 320;
 export const PANEL_MAX = 420;
 export const PANEL_DEFAULT = 360;
-/** 用方向键调右栏宽度时一次挪多少。 */
+/** 用方向键调面板宽度时一次挪多少。 */
 export const PANEL_STEP = 16;
 
 const KEY = "sa.layout";
@@ -19,14 +19,14 @@ export function clampPanelWidth(width: number): number {
 
 /** 存着的东西不是自己写的那样（被别的版本、别的程序改过）时用默认的，不报错。 */
 export function parseLayout(stored: string | null): Layout {
-  const fallback: Layout = { sidebarCollapsed: false, panelWidth: PANEL_DEFAULT };
+  const fallback: Layout = { panelOpen: false, panelWidth: PANEL_DEFAULT };
   if (!stored) return fallback;
   try {
     const value: unknown = JSON.parse(stored);
     if (typeof value !== "object" || value === null) return fallback;
-    const { sidebarCollapsed, panelWidth } = value as Record<string, unknown>;
+    const { panelOpen, panelWidth } = value as Record<string, unknown>;
     return {
-      sidebarCollapsed: sidebarCollapsed === true,
+      panelOpen: panelOpen === true,
       panelWidth: typeof panelWidth === "number" ? clampPanelWidth(panelWidth) : PANEL_DEFAULT,
     };
   } catch {
@@ -50,7 +50,7 @@ export function saveLayout(layout: Layout): void {
   }
 }
 
-/** 拖动右栏左边的那条线：指针在窗口里的横坐标对应右栏多宽。 */
+/** 拖动面板左边的那条线：指针在窗口里的横坐标对应面板多宽。 */
 export function panelWidthAt(pointerX: number, windowWidth: number): number {
   return clampPanelWidth(windowWidth - pointerX);
 }

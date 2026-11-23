@@ -1,7 +1,12 @@
-import { useEffect, useRef, useState, type KeyboardEvent } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
 import { loadDraft, saveDraft, withExample } from "../api/drafts";
 import { groupCommands, matchCommands, slashQuery, type SlashCommand } from "../api/slash";
 import type { Bot } from "../api/types";
+import { BotAvatar } from "./BotAvatar";
+import { Icon } from "./Icon";
+
+/** 输入框最高长到这么高，再多就在里面滚。 */
+const MAX_INPUT_PX = 220;
 
 interface Props {
   /** 哪个房间的输入框。写了一半的话按房间记着。 */
@@ -75,6 +80,31 @@ export function Composer({
     );
     setSending(false);
   };
+
+  // 输入框跟着内容长高。
+  const fit = () => {
+    const el = input.current;
+    if (!el) return;
+    el.style.height = "auto";
+    const wanted = el.scrollHeight;
+    el.style.height = `${Math.min(wanted, MAX_INPUT_PX)}px`;
+    // 没到顶之前不出滚动条。
+    el.style.overflowY = wanted > MAX_INPUT_PX ? "auto" : "hidden";
+  };
+  useLayoutEffect(fit, [text]);
+  // 框变窄（面板打开、窗口缩小）时字会多折几行：宽度一变就重新量。
+  useEffect(() => {
+    const el = input.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    let width = el.clientWidth;
+    const observer = new ResizeObserver(() => {
+      if (el.clientWidth === width) return;
+      width = el.clientWidth;
+      fit();
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
 
   useEffect(() => {
     if (prefill === null) return;
@@ -155,91 +185,105 @@ export function Composer({
 
   return (
     <footer className="sa-composer">
-      {error && (
-        <p className="sa-composer-error" role="alert">
-          {error}
-        </p>
-      )}
-      {choice && (
-        <ul className="sa-mention-menu" role="listbox" aria-label="点名一个 Bot">
-          {options.map((bot) => (
-            <li
-              key={bot.id}
-              role="option"
-              aria-selected={bot.id === choice.id}
-              // 用 mousedown：点菜单时输入框不失去焦点。
-              onMouseDown={(event) => {
-                event.preventDefault();
-                complete(bot);
-              }}
-            >
-              <span className="sa-mention-name">@{bot.name}</span>
-              <span className="sa-mention-role">{bot.persona.split("\n")[0]}</span>
-            </li>
-          ))}
-        </ul>
-      )}
-      {command && (
-        <div className="sa-mention-menu" role="listbox" aria-label="命令">
-          {groupCommands(commandOptions).map(({ group, items }) => (
-            <div key={group} role="group" aria-label={group}>
-              <p className="sa-menu-group" aria-hidden="true">
-                {group}
-              </p>
-              {items.map((item) => (
-                <div
-                  key={item.id}
-                  className="sa-menu-item"
-                  role="option"
-                  aria-selected={item.id === command.id}
-                  onMouseDown={(event) => {
-                    event.preventDefault();
-                    runCommand(item);
-                  }}
-                >
-                  {item.title}
-                </div>
-              ))}
+      <div className="sa-composer-inner">
+        {error && (
+          <p className="sa-composer-error" role="alert">
+            {error}
+          </p>
+        )}
+        {choice && (
+          <ul className="sa-mention-menu" role="listbox" aria-label="点名一个 Bot">
+            {options.map((bot) => (
+              <li
+                key={bot.id}
+                role="option"
+                aria-selected={bot.id === choice.id}
+                // 用 mousedown：点菜单时输入框不失去焦点。
+                onMouseDown={(event) => {
+                  event.preventDefault();
+                  complete(bot);
+                }}
+              >
+                <BotAvatar id={bot.id} name={bot.name} />
+                <span className="sa-mention-name">@{bot.name}</span>
+                <span className="sa-mention-role">{bot.persona.split("\n")[0]}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+        {command && (
+          <div className="sa-mention-menu" role="listbox" aria-label="命令">
+            {groupCommands(commandOptions).map(({ group, items }) => (
+              <div key={group} role="group" aria-label={group}>
+                <p className="sa-menu-group" aria-hidden="true">
+                  {group}
+                </p>
+                {items.map((item) => (
+                  <div
+                    key={item.id}
+                    className="sa-menu-item"
+                    role="option"
+                    aria-selected={item.id === command.id}
+                    onMouseDown={(event) => {
+                      event.preventDefault();
+                      runCommand(item);
+                    }}
+                  >
+                    {item.title}
+                  </div>
+                ))}
+              </div>
+            ))}
+          </div>
+        )}
+        {noMatch && (
+          <p className="sa-mention-menu sa-menu-empty" role="status">
+            {slash === null ? "没有匹配的 Bot" : "没有匹配的命令"}，按 Esc 关掉
+          </p>
+        )}
+        <div className="sa-composer-box" data-disabled={disabledReason !== null}>
+          <textarea
+            ref={input}
+            rows={1}
+            value={text}
+            disabled={disabledReason !== null}
+            aria-label="输入消息"
+            placeholder={disabledReason ?? "说点什么，或者交代一件事…"}
+            onChange={(event) => {
+              setText(event.target.value);
+              setCaret(event.target.selectionStart);
+              setDismissed(false);
+              setPicked(0);
+            }}
+            onSelect={(event) => setCaret(event.currentTarget.selectionStart)}
+            onKeyDown={onKeyDown}
+          />
+          <div className="sa-composer-bar">
+            <p className="sa-composer-hint">
+              <kbd className="sa-kbd">@</kbd> 点名 <kbd className="sa-kbd">/</kbd> 命令{" "}
+              <kbd className="sa-kbd">Shift</kbd>
+              <kbd className="sa-kbd">回车</kbd> 换行
+            </p>
+            <div className="sa-composer-actions">
+              {replying && (
+                <button type="button" className="sa-stop" onClick={() => void run(onStop)}>
+                  <Icon name="stop" size={14} />
+                  停止
+                </button>
+              )}
+              <button
+                type="button"
+                className="sa-send"
+                disabled={!canSend}
+                aria-label={sending ? "发送中…" : "发送"}
+                title={sending ? "发送中…" : "发送（回车）"}
+                data-sending={sending}
+                onClick={() => void send()}
+              >
+                <Icon name="send" />
+              </button>
             </div>
-          ))}
-        </div>
-      )}
-      {noMatch && (
-        <p className="sa-mention-menu sa-menu-empty" role="status">
-          {slash === null ? "没有匹配的 Bot" : "没有匹配的命令"}，按 Esc 关掉
-        </p>
-      )}
-      <div className="sa-composer-row">
-        <textarea
-          ref={input}
-          rows={2}
-          value={text}
-          disabled={disabledReason !== null}
-          aria-label="输入消息"
-          placeholder={disabledReason ?? "发消息给 Bot。输入 @ 点名、/ 找命令，回车发送，Shift+回车换行"}
-          onChange={(event) => {
-            setText(event.target.value);
-            setCaret(event.target.selectionStart);
-            setDismissed(false);
-            setPicked(0);
-          }}
-          onSelect={(event) => setCaret(event.currentTarget.selectionStart)}
-          onKeyDown={onKeyDown}
-        />
-        <div className="sa-composer-actions">
-          {replying && (
-            <button type="button" className="sa-button sa-button-quiet" onClick={() => void run(onStop)}>
-              停止
-            </button>
-          )}
-          <button
-            type="button"
-            className="sa-button"
-            disabled={!canSend}
-            onClick={() => void send()}
-          >
-            {sending ? "发送中…" : "发送"}
-          </button>
+          </div>
         </div>
       </div>
     </footer>

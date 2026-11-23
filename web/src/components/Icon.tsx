@@ -1,0 +1,129 @@
+import type { ReactNode } from "react";
+
+export type IconName =
+  | "search"
+  | "panel"
+  | "tasks"
+  | "sun"
+  | "moon"
+  | "auto"
+  | "plus"
+  | "send"
+  | "stop"
+  | "alert"
+  | "read"
+  | "edit"
+  | "command"
+  | "git"
+  | "web"
+  | "bot"
+  | "plug"
+  | "tool";
+
+/** 16×16 的线条图标，颜色跟着文字走。 */
+const PATHS: Record<IconName, ReactNode> = {
+  search: (
+    <>
+      <circle cx="7" cy="7" r="4.25" />
+      <path d="m10.2 10.2 3.3 3.3" />
+    </>
+  ),
+  panel: (
+    <>
+      <rect x="2" y="3" width="12" height="10" rx="2.5" />
+      <path d="M10 3v10" />
+    </>
+  ),
+  tasks: (
+    <>
+      <path d="m2.5 4.5 1.2 1.2 2-2.2M2.5 10.5l1.2 1.2 2-2.2" />
+      <path d="M8.5 4.8h5M8.5 10.8h5" />
+    </>
+  ),
+  sun: (
+    <>
+      <circle cx="8" cy="8" r="2.75" />
+      <path d="M8 1.75v1.5M8 12.75v1.5M1.75 8h1.5M12.75 8h1.5M3.6 3.6l1.05 1.05M11.35 11.35l1.05 1.05M3.6 12.4l1.05-1.05M11.35 4.65l1.05-1.05" />
+    </>
+  ),
+  moon: <path d="M13.2 9.6A5.6 5.6 0 0 1 6.4 2.8a5.6 5.6 0 1 0 6.8 6.8Z" />,
+  auto: (
+    <>
+      <circle cx="8" cy="8" r="5.75" />
+      <path d="M8 2.25v11.5A5.75 5.75 0 0 0 8 2.25Z" fill="currentColor" stroke="none" />
+    </>
+  ),
+  plus: <path d="M8 3v10M3 8h10" />,
+  send: <path d="M8 13V3.5M3.75 7.5 8 3.25l4.25 4.25" />,
+  stop: <rect x="4.25" y="4.25" width="7.5" height="7.5" rx="1.5" fill="currentColor" stroke="none" />,
+  alert: (
+    <>
+      <path d="M8 2.3 14 13H2L8 2.3Z" />
+      <path d="M8 6.5v3M8 11.2v.1" />
+    </>
+  ),
+  read: (
+    <>
+      <path d="M4 2.5h5l3 3v8H4v-11Z" />
+      <path d="M9 2.5v3h3M6 8.5h4M6 11h4" />
+    </>
+  ),
+  edit: (
+    <>
+      <path d="m3 13 .6-2.8 6.9-6.9 2.2 2.2-6.9 6.9L3 13Z" />
+      <path d="m9.3 4.5 2.2 2.2" />
+    </>
+  ),
+  command: (
+    <>
+      <rect x="2" y="3" width="12" height="10" rx="2.5" />
+      <path d="m5 6.5 2 1.75-2 1.75M8.5 10.25h2.5" />
+    </>
+  ),
+  git: (
+    <>
+      <circle cx="4.5" cy="4" r="1.5" />
+      <circle cx="4.5" cy="12" r="1.5" />
+      <circle cx="11.5" cy="6" r="1.5" />
+      <path d="M4.5 5.5v5M11.5 7.5c0 2-2.5 2-4.5 2.2-1.4.2-2.5.5-2.5.8" />
+    </>
+  ),
+  web: (
+    <>
+      <circle cx="8" cy="8" r="5.75" />
+      <path d="M2.25 8h11.5M8 2.25c1.7 1.6 2.5 3.5 2.5 5.75S9.7 12.15 8 13.75C6.3 12.15 5.5 10.25 5.5 8S6.3 3.85 8 2.25Z" />
+    </>
+  ),
+  bot: (
+    <>
+      <rect x="3" y="5.5" width="10" height="7.5" rx="2.5" />
+      <path d="M8 5.5V3M6.25 9v.5M9.75 9v.5" />
+    </>
+  ),
+  plug: <path d="M6 2.5v3M10 2.5v3M4.5 5.5h7v2.25a3.5 3.5 0 0 1-7 0V5.5ZM8 11.25v2.25" />,
+  tool: (
+    <>
+      <circle cx="8" cy="8" r="1.75" />
+      <path d="M8 2.25v2M8 11.75v2M2.25 8h2M11.75 8h2" />
+    </>
+  ),
+};
+
+export function Icon({ name, size = 16 }: { name: IconName; size?: number }) {
+  return (
+    <svg
+      className="sa-icon"
+      width={size}
+      height={size}
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      {PATHS[name]}
+    </svg>
+  );
+}

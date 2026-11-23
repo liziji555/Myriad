@@ -1,5 +1,6 @@
 import { useEffect, useState, type FormEvent } from "react";
 import type { Bot, Room, RoomId } from "../api/types";
+import { BotAvatar } from "./BotAvatar";
 
 interface Props {
   rooms: readonly Room[];
@@ -11,7 +12,6 @@ interface Props {
   onCreateRoom(name: string): Promise<void>;
   /** 每加一就打开「新建房间」的输入框（命令面板里点的）。 */
   createSignal: number;
-  onOpenPalette(): void;
 }
 
 export function Sidebar({
@@ -23,7 +23,6 @@ export function Sidebar({
   onSelect,
   onCreateRoom,
   createSignal,
-  onOpenPalette,
 }: Props) {
   const [creating, setCreating] = useState(false);
   useEffect(() => {
@@ -54,9 +53,9 @@ export function Sidebar({
   };
 
   return (
-    <nav className="sa-sidebar" aria-label="导航">
+    <nav className="sa-sidebar" aria-label="房间列表">
       <header className="sa-sidebar-head">
-        <span className="sa-brand">苦乐</span>
+        <span className="sa-section-title">房间和 Bot</span>
         <button
           type="button"
           className="sa-icon-button"
@@ -67,11 +66,6 @@ export function Sidebar({
           +
         </button>
       </header>
-      <button type="button" className="sa-search" onClick={onOpenPalette}>
-        <span>搜索、跳转…</span>
-        <kbd className="sa-kbd">{/Mac|iPhone|iPad/.test(navigator.platform) ? "⌘ K" : "Ctrl K"}</kbd>
-      </button>
-
       <section className="sa-section">
         <h2 className="sa-section-title">房间</h2>
         {creating && (
@@ -118,7 +112,7 @@ export function Sidebar({
         <ul className="sa-list">
           {bots.map((bot) => (
             <li key={bot.id} className="sa-row sa-row-static">
-              <span className="sa-dot" data-state={bot.enabled ? "idle" : "off"} aria-hidden="true" />
+              <BotAvatar id={bot.id} name={bot.name} state={bot.enabled ? undefined : "off"} className="sa-row-avatar" />
               <span className="sa-row-label">{bot.name}</span>
               <span className="sa-row-meta">{bot.enabled ? "空闲" : "已停用"}</span>
             </li>
