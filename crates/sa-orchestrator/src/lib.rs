@@ -469,6 +469,20 @@ impl Orchestrator {
 /// 自定义的提示词里没有写 `{persona}`、`{team}` 时，这两段接在最后：换了提示词，协作规则也不会丢。
 ///
 /// `skills` 是这个 Bot 能用的技能那一段（没有就是空的），同样可以用 `{skills}` 指定放在哪。
+/// 房间有主 Agent 时接在系统提示词后面的规矩：主 Agent 只派活，成员做完自动交回。
+pub(crate) fn lead_rules(bot: &Bot, others: &[Bot], lead: Option<&BotId>) -> String {
+    let Some(lead) = lead else {
+        return String::new();
+    };
+    if &bot.id == lead {
+        return include_str!("../prompts/lead.md").to_string();
+    }
+    match others.iter().find(|other| &other.id == lead) {
+        Some(lead) => include_str!("../prompts/member.md").replace("{lead}", &lead.name),
+        None => String::new(),
+    }
+}
+
 pub(crate) fn render_prompt(
     settings: &Settings,
     bot: &Bot,

@@ -120,6 +120,7 @@ describe("isLatestDelivery", () => {
       content: "交了",
       mentions: [],
       hop: 0,
+      reply_to: [],
       kind: "delivery",
       task_id: taskId,
       steps: [],

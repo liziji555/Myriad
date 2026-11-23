@@ -5,7 +5,7 @@ use sa_protocol::{
 };
 
 const COLUMNS: &str =
-    "seq, id, room_id, sender_kind, sender_bot_id, content, steps_json, state, error, rev, created_at, updated_at, mentions_json, hop, kind, task_id, run_id, origin";
+    "seq, id, room_id, sender_kind, sender_bot_id, content, steps_json, state, error, rev, created_at, updated_at, mentions_json, hop, kind, task_id, run_id, origin, reply_to";
 
 /// 写入一条新消息，返回数据库分配的 `seq`。传入的 `message.seq` 被忽略。
 pub fn insert(conn: &Connection, message: &Message) -> Result<i64> {
@@ -15,8 +15,8 @@ pub fn insert(conn: &Connection, message: &Message) -> Result<i64> {
         Sender::Bot { bot_id } => ("bot", Some(bot_id.as_str()).filter(|id| !id.is_empty())),
     };
     conn.execute(
-        "INSERT INTO messages (id, room_id, sender_kind, sender_bot_id, content, steps_json, state, error, rev, created_at, updated_at, mentions_json, hop, kind, task_id, run_id, origin)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+        "INSERT INTO messages (id, room_id, sender_kind, sender_bot_id, content, steps_json, state, error, rev, created_at, updated_at, mentions_json, hop, kind, task_id, run_id, origin, reply_to)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
         params![
             message.id.as_str(),
             message.room_id.as_str(),
@@ -38,6 +38,7 @@ pub fn insert(conn: &Connection, message: &Message) -> Result<i64> {
                 .origin
                 .as_ref()
                 .map(|origin| serde_json::to_string(origin).expect("出处总能序列化成 JSON")),
+            serde_json::to_string(&message.reply_to).expect("消息 id 列表总能序列化成 JSON"),
         ],
     )?;
     Ok(conn.last_insert_rowid())
@@ -169,6 +170,7 @@ fn read_row(row: &Row<'_>) -> rusqlite::Result<Result<Message>> {
     let mentions_json: String = row.get(12)?;
     let kind: String = row.get(14)?;
     let origin_json: Option<String> = row.get(17)?;
+    let reply_to_json: String = row.get(18)?;
     let message = (|| {
         let sender = match (sender_kind.as_str(), sender_bot_id) {
             ("user", _) => Sender::User,
@@ -194,9 +196,12 @@ fn read_row(row: &Row<'_>) -> rusqlite::Result<Result<Message>> {
             .map(|json| serde_json::from_str(&json))
             .transpose()
             .map_err(|e| StoreError::Corrupt(format!("消息 {id} 的出处不是合法 JSON：{e}")))?;
-        Ok((sender, steps, state, mentions, kind, origin))
+        let reply_to = serde_json::from_str(&reply_to_json).map_err(|e| {
+            StoreError::Corrupt(format!("消息 {id} 回的是哪几条不是合法 JSON：{e}"))
+        })?;
+        Ok((sender, steps, state, mentions, kind, origin, reply_to))
     })();
-    let (sender, steps, state, mentions, kind, origin) = match message {
+    let (sender, steps, state, mentions, kind, origin, reply_to) = match message {
         Ok(parts) => parts,
         Err(e) => return Ok(Err(e)),
     };
@@ -208,6 +213,7 @@ fn read_row(row: &Row<'_>) -> rusqlite::Result<Result<Message>> {
         content: row.get(5)?,
         mentions,
         hop: row.get(13)?,
+        reply_to,
         kind,
         task_id: row.get::<_, Option<String>>(15)?.map(TaskId::from),
         run_id: row.get::<_, Option<String>>(16)?.map(RunId::from),
@@ -265,6 +271,7 @@ mod tests {
             content: content.into(),
             mentions: vec![],
             hop: 0,
+            reply_to: vec![],
             kind: MessageKind::Chat,
             task_id: None,
             run_id: None,

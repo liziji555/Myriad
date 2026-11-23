@@ -71,6 +71,7 @@ const message = (patch: Partial<Message>): Message => ({
   content: "",
   mentions: [],
   hop: 0,
+  reply_to: [],
   kind: "chat",
   steps: [],
   state: "complete",

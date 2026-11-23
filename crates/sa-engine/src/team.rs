@@ -542,6 +542,7 @@ mod tests {
                 "@Coder 帮我看看",
                 vec![coder.id.clone()],
                 1,
+                vec![],
             )
             .unwrap();
         assert_eq!(ask.state, MessageState::Complete);

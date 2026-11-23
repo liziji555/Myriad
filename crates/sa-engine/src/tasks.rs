@@ -639,6 +639,7 @@ fn card(
         content,
         mentions: vec![],
         hop: 0,
+        reply_to: vec![],
         kind,
         task_id: Some(task.id.clone()),
         run_id,

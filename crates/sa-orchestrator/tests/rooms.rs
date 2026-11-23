@@ -2470,3 +2470,179 @@ async fn in_blind_mode_a_handoff_is_seen_but_the_answers_stay_hidden() {
     );
     t.rig.orchestrator.shutdown().await;
 }
+
+fn asks(calls: &[(&str, &str, &str)]) -> MockReply {
+    let calls: Vec<(String, String)> = calls
+        .iter()
+        .map(|(id, bot, message)| {
+            let arguments = serde_json::json!({ "bot": bot, "message": message }).to_string();
+            (id.to_string(), arguments)
+        })
+        .collect();
+    let calls: Vec<(&str, &str, &str)> = calls
+        .iter()
+        .map(|(id, arguments)| (id.as_str(), "ask_bot", arguments.as_str()))
+        .collect();
+    MockReply::tool_calls("", &calls)
+}
+
+fn said(messages: &[Message], text: &str) -> Message {
+    messages
+        .iter()
+        .find(|m| m.content.contains(text))
+        .unwrap_or_else(|| panic!("没有「{text}」：{messages:#?}"))
+        .clone()
+}
+
+/// 主 Agent 一次派给两个成员，两个都做完后它被叫起来，一次看到两份结果。每条消息都记着在回哪条。
+#[tokio::test]
+async fn the_lead_hands_out_work_and_is_woken_once_every_member_has_reported() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = team(dir.path(), vec![], vec![]);
+    t.discuss(sa_protocol::Discussion::Lead, 2);
+    let host = t.script(
+        "助手",
+        vec![
+            asks(&[
+                ("h1", "Coder", "写登录页"),
+                ("h2", "Reviewer", "列出安全要点"),
+            ]),
+            MockReply::text("已经派给 Coder 和 Reviewer"),
+            MockReply::text("汇总：登录页写好了，安全要点也列了"),
+        ],
+    );
+    t.script("Coder", vec![MockReply::text("登录页写好了")]);
+    t.script("Reviewer", vec![MockReply::text("安全要点三条")]);
+    let question = t.rig.say("做一个登录页").await;
+    let all = t.rig.settled(7).await;
+    t.rig.until_idle().await;
+
+    let first = said(&all, "已经派给");
+    assert_eq!(first.reply_to, vec![question.id.clone()]);
+    let to_coder = said(&all, "写登录页");
+    let to_reviewer = said(&all, "列出安全要点");
+    assert_eq!(to_coder.reply_to, vec![first.id.clone()]);
+    assert_eq!(to_reviewer.reply_to, vec![first.id.clone()]);
+    let coded = said(&all, "登录页写好了");
+    let reviewed = said(&all, "安全要点三条");
+    assert_eq!(coded.reply_to, vec![to_coder.id.clone()]);
+    assert_eq!(reviewed.reply_to, vec![to_reviewer.id.clone()]);
+    let summary = said(&all, "汇总");
+    assert_eq!(sender_of(&summary), Some(&t.host));
+    let mut returned = summary.reply_to.clone();
+    returned.sort_by_key(|id| id.to_string());
+    let mut expected = vec![coded.id.clone(), reviewed.id.clone()];
+    expected.sort_by_key(|id| id.to_string());
+    assert_eq!(returned, expected);
+    assert_eq!(t.rig.messages().len(), 7);
+
+    let requests = host.requests();
+    assert_eq!(requests.len(), 3);
+    let heard = heard(&host);
+    assert!(
+        heard.iter().any(|m| m.contains("登录页写好了")),
+        "{heard:#?}"
+    );
+    assert!(
+        heard.iter().any(|m| m.contains("安全要点三条")),
+        "{heard:#?}"
+    );
+    // 主 Agent 只看不动手。
+    let tools: Vec<&str> = requests[0].tools.iter().map(|t| t.name.as_str()).collect();
+    assert!(tools.contains(&"ask_bot"), "{tools:?}");
+    assert!(
+        !tools.contains(&"write") && !tools.contains(&"shell"),
+        "{tools:?}"
+    );
+    assert!(requests[0].messages[0].content.contains("主 Agent"));
+    t.rig.orchestrator.shutdown().await;
+}
+
+/// 成员又转给别人时，主 Agent 等转出去的也做完才被叫起来。
+#[tokio::test]
+async fn the_lead_waits_for_work_a_member_passed_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = team(dir.path(), vec![], vec![]);
+    t.discuss(sa_protocol::Discussion::Lead, 2);
+    let host = t.script(
+        "助手",
+        vec![
+            ask("h1", "Coder", "写登录页"),
+            MockReply::text("派给 Coder 了"),
+            MockReply::text("汇总完毕"),
+        ],
+    );
+    t.script(
+        "Coder",
+        vec![
+            ask("c1", "Reviewer", "帮我审一下"),
+            MockReply::text("写好了"),
+        ],
+    );
+    t.script("Reviewer", vec![MockReply::text("审过了")]);
+    t.rig.say("做一个登录页").await;
+    let all = t.rig.settled(7).await;
+    t.rig.until_idle().await;
+    let summary = said(&all, "汇总完毕");
+    let (coded, reviewed) = (said(&all, "写好了"), said(&all, "审过了"));
+    assert!(summary.reply_to.contains(&coded.id), "{summary:#?}");
+    assert!(summary.reply_to.contains(&reviewed.id), "{summary:#?}");
+    assert_eq!(said(&all, "帮我审一下").reply_to, vec![coded.id.clone()]);
+    assert_eq!(host.requests().len(), 3);
+    assert_eq!(t.rig.messages().len(), 7);
+    t.rig.orchestrator.shutdown().await;
+}
+
+/// 成员出错也算交回：主 Agent 照样被叫起来，看得到它失败了。
+#[tokio::test]
+async fn the_lead_hears_back_when_a_member_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = team(dir.path(), vec![], vec![]);
+    t.discuss(sa_protocol::Discussion::Lead, 2);
+    let host = t.script(
+        "助手",
+        vec![
+            ask("h1", "Coder", "写登录页"),
+            MockReply::text("派给 Coder 了"),
+            MockReply::text("Coder 那边出错了"),
+        ],
+    );
+    t.script(
+        "Coder",
+        vec![MockReply::Fail(sa_llm::LlmError::Auth("密钥不对".into()))],
+    );
+    t.rig.say("做一个登录页").await;
+    let all = t.rig.settled(5).await;
+    t.rig.until_idle().await;
+    let failed = all.iter().find(|m| sender_of(m) == Some(&t.coder)).unwrap();
+    assert_eq!(failed.state, MessageState::Failed);
+    assert_eq!(said(&all, "出错了").reply_to, vec![failed.id.clone()]);
+    assert_eq!(host.requests().len(), 3);
+    t.rig.orchestrator.shutdown().await;
+}
+
+/// 普通讨论方式下，被找的 Bot 回答完不会再叫起找它的那个。回复照样记着在回哪条。
+#[tokio::test]
+async fn without_a_lead_a_handoff_answer_does_not_wake_the_asker() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = team(dir.path(), vec![], vec![]);
+    let host = t.script(
+        "助手",
+        vec![
+            ask("h1", "Coder", "写登录页"),
+            MockReply::text("交给 Coder"),
+        ],
+    );
+    t.script("Coder", vec![MockReply::text("写好了")]);
+    let question = t.rig.say("@助手 做一个登录页").await;
+    let all = t.rig.settled(4).await;
+    t.rig.until_idle().await;
+    assert_eq!(said(&all, "交给 Coder").reply_to, vec![question.id.clone()]);
+    assert_eq!(
+        said(&all, "写好了").reply_to,
+        vec![said(&all, "写登录页").id.clone()]
+    );
+    assert_eq!(host.requests().len(), 2);
+    assert_eq!(t.rig.messages().len(), 4);
+    t.rig.orchestrator.shutdown().await;
+}

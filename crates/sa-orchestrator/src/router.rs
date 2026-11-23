@@ -205,6 +205,7 @@ mod tests {
             content: content.into(),
             mentions: vec![],
             hop: 0,
+            reply_to: vec![],
             kind: sa_protocol::MessageKind::Chat,
             task_id: None,
             run_id: None,

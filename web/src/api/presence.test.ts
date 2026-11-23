@@ -14,6 +14,7 @@ const message = (seq: number, patch: Partial<Message> = {}): Message => ({
   content: "",
   mentions: [],
   hop: 0,
+  reply_to: [],
   kind: "chat",
   steps: [],
   state: "streaming",

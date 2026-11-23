@@ -131,6 +131,7 @@ impl Engine {
                 MessageState::Complete,
                 None,
                 0,
+                vec![],
                 now,
             )?
             else {

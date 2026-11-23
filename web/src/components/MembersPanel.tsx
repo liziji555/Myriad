@@ -19,6 +19,7 @@ export const DISCUSSIONS: readonly { id: Discussion; label: string; note: string
   { id: "parallel", label: "并行回复", note: "没点名时每个 Bot 各答一份，同时开始" },
   { id: "rounds", label: "轮流讨论", note: "没点名时按进房间的先后一个接一个说，后说的看得到先说的" },
   { id: "blind", label: "独立评议", note: "没点名时每个 Bot 各答一份，这一轮互相看不到对方的答案" },
+  { id: "lead", label: "主 Agent 派活", note: "入口 Bot 当主 Agent：没点名的话交给它，它把活派给成员，成员做完自动交回给它决定下一步" },
 ];
 
 /** 轮流讨论最多转几圈。和服务端的上限一致。 */

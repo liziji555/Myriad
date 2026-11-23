@@ -21,6 +21,7 @@ const message = (seq: number, patch: Partial<Message> = {}): Message => ({
   content: `第 ${seq} 条`,
   mentions: [],
   hop: 0,
+  reply_to: [],
   kind: "chat",
   steps: [],
   state: "complete",

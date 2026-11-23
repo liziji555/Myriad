@@ -3,4 +3,4 @@
 /**
  * 房间里没点名的话怎么接。点了名的总是只给被点到的。
  */
-export type Discussion = "normal" | "parallel" | "rounds" | "blind";
+export type Discussion = "normal" | "parallel" | "rounds" | "blind" | "lead";
