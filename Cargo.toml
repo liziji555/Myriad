@@ -48,6 +48,7 @@ tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time", "process", "io-util"] }
 tokio-util = "0.7"
+process-wrap = { version = "10.0.1", default-features = false, features = ["tokio1", "job-object", "process-group"] }
 toml = "1"
 tower = "0.5"
 tracing = "0.1"

@@ -5,7 +5,7 @@
 
 use sa_kernel::{Observer, StepEnd, TurnEnd};
 use sa_protocol::Harness;
-use sa_tools::process::{kill_tree, own_group, TreeGuard};
+use sa_tools::process::Tree;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -212,8 +212,7 @@ pub(crate) async fn run(
         Some(id) => command.env("SA_HARNESS_SESSION", id),
         None => command.env_remove("SA_HARNESS_SESSION"),
     };
-    own_group(&mut command);
-    let mut child = match command.spawn() {
+    let mut child = match Tree::spawn(command) {
         Ok(child) => child,
         Err(error) => {
             return failed(
@@ -222,8 +221,7 @@ pub(crate) async fn run(
             )
         }
     };
-    let mut tree = TreeGuard(child.id());
-    if let Some(mut stdin) = child.stdin.take() {
+    if let Some(mut stdin) = child.stdin() {
         let prompt = launch.prompt.to_string();
         // 写完就关上，harness 读到结尾才开始干活。它不读也不卡在这里。
         tokio::spawn(async move {
@@ -231,14 +229,14 @@ pub(crate) async fn run(
             let _ = stdin.shutdown().await;
         });
     }
-    let stderr = child.stderr.take().map(|mut err| {
+    let stderr = child.stderr().map(|mut err| {
         tokio::spawn(async move {
             let mut text = String::new();
             let _ = err.read_to_string(&mut text).await;
             text
         })
     });
-    let mut lines = BufReader::new(child.stdout.take().expect("上面接了管道")).lines();
+    let mut lines = BufReader::new(child.stdout().expect("上面接了管道")).lines();
     let mut text = String::new();
     let mut open: HashMap<String, ()> = HashMap::new();
     let mut failure: Option<String> = None;
@@ -322,7 +320,7 @@ pub(crate) async fn run(
     };
 
     if stopped {
-        kill_tree(tree.0.take()).await;
+        child.kill();
         let _ = child.wait().await;
         return Finished {
             end: TurnEnd::Cancelled,
@@ -334,7 +332,7 @@ pub(crate) async fn run(
         Some(status) => status,
         None => tokio::select! {
             _ = cancel.cancelled() => {
-                kill_tree(tree.0.take()).await;
+                child.kill();
                 let _ = child.wait().await;
                 return Finished { end: TurnEnd::Cancelled, session, text };
             }
@@ -342,8 +340,8 @@ pub(crate) async fn run(
         },
     };
     // 它自己退出了，但开出来的子进程可能还在：一起结束。
-    kill_tree(tree.0.take()).await;
-    // 没杀掉的后台进程（Windows 上父进程退出后按进程树找不到它）可能还占着错误输出：也只等一小会儿。
+    child.kill();
+    // 万一还有没结束掉的后台进程占着错误输出：也只等一小会儿。
     let said = match stderr {
         Some(mut task) => match tokio::time::timeout(DRAIN, &mut task).await {
             Ok(said) => said.unwrap_or_default(),

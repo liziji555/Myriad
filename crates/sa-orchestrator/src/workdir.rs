@@ -5,7 +5,7 @@
 
 use sa_engine::Workdir;
 use sa_protocol::TaskId;
-use sa_tools::process::{kill_tree, own_group, TreeGuard};
+use sa_tools::process::Tree;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::process::Command;
@@ -478,25 +478,28 @@ pub async fn push(workdir: &Workdir, cancel: &CancellationToken) -> Result<(), S
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
     // 推送会跑人仓库里的钩子（比如 pre-push 里跑测试）：提前结束时要连它们一起结束。
-    own_group(&mut command);
-    let child = command.spawn().map_err(launch_error)?;
-    let pid = child.id();
-    let mut tree = TreeGuard(pid);
-    let run = child.wait_with_output();
-    tokio::pin!(run);
-    let gave_up = tokio::select! {
-        output = &mut run => {
-            tree.0 = None;
-            return outcome(output.map_err(launch_error)?, "push").map(drop);
+    let mut tree = Tree::spawn(command).map_err(launch_error)?;
+    let gave_up = {
+        let run = tree.output();
+        tokio::pin!(run);
+        tokio::select! {
+            output = &mut run => Ok(output),
+            _ = tokio::time::sleep(PUSH_TIMEOUT) => {
+                Err(format!("推送等了 {} 秒还没完成，先放弃了", PUSH_TIMEOUT.as_secs()))
+            }
+            _ = cancel.cancelled() => Err("推送被停下了，不确定有没有推上去".to_string()),
         }
-        _ = tokio::time::sleep(PUSH_TIMEOUT) => {
-            format!("推送等了 {} 秒还没完成，先放弃了", PUSH_TIMEOUT.as_secs())
-        }
-        _ = cancel.cancelled() => "推送被停下了，不确定有没有推上去".to_string(),
     };
-    kill_tree(pid).await;
-    tree.0 = None;
-    Err(gave_up)
+    match gave_up {
+        Ok(output) => {
+            tree.disarm();
+            outcome(output.map_err(launch_error)?, "push").map(drop)
+        }
+        Err(gave_up) => {
+            tree.kill();
+            Err(gave_up)
+        }
+    }
 }
 
 /// 任务结束后删掉它的独立目录。分支留着。删不掉只记日志，不影响任务状态。
