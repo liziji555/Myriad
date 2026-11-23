@@ -13,7 +13,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use clap::Parser;
-use sa_cli::{DataDir, RunArgs, SshTarget, Tunnel};
+use sa_cli::{DataDir, RunArgs, SshTarget, Tunnel, TunnelStop};
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Mutex};
 use std::time::Duration;
@@ -77,11 +77,14 @@ struct Shell {
     launch: Launch,
     server: Mutex<Option<Server>>,
     tunnel: Mutex<Option<Tunnel>>,
+    /// 还在连服务器时，退出要靠它杀掉 ssh。
+    connecting: TunnelStop,
 }
 
 impl Shell {
     /// 让服务收尾并等它停下，或者断开到服务器的隧道。没在跑、已经停过都没关系。
     fn stop_server(&self) {
+        self.connecting.close();
         if let Some(tunnel) = self.tunnel.lock().unwrap().take() {
             tunnel.close();
         }
@@ -143,6 +146,7 @@ fn main() {
         launch: Launch::Choose,
         server: Mutex::new(None),
         tunnel: Mutex::new(None),
+        connecting: TunnelStop::default(),
     };
     shell.launch = shell.decide();
 
@@ -223,7 +227,7 @@ fn start_server(handle: &AppHandle, shell: &Shell, target: &SshTarget) -> tauri:
         shell,
         serde_json::json!({ "view": "connecting", "server": server }),
     )?;
-    match Tunnel::open(target, None) {
+    match Tunnel::open(target, None, &shell.connecting) {
         Ok(tunnel) => {
             let url = tunnel.url().to_string();
             *shell.tunnel.lock().unwrap() = Some(tunnel);
@@ -516,12 +520,16 @@ fn set_menu(handle: &AppHandle) -> tauri::Result<()> {
                 relaunch(&handle);
             });
         }
+        // Windows 上在菜单回调里直接建窗口会卡死（WebView2），换个线程建。
         "switch" => {
-            let shell = handle.state::<Shell>();
-            if let Err(error) = open_start(handle, &shell, serde_json::json!({ "view": "choose" }))
-            {
-                tracing::warn!("打不开启动页：{error}");
-            }
+            let handle = handle.clone();
+            std::thread::spawn(move || {
+                let shell = handle.state::<Shell>();
+                let choose = serde_json::json!({ "view": "choose" });
+                if let Err(error) = open_start(&handle, &shell, choose) {
+                    tracing::warn!("打不开启动页：{error}");
+                }
+            });
         }
         "data-dir" => {
             let dir = handle

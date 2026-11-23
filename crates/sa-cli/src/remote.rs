@@ -69,7 +69,7 @@ pub fn connect(args: ConnectArgs) -> Result<()> {
     crate::app::init_logging(tracing::Level::WARN);
     let target = SshTarget::parse(&args.target, args.ssh_port)?;
     println!("正在连接 {target}……");
-    let tunnel = Tunnel::open(&target, args.local_port)?;
+    let tunnel = Tunnel::open(&target, args.local_port, &TunnelStop::default())?;
     println!("已连上 {target}，用浏览器打开：");
     println!("{}", tunnel.url());
     println!("断线会自动重连。按 Ctrl+C 断开。");
@@ -219,43 +219,68 @@ impl RemoteService {
     }
 }
 
+/// 断开一条隧道，包括还在连的。连接还没成功就能交给别的线程，让它随时喊停。
+#[derive(Clone, Default)]
+pub struct TunnelStop {
+    stop: Arc<AtomicBool>,
+    child: Arc<Mutex<Option<Child>>>,
+}
+
+impl TunnelStop {
+    /// 停下来，杀掉 ssh。之后这个 `TunnelStop` 不能再开隧道。
+    pub fn close(&self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(mut child) = self.child.lock().unwrap().take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+
+    fn stopped(&self) -> bool {
+        self.stop.load(Ordering::SeqCst)
+    }
+}
+
 /// 开着的隧道。丢掉或 [`Tunnel::close`] 时断开。
 pub struct Tunnel {
     url: String,
-    stop: Arc<AtomicBool>,
-    child: Arc<Mutex<Option<Child>>>,
+    stop: TunnelStop,
     keeper: Option<JoinHandle<()>>,
 }
 
 impl Tunnel {
     /// 连上 `target` 上的苦乐，等到服务能应答才返回。`local_port` 不给就挑一个空着的。
-    pub fn open(target: &SshTarget, local_port: Option<u16>) -> Result<Self> {
+    /// 连的途中 `stop.close()` 了就放弃。
+    pub fn open(target: &SshTarget, local_port: Option<u16>, stop: &TunnelStop) -> Result<Self> {
         let remote = target.remote_service()?;
         let local_port = match local_port {
             Some(port) => port,
             None => free_port()?,
         };
         let local = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), local_port);
+        // 端口被别的程序占着的话，下面的探测会把令牌发给它。
+        TcpListener::bind(local).with_context(|| format!("本机端口 {local_port} 已经被占用"))?;
         let forward = forward_command(target, local, remote.addr);
 
-        let mut child = spawn(forward(), true)?;
-        let ready = wait_ready(&mut child, local, &remote.token);
-        if let Err(error) = ready {
-            let _ = child.kill();
-            let _ = child.wait();
+        {
+            let mut slot = stop.child.lock().unwrap();
+            if stop.stopped() {
+                bail!("已取消连接");
+            }
+            *slot = Some(spawn(forward(), true)?);
+        }
+        if let Err(error) = wait_ready(stop, local, &remote.token) {
+            stop.close();
             return Err(error);
         }
 
-        let stop = Arc::new(AtomicBool::new(false));
-        let child = Arc::new(Mutex::new(Some(child)));
         let keeper = {
-            let (stop, child, name) = (stop.clone(), child.clone(), target.to_string());
-            std::thread::spawn(move || keep_alive(&name, &stop, &child, forward))
+            let (stop, name) = (stop.clone(), target.to_string());
+            std::thread::spawn(move || keep_alive(&name, &stop, forward))
         };
         Ok(Self {
             url: format!("http://{local}/auth?token={}", remote.token),
-            stop,
-            child,
+            stop: stop.clone(),
             keeper: Some(keeper),
         })
     }
@@ -270,11 +295,7 @@ impl Tunnel {
     }
 
     fn shut(&mut self) {
-        self.stop.store(true, Ordering::SeqCst);
-        if let Some(mut child) = self.child.lock().unwrap().take() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
+        self.stop.close();
         if let Some(keeper) = self.keeper.take() {
             let _ = keeper.join();
         }
@@ -299,6 +320,12 @@ fn forward_command(
         command
             .args([
                 "-N",
+                // 不借用已经开着的共享连接（ControlMaster）：不然转发挂在那条连接上，
+                // 杀掉这个 ssh 也断不了。
+                "-o",
+                "ControlMaster=no",
+                "-o",
+                "ControlPath=none",
                 "-o",
                 "ExitOnForwardFailure=yes",
                 "-o",
@@ -340,15 +367,21 @@ fn spawn(mut command: Command, capture: bool) -> Result<Child> {
 }
 
 /// 等隧道那头的服务用这个令牌应答。ssh 先退出了就把它的报错带出来。
-fn wait_ready(child: &mut Child, local: SocketAddr, token: &str) -> Result<()> {
+fn wait_ready(stop: &TunnelStop, local: SocketAddr, token: &str) -> Result<()> {
     let deadline = Instant::now() + READY_WAIT;
     loop {
-        if let Some(status) = child.try_wait()? {
-            let mut stderr = String::new();
-            if let Some(mut pipe) = child.stderr.take() {
-                let _ = pipe.read_to_string(&mut stderr);
+        {
+            let mut slot = stop.child.lock().unwrap();
+            let Some(child) = slot.as_mut().filter(|_| !stop.stopped()) else {
+                bail!("已取消连接");
+            };
+            if let Some(status) = child.try_wait()? {
+                let mut stderr = String::new();
+                if let Some(mut pipe) = child.stderr.take() {
+                    let _ = pipe.read_to_string(&mut stderr);
+                }
+                bail!("{}", explain_ssh_failure(status.code(), stderr.trim()));
             }
-            bail!("{}", explain_ssh_failure(status.code(), stderr.trim()));
         }
         match probe(local, token) {
             Probe::Ok => return Ok(()),
@@ -398,12 +431,8 @@ fn probe(local: SocketAddr, token: &str) -> Probe {
 }
 
 /// 隧道断了就重开，直到 `stop`。
-fn keep_alive(
-    name: &str,
-    stop: &AtomicBool,
-    child: &Mutex<Option<Child>>,
-    forward: impl Fn() -> Command,
-) {
+fn keep_alive(name: &str, stop: &TunnelStop, forward: impl Fn() -> Command) {
+    let child = &stop.child;
     let mut wait = RETRY_FIRST;
     loop {
         let exited = {
@@ -414,7 +443,7 @@ fn keep_alive(
                 Some(_) => true,
             }
         };
-        if stop.load(Ordering::SeqCst) {
+        if stop.stopped() {
             return;
         }
         if !exited {
@@ -423,12 +452,12 @@ fn keep_alive(
             continue;
         }
         tracing::warn!("到 {name} 的隧道断了，{wait:?} 后重连");
-        if sleep_unless(stop, wait) {
+        if sleep_unless(&stop.stop, wait) {
             return;
         }
         wait = (wait * 2).min(RETRY_MAX);
         let mut slot = child.lock().unwrap();
-        if stop.load(Ordering::SeqCst) {
+        if stop.stopped() {
             return;
         }
         match spawn(forward(), false) {

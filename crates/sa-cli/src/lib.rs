@@ -19,7 +19,7 @@ mod usage;
 
 pub use app::{init_logging, RunArgs};
 pub use paths::DataDir;
-pub use remote::{SshTarget, Tunnel};
+pub use remote::{SshTarget, Tunnel, TunnelStop};
 pub use serve::serve_until;
 
 use clap::{Parser, Subcommand};
