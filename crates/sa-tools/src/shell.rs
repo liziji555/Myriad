@@ -1,4 +1,4 @@
-use crate::process::{kill_tree, own_group, TreeGuard};
+use crate::process::Tree;
 use crate::{arg, parse_input, Permission, Tool, ToolCtx, ToolError, ToolResult};
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -104,16 +104,10 @@ impl Tool for ShellTool {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        // 自己一个进程组：停止时连同它启动的子进程一起杀掉。
-        own_group(&mut command);
-        let mut child = command
-            .spawn()
-            .map_err(|e| ToolError(format!("命令启动不了：{e}")))?;
-        let pid = child.id();
-        // 这次调用不管怎么结束（包括整个调用被丢弃），进程树都要收干净。
-        let mut tree = TreeGuard(pid);
-        let stdout = child.stdout.take().expect("上面设置了管道");
-        let stderr = child.stderr.take().expect("上面设置了管道");
+        // 这次调用不管怎么结束（包括整个调用被丢弃），它启动的子进程都要一起收干净。
+        let mut tree = Tree::spawn(command).map_err(|e| ToolError(format!("命令启动不了：{e}")))?;
+        let stdout = tree.stdout().expect("上面设置了管道");
+        let stderr = tree.stderr().expect("上面设置了管道");
         let output = async {
             let (out, err) = tokio::join!(read_capped(stdout), read_capped(stderr));
             (out, err)
@@ -124,21 +118,23 @@ impl Tool for ShellTool {
             TimedOut,
             Stopped,
         }
-        let run = async {
-            let (streams, status) = tokio::join!(output, child.wait());
-            (streams, status)
-        };
-        tokio::pin!(run);
-        let (end, streams) = tokio::select! {
-            (streams, status) = &mut run => (End::Exited(status), Some(streams)),
-            _ = tokio::time::sleep(limit) => (End::TimedOut, None),
-            _ = ctx.cancel.cancelled() => (End::Stopped, None),
+        let (end, streams) = {
+            let run = async {
+                let (streams, status) = tokio::join!(output, tree.wait());
+                (streams, status)
+            };
+            tokio::pin!(run);
+            tokio::select! {
+                (streams, status) = &mut run => (End::Exited(status), Some(streams)),
+                _ = tokio::time::sleep(limit) => (End::TimedOut, None),
+                _ = ctx.cancel.cancelled() => (End::Stopped, None),
+            }
         };
         if streams.is_none() {
-            kill_tree(pid).await;
+            tree.kill();
         }
         // 到这里要么命令自己结束了，要么已经杀过了。
-        tree.0 = None;
+        tree.disarm();
         match end {
             End::Stopped => Err(ToolError::new("已停止，命令和它启动的进程都已结束。")),
             End::TimedOut => Err(ToolError(format!(

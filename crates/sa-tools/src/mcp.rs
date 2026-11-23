@@ -6,7 +6,7 @@
 //! 用法：[`McpServer::spawned`] 建一个服务，[`McpServer::connect`] 连上并拿到工具清单，
 //! [`McpServer::tools`] 把清单变成可以注册的 [`McpTool`]。连接断了，下一次调用时自动重连一次。
 
-use crate::process::{own_group, TreeGuard};
+use crate::process::Tree;
 use crate::{Permission, Tool, ToolCtx, ToolError, ToolResult};
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -613,19 +613,17 @@ fn spawn_pipe(spec: &McpSpec) -> Result<Pipe, McpError> {
         if let Some(cwd) = &spec.cwd {
             command.current_dir(cwd);
         }
-        // 自己一个进程组：断开时连同它启动的子进程一起结束。
-        own_group(&mut command);
-        let mut child = match command.spawn() {
+        // 断开时连同它启动的子进程一起结束。
+        let mut child = match Tree::spawn(command) {
             Ok(child) => child,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
             Err(error) => {
                 return Err(McpError(format!("启动不了「{}」：{error}", spec.command)));
             }
         };
-        let guard = TreeGuard(child.id());
-        let stdin = child.stdin.take().expect("上面设置了管道");
-        let stdout = child.stdout.take().expect("上面设置了管道");
-        let mut errors = child.stderr.take().expect("上面设置了管道");
+        let stdin = child.stdin().expect("上面设置了管道");
+        let stdout = child.stdout().expect("上面设置了管道");
+        let mut errors = child.stderr().expect("上面设置了管道");
         let stderr = Arc::new(Mutex::new(String::new()));
         let tail = stderr.clone();
         tokio::spawn(async move {
@@ -646,7 +644,7 @@ fn spawn_pipe(spec: &McpSpec) -> Result<Pipe, McpError> {
             reader: Box::new(stdout),
             writer: Box::new(stdin),
             // 先丢守卫（杀进程树），再丢进程本身。
-            keep: Some(Box::new((guard, child))),
+            keep: Some(Box::new(child)),
             stderr,
         });
     }
