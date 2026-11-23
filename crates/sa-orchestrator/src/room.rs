@@ -971,22 +971,28 @@ async fn harness_turn(
     // 启动前问一次人：harness 里面的每一步苦乐管不到，只能在门口问。
     let workspace = shared.settings.fence.root_display();
     let title = format!("让 {}（{label}）在自己的独立目录里动手", bot.name);
-    let input = serde_json::json!({ "bot": bot.id.as_str() });
+    let input = serde_json::json!({
+        "bot": bot.id.as_str(),
+        "harness": bot.harness,
+        "command": bot.harness_command.trim(),
+    });
     observer
         .tool_started("harness-start", "harness", &title, &input.to_string())
         .await;
     let reason = format!(
         "{label} 会自己改文件、执行命令，苦乐管不到它里面的每一步。它只在从 {workspace} 开出来的独立目录里干活，改动要你验收后才带回。"
     );
-    let allowed = observer
-        .request_approval(ApprovalRequest {
-            call_id: "harness-start",
-            tool: "harness",
-            title: &title,
-            reason: &reason,
-            input: &input,
-        })
-        .await;
+    let asked = observer.request_approval(ApprovalRequest {
+        call_id: "harness-start",
+        tool: "harness",
+        title: &title,
+        reason: &reason,
+        input: &input,
+    });
+    let allowed = tokio::select! {
+        allowed = asked => allowed,
+        _ = cancel.cancelled() => false,
+    };
     if cancel.is_cancelled() {
         return Ok(TurnEnd::Cancelled);
     }
@@ -1062,8 +1068,15 @@ async fn harness_turn(
         }
     };
 
+    // 会话记着是哪个 harness、哪条命令开的：换了之后旧会话接不上，重新开。
+    let tag = format!("{:?} {}\n", bot.harness, bot.harness_command.trim());
+    let resume = desk
+        .session
+        .as_deref()
+        .and_then(|session| session.strip_prefix(&tag))
+        .map(String::from);
     let mut prompt = String::new();
-    if desk.session.is_none() {
+    if resume.is_none() {
         prompt.push_str(&format!(
             "你是「苦乐」房间里的 {}。{}\n你在自己的独立目录里干活，改动要人验收后才会带回。做完用几句话说清做了什么、结果怎样。\n\n",
             bot.name,
@@ -1076,7 +1089,7 @@ async fn harness_turn(
         command: &bot.harness_command,
         dir: std::path::Path::new(&workdir.path),
         prompt: &prompt,
-        session: desk.session.as_deref(),
+        session: resume.as_deref(),
     };
     let finished = crate::harness::run(&launch, observer, cancel).await;
     if !finished.text.is_empty() {
@@ -1122,7 +1135,7 @@ async fn harness_turn(
         }
         Err(reason) => tracing::warn!(room = %room_id, "harness 目录里的改动没记下来：{reason}"),
     }
-    desk.session = finished.session;
+    desk.session = finished.session.map(|id| format!("{tag}{id}"));
     save_desk(shared, room_id, &bot.id, &desk).await;
     Ok(finished.end)
 }
@@ -1808,8 +1821,12 @@ fn rule_key(tool: &str, input: &Value, fence: &Fence) -> Option<String> {
             let (real, _) = fence.resolve_for_write(input["path"].as_str()?).ok()?;
             Some(real.display().to_string())
         }
-        // harness 的「以后都允许」按 Bot 记：这个房间里这个 harness Bot 以后启动都不再问。
-        "harness" => input["bot"].as_str().map(String::from),
+        // harness 的「以后都允许」按 Bot 记：换了 harness 或启动命令，就是另一个程序，要重新问。
+        "harness" => Some(crate::harness::approval_key(
+            input["bot"].as_str()?,
+            serde_json::from_value(input["harness"].clone()).ok()?,
+            input["command"].as_str().unwrap_or_default(),
+        )),
         _ => None,
     }
 }

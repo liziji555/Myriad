@@ -16,6 +16,8 @@ use tokio_util::sync::CancellationToken;
 
 /// 出错时最多带上这么多字的标准错误输出。
 const STDERR_TAIL: usize = 2000;
+/// harness 退出后，再等它剩下的输出多久。
+const DRAIN: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// 启动一次 harness 要的东西。
 pub(crate) struct Launch<'a> {
@@ -83,7 +85,7 @@ pub(crate) fn split_command(text: &str) -> Vec<String> {
 }
 
 /// 在 PATH 里找程序。Windows 上按 PATHEXT 补后缀（`claude` 其实是 `claude.cmd`）。
-pub fn find_program(program: &str) -> Option<PathBuf> {
+pub fn find_program(program: &str, dir: &Path) -> Option<PathBuf> {
     let path = Path::new(program);
     let exts: Vec<String> = if cfg!(windows) {
         let pathext = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into());
@@ -98,8 +100,9 @@ pub fn find_program(program: &str) -> Option<PathBuf> {
             .map(|ext| PathBuf::from(format!("{}{ext}", base.display())))
             .find(|candidate| candidate.is_file())
     };
+    // `./scripts/harness` 这种带目录的相对路径从 harness 的工作目录算起。
     if path.components().count() > 1 || path.is_absolute() {
-        return found(path);
+        return found(&dir.join(path));
     }
     std::env::split_paths(&std::env::var_os("PATH")?).find_map(|dir| found(&dir.join(path)))
 }
@@ -158,13 +161,18 @@ fn plan(launch: &Launch<'_>) -> Result<(PathBuf, Vec<String>, bool), String> {
         Harness::Command => args.extend(extra.iter().cloned()),
         Harness::Builtin => return Err("内置 Bot 不走 harness".into()),
     }
-    let resolved = find_program(&program).ok_or_else(|| {
+    let resolved = find_program(&program, launch.dir).ok_or_else(|| {
         format!(
             "这台电脑上找不到 {program}，{} 没法启动。装好之后再试，或者在 Bot 设置里写上它的完整路径",
             launch.harness.label()
         )
     })?;
     Ok((resolved, args, stdin))
+}
+
+/// 「以后都允许」记的是哪个 Bot 用哪个 harness、哪条命令：换了 harness 或命令就要重新问。
+pub fn approval_key(bot: &str, harness: Harness, command: &str) -> String {
+    format!("{bot}\n{harness:?}\n{}", command.trim())
 }
 
 /// 跑一次 harness，直到它结束、出错或者被停下。
@@ -196,6 +204,10 @@ pub(crate) async fn run(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    // sa 自己用的密钥不交给 harness：它和 Bot 执行的命令一样拿不到。
+    for name in sa_tools::hidden_env() {
+        command.env_remove(name);
+    }
     match launch.session {
         Some(id) => command.env("SA_HARNESS_SESSION", id),
         None => command.env_remove("SA_HARNESS_SESSION"),
@@ -232,10 +244,25 @@ pub(crate) async fn run(
     let mut failure: Option<String> = None;
     let mut seen = 0usize;
 
+    // 它自己退出了，开出来的后台进程可能还占着输出：再读一小会儿剩下的就不等了。
+    let mut exited = None;
     let stopped = loop {
+        let draining = exited.is_some();
         let line = tokio::select! {
             _ = cancel.cancelled() => break true,
-            line = lines.next_line() => line,
+            status = child.wait(), if !draining => {
+                exited = Some(status);
+                continue;
+            }
+            line = async {
+                if draining {
+                    tokio::time::timeout(DRAIN, lines.next_line())
+                        .await
+                        .unwrap_or(Ok(None))
+                } else {
+                    lines.next_line().await
+                }
+            } => line,
         };
         let Ok(Some(line)) = line else { break false };
         let Ok(value) = serde_json::from_str::<Value>(line.trim()) else {
@@ -303,13 +330,16 @@ pub(crate) async fn run(
             text,
         };
     }
-    let status = tokio::select! {
-        _ = cancel.cancelled() => {
-            kill_tree(tree.0.take()).await;
-            let _ = child.wait().await;
-            return Finished { end: TurnEnd::Cancelled, session, text };
-        }
-        status = child.wait() => status,
+    let status = match exited {
+        Some(status) => status,
+        None => tokio::select! {
+            _ = cancel.cancelled() => {
+                kill_tree(tree.0.take()).await;
+                let _ = child.wait().await;
+                return Finished { end: TurnEnd::Cancelled, session, text };
+            }
+            status = child.wait() => status,
+        },
     };
     // 它自己退出了，但开出来的子进程可能还在：一起结束。
     kill_tree(tree.0.take()).await;
@@ -598,6 +628,26 @@ fn parse_plain(value: &Value) -> Vec<Event> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn relative_programs_with_a_directory_start_from_the_desk() {
+        let desk = tempfile::tempdir().unwrap();
+        std::fs::create_dir(desk.path().join("scripts")).unwrap();
+        std::fs::write(desk.path().join("scripts/run"), "").unwrap();
+        assert_eq!(
+            find_program("./scripts/run", desk.path()),
+            Some(desk.path().join("./scripts/run"))
+        );
+        assert_eq!(find_program("./scripts/missing", desk.path()), None);
+    }
+
+    #[test]
+    fn approvals_are_kept_per_harness_and_command() {
+        let first = approval_key("b1", Harness::Command, "a.sh");
+        assert_eq!(first, approval_key("b1", Harness::Command, " a.sh "));
+        assert_ne!(first, approval_key("b1", Harness::Command, "b.sh"));
+        assert_ne!(first, approval_key("b1", Harness::Codex, "a.sh"));
+    }
 
     #[test]
     fn commands_split_on_spaces_outside_quotes() {

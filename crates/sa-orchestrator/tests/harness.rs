@@ -264,6 +264,31 @@ async fn harness_failures_show_up_as_failed_replies_and_failed_steps() {
     rig.orchestrator.shutdown().await;
 }
 
+/// harness 自己退出了、开出来的后台进程还占着输出：这一轮照样结束，后台进程一起被结束。
+#[tokio::test]
+async fn a_background_process_holding_the_output_does_not_keep_the_turn_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let rig = start(dir.path(), vec![], 2);
+    let fake = rig.harness("Fake");
+    rig.say("@Fake 开个后台进程").await;
+    rig.approve(ApprovalDecision::Once).await;
+    let done = rig.reply(&fake, 0).await;
+    assert_eq!(done.state, MessageState::Complete, "{done:#?}");
+    let pid = std::fs::read_to_string(Path::new(&rig.desk_dir(&fake)).join("bg.pid")).unwrap();
+    #[cfg(unix)]
+    {
+        let alive = std::process::Command::new("kill")
+            .args(["-0", pid.trim()])
+            .status()
+            .unwrap()
+            .success();
+        assert!(!alive, "后台进程 {pid} 还活着");
+    }
+    #[cfg(not(unix))]
+    let _ = pid;
+    rig.orchestrator.shutdown().await;
+}
+
 /// 不批准就不启动。
 #[tokio::test]
 async fn a_denied_harness_never_starts() {
@@ -363,7 +388,15 @@ async fn the_lead_hands_work_to_two_harnesses_that_queue_for_a_slot() {
     let beta = rig.harness("Beta");
     for bot in [&alpha, &beta] {
         rig.engine
-            .allow_always(&rig.room, "harness", bot.id.as_str())
+            .allow_always(
+                &rig.room,
+                "harness",
+                &sa_orchestrator::harness::approval_key(
+                    bot.id.as_str(),
+                    bot.harness,
+                    &bot.harness_command,
+                ),
+            )
             .unwrap();
     }
     let edit = UpdateRoomRequest {

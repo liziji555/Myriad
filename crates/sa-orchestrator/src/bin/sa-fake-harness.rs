@@ -6,6 +6,7 @@
 //! - 「出错」：报错，退出码 1
 //! - 「慢」：每一步之间停 1 秒，一共 20 秒（用来测停止和排队）
 //! - 「子进程」：开一个睡 60 秒的子进程，把它的 pid 写进 `child.pid`（用来测停止时一起结束）
+//! - 「后台」：开一个睡 60 秒、占着标准输出的子进程，自己马上退出，pid 写进 `bg.pid`
 
 use serde_json::json;
 use std::io::Read;
@@ -51,6 +52,19 @@ fn main() {
             .spawn()
             .expect("开不了子进程");
         std::fs::write("child.pid", child.id().to_string()).expect("写不了 child.pid");
+    }
+    if prompt.contains("后台") {
+        // 故意不等它，也不关它的输出：测试要看 harness 退出后苦乐不会一直等这个管道。
+        #[allow(clippy::zombie_processes)]
+        let child = std::process::Command::new(if cfg!(windows) { "ping" } else { "sleep" })
+            .args(if cfg!(windows) {
+                vec!["-n", "61", "127.0.0.1"]
+            } else {
+                vec!["60"]
+            })
+            .spawn()
+            .expect("开不了子进程");
+        std::fs::write("bg.pid", child.id().to_string()).expect("写不了 bg.pid");
     }
     if prompt.contains('慢') {
         for step in 0..20 {

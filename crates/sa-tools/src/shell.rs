@@ -27,7 +27,8 @@ pub fn hide_env_from_commands(names: impl IntoIterator<Item = String>) {
     }
 }
 
-fn hidden_env() -> Vec<String> {
+/// sa 自己用的密钥的环境变量名：交给别的程序跑时要去掉。
+pub fn hidden_env() -> Vec<String> {
     HIDDEN_ENV.read().unwrap().clone()
 }
 
