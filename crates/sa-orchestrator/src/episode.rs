@@ -79,6 +79,8 @@ pub(crate) struct Episode {
     outstanding: Vec<BotId>,
     /// 已经做完的成员交回来的回复，叫主 Agent 起来时一起交给它。
     returns: Vec<MessageId>,
+    /// 主 Agent 正在说：它这一轮可能还要派活，派出去的先做完也等它说完再叫它。
+    lead_busy: bool,
     /// 每一对 Bot 之间互相找过几次。
     pairs: HashMap<(BotId, BotId), usize>,
     /// 最近几条 Bot 说的话（归一化之后），用来发现复读。
@@ -96,6 +98,7 @@ impl Episode {
             turns: running,
             tickets: self.tickets,
             lead: self.lead.take(),
+            lead_busy: self.lead_busy && running > 0,
             ..Self::default()
         };
         self.queue.extend(first);
@@ -158,6 +161,13 @@ impl Episode {
     /// `bot_id` 说完了一轮，`reply` 是它的回复，`for_lead` 是这一轮是不是主 Agent 派的活。
     /// 派出去的都做完了，就让主 Agent 排上队看这些结果。它要看的结果已经都看过时，那一轮什么也不说。
     pub fn settle(&mut self, bot_id: &BotId, reply: Option<MessageId>, for_lead: bool) {
+        if self.lead.as_ref() == Some(bot_id) {
+            self.lead_busy = false;
+            if self.outstanding.is_empty() && !self.returns.is_empty() {
+                self.wake_lead();
+            }
+            return;
+        }
         if !for_lead {
             return;
         }
@@ -175,6 +185,9 @@ impl Episode {
         let Some(lead) = self.lead.clone() else {
             return;
         };
+        if self.lead_busy {
+            return;
+        }
         let returns = std::mem::take(&mut self.returns);
         match self.queue.iter_mut().find(|job| job.bot_id == lead) {
             Some(queued) => queued.reply_to.extend(returns),
@@ -218,7 +231,9 @@ impl Episode {
                 return None;
             }
             self.turns += 1;
-            return self.queue.remove(index);
+            let job = self.queue.remove(index)?;
+            self.lead_busy |= self.lead.as_ref() == Some(&job.bot_id);
+            return Some(job);
         }
         // 排着队的都说完了（或者都在说），轮到欠着的。它看的是另一件事：算新的一轮。
         if !self.queue.is_empty() {
@@ -227,6 +242,7 @@ impl Episode {
         let index = self.owed.iter().position(|(id, _)| free(id))?;
         let (bot_id, cause) = self.owed.remove(index)?;
         self.renew(running.len() + 1);
+        self.lead_busy |= self.lead.as_ref() == Some(&bot_id);
         Some(Job::new(bot_id, 0).replying(cause))
     }
 
@@ -646,6 +662,52 @@ mod tests {
         episode.settle(&bot("c"), Some(two.clone()), job.for_lead);
         let lead = episode.next(&[]).unwrap();
         assert_eq!((lead.bot_id, lead.reply_to), (bot("lead"), vec![one, two]));
+    }
+
+    #[test]
+    fn a_member_finishing_while_the_lead_still_hands_out_work_does_not_wake_it_early() {
+        let mut episode = Episode::default();
+        episode.set_lead(Some(bot("lead")));
+        episode.restart(vec![Job::new(bot("lead"), 0)], 0);
+        assert_eq!(episode.next(&[]).unwrap().bot_id, bot("lead"));
+        let pending = episode.ask(&bot("lead"), 0, &bot("c"), "写登录页").unwrap();
+        episode.deliver(pending);
+        let job = episode.next(&[bot("lead")]).unwrap();
+        let coded = MessageId::new();
+        episode.settle(&bot("c"), Some(coded.clone()), job.for_lead);
+        assert!(!episode.queued().contains(&bot("lead")));
+        // 主 Agent 还在说，接着派给 r：要等 r 也做完、它自己也说完。
+        let pending = episode
+            .ask(&bot("lead"), 0, &bot("r"), "列安全要点")
+            .unwrap();
+        episode.deliver(pending);
+        let job = episode.next(&[bot("lead")]).unwrap();
+        episode.settle(&bot("lead"), None, false);
+        assert!(!episode.queued().contains(&bot("lead")));
+        let reviewed = MessageId::new();
+        episode.settle(&bot("r"), Some(reviewed.clone()), job.for_lead);
+        let lead = episode.next(&[]).unwrap();
+        assert_eq!(
+            (lead.bot_id, lead.reply_to),
+            (bot("lead"), vec![coded, reviewed])
+        );
+    }
+
+    #[test]
+    fn a_member_done_before_the_lead_finishes_wakes_it_once_the_lead_is_done() {
+        let mut episode = Episode::default();
+        episode.set_lead(Some(bot("lead")));
+        episode.restart(vec![Job::new(bot("lead"), 0)], 0);
+        episode.next(&[]).unwrap();
+        let pending = episode.ask(&bot("lead"), 0, &bot("c"), "写登录页").unwrap();
+        episode.deliver(pending);
+        let job = episode.next(&[bot("lead")]).unwrap();
+        let coded = MessageId::new();
+        episode.settle(&bot("c"), Some(coded.clone()), job.for_lead);
+        assert!(!episode.queued().contains(&bot("lead")));
+        episode.settle(&bot("lead"), None, false);
+        let lead = episode.next(&[]).unwrap();
+        assert_eq!((lead.bot_id, lead.reply_to), (bot("lead"), vec![coded]));
     }
 
     #[test]
