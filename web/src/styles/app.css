@@ -194,28 +194,28 @@ button.sa-stage-room:hover,
   line-height: 1;
   user-select: none;
 }
-.sa-avatar[data-hue="0"] {
+[data-hue="0"] {
   --hue: #d6534a;
 }
-.sa-avatar[data-hue="1"] {
+[data-hue="1"] {
   --hue: #dd8430;
 }
-.sa-avatar[data-hue="2"] {
+[data-hue="2"] {
   --hue: #b8960f;
 }
-.sa-avatar[data-hue="3"] {
+[data-hue="3"] {
   --hue: #43a765;
 }
-.sa-avatar[data-hue="4"] {
+[data-hue="4"] {
   --hue: #21a19b;
 }
-.sa-avatar[data-hue="5"] {
+[data-hue="5"] {
   --hue: #3d83df;
 }
-.sa-avatar[data-hue="6"] {
+[data-hue="6"] {
   --hue: #7a6be0;
 }
-.sa-avatar[data-hue="7"] {
+[data-hue="7"] {
   --hue: #c65cb0;
 }
 .sa-row-avatar {
@@ -709,6 +709,77 @@ button.sa-row:hover {
   width: 2px;
   border-radius: 1px;
   background: color-mix(in srgb, var(--sa-accent) 55%, var(--sa-border));
+}
+/*
+ * Bot 之间的交接：主线左边一根弯线，从交出去的 Bot 连到接手的 Bot，颜色从一个人渐变到另一个人。
+ * 接手的还在做时线上有光在流动，那条回复旁边的主线也跟着流动。
+ */
+.sa-messages > li.sa-links {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.sa-links svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+.sa-link path {
+  fill: none;
+  stroke-linecap: round;
+}
+.sa-link-line {
+  stroke-width: 1.5;
+  opacity: 0.45;
+}
+.sa-link[data-live="true"] .sa-link-line {
+  opacity: 0.7;
+}
+.sa-link-glow {
+  stroke-width: 6;
+  opacity: 0.12;
+}
+.sa-link-flow {
+  stroke-width: 2;
+  stroke-dasharray: 5 11;
+  animation: sa-link-flow 0.9s linear infinite;
+}
+@keyframes sa-link-flow {
+  to {
+    stroke-dashoffset: -16;
+  }
+}
+.sa-msg[data-sender="bot"][data-state="streaming"]::before {
+  content: "";
+  position: absolute;
+  top: 34px;
+  bottom: 0;
+  left: calc(-1 * var(--sa-gutter) + 13px);
+  width: 2px;
+  border-radius: 1px;
+  background: repeating-linear-gradient(
+    to bottom,
+    var(--hue, var(--sa-accent)) 0 6px,
+    transparent 6px 14px
+  );
+  background-size: 2px 14px;
+  opacity: 0.8;
+  animation: sa-line-flow 0.9s linear infinite;
+}
+@keyframes sa-line-flow {
+  to {
+    background-position: 0 14px;
+  }
+}
+.sa-handoff {
+  padding: 0 7px;
+  border-radius: var(--sa-radius-pill);
+  background: color-mix(in srgb, var(--hue, var(--sa-accent)) 14%, transparent);
+  color: color-mix(in srgb, var(--hue, var(--sa-accent)) 70%, var(--sa-fg));
+  font-size: var(--sa-text-xs);
+  font-weight: 500;
 }
 .sa-msg-head {
   display: flex;
@@ -1567,7 +1638,9 @@ button.sa-row:hover {
   .sa-caret,
   .sa-step-dot,
   .sa-send,
-  .sa-messages > li[data-flash="true"] {
+  .sa-messages > li[data-flash="true"],
+  .sa-link-flow,
+  .sa-msg[data-state="streaming"]::before {
     animation: none !important;
   }
   .sa-step[data-state="running"] .sa-step-title {

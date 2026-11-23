@@ -6,6 +6,8 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { RoomChat } from "../api/chat";
 import { safeUrl, sourceName, splitEvent } from "../api/links";
 import { shownTriggers, triggerTitle } from "../api/routines";
+import { handoffsOf } from "../api/handoffs";
+import { hueOf } from "../api/avatar";
 import { repliesOf, type Reply } from "../api/replies";
 import { steersOf, type Steer } from "../api/steer";
 import { isLatestDelivery, type TaskBoard } from "../api/tasks";
@@ -13,6 +15,7 @@ import type { TaskActions } from "../api/useWorkspace";
 import type { ApprovalDecision, ApprovalId, Bot, Message, Task, TaskId, ToolStep } from "../api/types";
 import { Artifacts, StateBadge, TaskActionBar, deliveryHeading } from "./TaskCards";
 import { BotAvatar } from "./BotAvatar";
+import { HandoffLinks } from "./HandoffLinks";
 import { Icon } from "./Icon";
 import { splitMentions } from "./mentions";
 
@@ -121,6 +124,8 @@ export function Timeline({
     [messages, triggers],
   );
 
+  const handoffs = useMemo(() => handoffsOf(messages), [messages]);
+
   const loadOlder = async () => {
     setLoadingOlder(true);
     setOlderError(null);
@@ -174,6 +179,7 @@ export function Timeline({
   } else {
     body = (
       <ol className="sa-messages">
+        {handoffs.length > 0 && <HandoffLinks handoffs={handoffs} />}
         {chat?.hasMore && (
           <li className="sa-older">
             <button type="button" className="sa-chip" disabled={loadingOlder} onClick={() => void loadOlder()}>
@@ -445,11 +451,14 @@ function MessageItem({
   // 这条消息里有一步在等人批准：它不是在写，是在等你。
   const asking = message.steps.some((step) => step.state === "waiting");
   const mentioned = message.mentions.flatMap((id) => bots.find((bot) => bot.id === id)?.name ?? []);
+  // Bot 用 `ask_bot` 找别人的那句话：标出交给了谁。
+  const handedTo = sender.kind === "bot" && message.kind === "chat" ? mentioned : [];
   return (
     <li
       className="sa-msg"
       data-message-id={message.id}
       data-sender={sender.kind}
+      data-hue={sender.kind === "bot" ? hueOf(sender.bot_id) : undefined}
       // 自己在界面里发的话靠右；Bot 和从 Telegram 进来的别人的话靠左。
       data-mine={sender.kind === "user" && !origin}
       data-state={state}
@@ -460,6 +469,7 @@ function MessageItem({
       <div className="sa-msg-head">
         <span className="sa-msg-name">{name}</span>
         {origin && <span className="sa-tag">{sourceName(origin.source)}</span>}
+        {handedTo.length > 0 && <span className="sa-handoff">交给 {handedTo.join("、")}</span>}
         {steer && (
           <span
             className="sa-steer"
