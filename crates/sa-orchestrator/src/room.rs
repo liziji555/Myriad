@@ -979,9 +979,14 @@ async fn harness_turn(
     observer
         .tool_started("harness-start", "harness", &title, &input.to_string())
         .await;
-    let reason = format!(
+    let mut reason = format!(
         "{label} 会自己改文件、执行命令，苦乐管不到它里面的每一步。它只在从 {workspace} 开出来的独立目录里干活，改动要你验收后才带回。"
     );
+    // 设置里写了命令就照它启动，不管名字叫什么：命令得让人看见。
+    let command = bot.harness_command.trim();
+    if !command.is_empty() {
+        reason.push_str(&format!("\n启动的命令：{command}"));
+    }
     let asked = observer.request_approval(ApprovalRequest {
         call_id: "harness-start",
         tool: "harness",
