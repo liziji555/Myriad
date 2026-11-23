@@ -479,8 +479,7 @@ pub(crate) fn relay(tx: &Transaction<'_>, message: &Message) -> sa_store::Result
         }
         _ => return Ok(()),
     };
-    let Some(trigger) =
-        messages::last_trigger_before(tx, &message.room_id, message.seq, bot_id, message.hop)?
+    let Some(trigger) = messages::last_trigger_before(tx, &message.room_id, message.seq, bot_id)?
     else {
         return Ok(());
     };
@@ -880,24 +879,23 @@ mod tests {
         let queued = || engine.pending_outbound(Source::Telegram, 10).unwrap();
         assert_eq!(queued().len(), 1);
 
-        // 事件交给了入口 Bot，它还没说，人在界面里点名问另一个 Bot：两个都会说。
-        // 被点名的回的是界面里的话，不送；入口 Bot 说的是那件事，照常送出去。
+        // 事件交给了入口 Bot，它还没说，人在界面里点名问另一个 Bot：入口 Bot 也看得到界面里的这句话，
+        // 它的回复可能带着界面里的内容，所以两个都不送，免得界面里的话被转到外面。
         engine.receive(issue("d-3", "me/app")).unwrap();
         engine
             .post_user_message(&room, "@Coder 上个月的账对上了吗")
             .unwrap();
         reply(&engine, &room, &other.id, "对上了。");
         assert_eq!(queued().len(), 1);
-        reply(&engine, &room, &bot, "又有个新 issue。");
-        assert_eq!(queued().len(), 2);
-        assert!(queued()[1].body.ends_with("又有个新 issue。"));
-        // 入口 Bot 被交接过来接着回界面里的话（不是第一手）：不送。
+        reply(&engine, &room, &bot, "又有个新 issue。账也对上了。");
+        assert_eq!(queued().len(), 1);
+        // 入口 Bot 被交接过来接着回界面里的话（不是第一手）：也不送。
         let draft = engine.begin_bot_message(&room, &bot, 1).unwrap();
         engine.append_delta(&draft.id, "补充：账是 Coder 对的。");
         engine
             .finish_message(&draft.id, MessageState::Complete, None)
             .unwrap();
-        assert_eq!(queued().len(), 2);
+        assert_eq!(queued().len(), 1);
     }
 
     #[test]
