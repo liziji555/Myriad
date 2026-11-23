@@ -191,15 +191,16 @@ impl Turn {
             .collect();
 
         loop {
+            // 先看停没停：停下之后进来的话留在收件箱里，下一轮再答，不能在这里读掉。
+            if cancel.is_cancelled() {
+                return Ok(TurnEnd::Cancelled);
+            }
             for input in inbox.drain().await {
                 transcript.append(EntryBody::User {
                     content: input.content,
                     message_id: input.message_id,
                     message_seq: input.message_seq,
                 })?;
-            }
-            if cancel.is_cancelled() {
-                return Ok(TurnEnd::Cancelled);
             }
             if self.steps >= config.max_steps {
                 return Ok(TurnEnd::MaxSteps);
@@ -1227,12 +1228,22 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(100)).await;
             stopper.cancel();
         });
+        // 写的时候人又问了一句：停下了，这句留给下一轮，不读掉。
         let outcome = rig
-            .turn(&provider, vec![vec![says("写", 1)]], &observer, &cancel)
+            .turn(
+                &provider,
+                vec![vec![says("写", 1)], vec![says("又问", 2)]],
+                &observer,
+                &cancel,
+            )
             .await;
 
         assert_eq!(outcome.end, TurnEnd::Cancelled);
         assert_eq!(rig.tool_results()[0], ("结果 写完".to_string(), false));
+        assert_eq!(
+            rig.kinds().iter().filter(|kind| **kind == "user").count(),
+            1
+        );
         assert!(
             observer.log().contains(&"finish:c1:true".to_string()),
             "{:?}",
