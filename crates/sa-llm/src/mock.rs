@@ -255,6 +255,9 @@ fn demo_reply(request: &ChatRequest) -> MockReply {
             lines.join("\n")
         ));
     }
+    if let Some(reply) = demo_lead(request, last, said) {
+        return reply;
+    }
     // 「任务：……」开一个任务，冒号后面就是要做的事。
     if let Some((_, scope)) = said
         .split_once("任务：")
@@ -417,6 +420,84 @@ fn demo_work(request: &ChatRequest, last: &crate::ChatMessage) -> MockReply {
         "done",
         "（Mock 模型）任务说明里没有反引号写法，所以什么都没改，直接交了。这是固定规则生成的结果。",
     )
+}
+
+/// 假的主 Agent：人说的话（没有反引号写法时）派给房间里每个成员；成员交回结果后汇总一句。
+fn demo_lead(request: &ChatRequest, last: &crate::ChatMessage, said: &str) -> Option<MockReply> {
+    let system = request
+        .messages
+        .first()
+        .filter(|m| m.role == Role::System)?;
+    if !system.content.contains("你是这个房间的主 Agent") {
+        return None;
+    }
+    // 多 Bot 房间里人说的话带「【用户】」前缀，成员交回的结果带成员的名字。
+    let from_member = |m: &crate::ChatMessage| {
+        let from_user = m
+            .content
+            .strip_prefix("【用户")
+            .is_some_and(|rest| rest.starts_with(['】', '（']));
+        m.role == Role::User && m.content.starts_with('【') && !from_user
+    };
+    // 成员没做完时，交回的结果最后一行是房间补上的说明。
+    let unfinished = |m: &crate::ChatMessage| {
+        m.content.rsplit_once('\n').is_some_and(|(_, note)| {
+            ["[这一轮出错了：", "[这一轮被用户停下了", "[这一轮中途断了"]
+                .iter()
+                .any(|marker| note.starts_with(marker))
+        })
+    };
+    if from_member(last) {
+        let from: Vec<&str> = request
+            .messages
+            .iter()
+            .rev()
+            .take_while(|m| from_member(m))
+            .filter(|m| !unfinished(m))
+            .filter_map(|m| m.content[3..].split_once('】').map(|(name, _)| name))
+            .collect();
+        if from.is_empty() {
+            return Some(MockReply::text(
+                "（Mock 主 Agent）成员没做完，这件事先停在这里。",
+            ));
+        }
+        return Some(MockReply::text(&format!(
+            "（Mock 主 Agent）{} 都交回来了，这件事做完了。",
+            from.into_iter().rev().collect::<Vec<_>>().join("、")
+        )));
+    }
+    if said.contains('`') || !request.tools.iter().any(|t| t.name == "ask_bot") {
+        return None;
+    }
+    let members: Vec<&str> = system
+        .content
+        .split_once("房间里还有别的 Bot：")?
+        .1
+        .lines()
+        .skip_while(|line| line.trim().is_empty())
+        .take_while(|line| line.starts_with("- "))
+        .filter_map(|line| line[2..].split_once('：').map(|(name, _)| name))
+        .take(3)
+        .collect();
+    if members.is_empty() {
+        return None;
+    }
+    let calls: Vec<(String, String)> = members
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            let arguments = serde_json::json!({ "bot": name, "message": said.trim() });
+            (format!("mock_lead_{i}"), arguments.to_string())
+        })
+        .collect();
+    let calls: Vec<(&str, &str, &str)> = calls
+        .iter()
+        .map(|(id, arguments)| (id.as_str(), "ask_bot", arguments.as_str()))
+        .collect();
+    Some(MockReply::tool_calls(
+        &format!("（Mock 主 Agent）这件事派给 {}。", members.join("、")),
+        &calls,
+    ))
 }
 
 /// 假路由：从材料里的 Bot 列表中，选名字出现在用户消息里的那个；都没出现就选入口 Bot。
@@ -750,5 +831,42 @@ mod tests {
         let plain = collect(&provider, request(vec![ChatMessage::user("你好")])).await;
         assert!(plain.text.contains("你好"));
         assert!(plain.tool_calls.is_empty());
+    }
+
+    #[tokio::test]
+    async fn demo_lead_hands_the_question_to_every_member_and_sums_up_the_results() {
+        let provider = MockProvider::demo();
+        let system = ChatMessage::system(
+            "你是助手。\n房间里还有别的 Bot：\n- Coder：写代码\n- Reviewer：审查\n\n你是这个房间的主 Agent：专门和用户对话。",
+        );
+        let mut req = request(vec![
+            system.clone(),
+            ChatMessage::user("【用户】做一个登录页"),
+        ]);
+        req.tools = vec![ToolSpec {
+            name: "ask_bot".into(),
+            description: String::new(),
+            parameters: serde_json::json!({}),
+        }];
+        let handed = collect(&provider, req.clone()).await;
+        let bots: Vec<&str> = handed
+            .tool_calls
+            .iter()
+            .map(|c| c.arguments.as_str())
+            .collect();
+        assert_eq!(bots.len(), 2, "{bots:?}");
+        assert!(
+            bots[0].contains("Coder") && bots[1].contains("Reviewer"),
+            "{bots:?}"
+        );
+
+        req.messages = vec![
+            system,
+            ChatMessage::user("【Coder】写好了"),
+            ChatMessage::user("【Reviewer】审过了"),
+        ];
+        let summed = collect(&provider, req).await;
+        assert!(summed.tool_calls.is_empty());
+        assert!(summed.text.contains("Coder、Reviewer"), "{}", summed.text);
     }
 }

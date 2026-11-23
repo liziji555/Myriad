@@ -39,6 +39,7 @@ pub(crate) fn add_chat(
     state: MessageState,
     mentions: Option<Vec<BotId>>,
     hop: u32,
+    reply_to: Vec<MessageId>,
     now: i64,
 ) -> sa_store::Result<Option<(Message, i64)>> {
     let Some(room) = rooms::get(tx, room_id)? else {
@@ -62,6 +63,7 @@ pub(crate) fn add_chat(
         content,
         mentions,
         hop,
+        reply_to,
         kind: MessageKind::Chat,
         task_id: None,
         run_id: None,
@@ -120,6 +122,7 @@ impl Engine {
             MessageState::Complete,
             None,
             0,
+            vec![],
         )
     }
 
@@ -127,6 +130,17 @@ impl Engine {
     /// [`Engine::append_delta`]、[`Engine::set_steps`]、[`Engine::finish_message`] 推进。
     /// `hop` 是这条回复在 Bot 之间转到了第几手。
     pub fn begin_bot_message(&self, room_id: &RoomId, bot_id: &BotId, hop: u32) -> Result<Message> {
+        self.begin_reply(room_id, bot_id, hop, vec![])
+    }
+
+    /// 和 [`Engine::begin_bot_message`] 一样，另外记下这条回复是在回哪几条消息。
+    pub fn begin_reply(
+        &self,
+        room_id: &RoomId,
+        bot_id: &BotId,
+        hop: u32,
+        reply_to: Vec<MessageId>,
+    ) -> Result<Message> {
         let message = self.insert_message(
             room_id,
             Sender::Bot {
@@ -136,12 +150,13 @@ impl Engine {
             MessageState::Streaming,
             Some(vec![]),
             hop,
+            reply_to,
         )?;
         self.drafts().insert(message.id.clone(), message.clone());
         Ok(message)
     }
 
-    /// Bot 对另一个 Bot 说的一句话：一次写完，房间里的人都看得到。
+    /// Bot 对另一个 Bot 说的一句话：一次写完，房间里的人都看得到。`reply_to` 是它说这句话时所在的那条回复。
     pub fn post_bot_message(
         &self,
         room_id: &RoomId,
@@ -149,6 +164,7 @@ impl Engine {
         content: &str,
         mentions: Vec<BotId>,
         hop: u32,
+        reply_to: Vec<MessageId>,
     ) -> Result<Message> {
         self.insert_message(
             room_id,
@@ -159,10 +175,12 @@ impl Engine {
             MessageState::Complete,
             Some(mentions),
             hop,
+            reply_to,
         )
     }
 
     /// `mentions` 为 `None` 时从内容里的 `@名字` 认。
+    #[allow(clippy::too_many_arguments)]
     fn insert_message(
         &self,
         room_id: &RoomId,
@@ -171,11 +189,24 @@ impl Engine {
         state: MessageState,
         mentions: Option<Vec<BotId>>,
         hop: u32,
+        reply_to: Vec<MessageId>,
     ) -> Result<Message> {
         let now = now_ms();
         let (message, seq) = self
             .store
-            .write(|tx| add_chat(tx, room_id, sender, content, state, mentions, hop, now))?
+            .write(|tx| {
+                add_chat(
+                    tx,
+                    room_id,
+                    sender,
+                    content,
+                    state,
+                    mentions,
+                    hop,
+                    reply_to.clone(),
+                    now,
+                )
+            })?
             .ok_or_else(|| EngineError::NotFound("没有这个房间".into()))?;
         self.publish(seq);
         Ok(message)

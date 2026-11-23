@@ -3,7 +3,7 @@
 use crate::room::db;
 use crate::{RoomLink, Shared};
 use async_trait::async_trait;
-use sa_protocol::{Bot, RoomId};
+use sa_protocol::{Bot, MessageId, RoomId};
 use sa_tools::{Tool, ToolCtx, ToolError, ToolResult};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -24,6 +24,8 @@ pub(crate) struct AskBotTool {
     pub hop: Arc<AtomicU32>,
     /// 独立评议：被找的 Bot 也只看到这条之前的，和这一轮的别人一样。
     pub blind: Option<i64>,
+    /// 它这一轮的回复：交接的话记成在这条回复里说的。
+    pub said_in: MessageId,
 }
 
 #[derive(Deserialize)]
@@ -139,16 +141,20 @@ impl Tool for AskBotTool {
             target.id.clone(),
         );
         let content = format!("@{} {message}", target.name);
+        let said_in = self.said_in.clone();
         let hop = pending.job.hop;
         let link = self.link.clone();
         // 发消息和排队放在一起做完：这一步被停下（工具调用被丢掉）时，话已经落了库，对方也照样排上，
         // 不会留下一句没人接的交接，也不会一直占着上限。
         let posted = tokio::spawn(async move {
-            let posted =
-                db(move || engine.post_bot_message(&room_id, &from, &content, vec![to], hop)).await;
+            let posted = db(move || {
+                engine.post_bot_message(&room_id, &from, &content, vec![to], hop, vec![said_in])
+            })
+            .await;
             match posted {
-                // 对方在自己的道上马上开始，不用等这边说完。
-                Ok(_) => {
+                // 对方在自己的道上马上开始，不用等这边说完。对方的回复记成在回这句交接。
+                Ok(posted) => {
+                    pending.job.reply_to = vec![posted.id];
                     link.episode().deliver(pending);
                     link.wake.notify_one();
                     Ok(())

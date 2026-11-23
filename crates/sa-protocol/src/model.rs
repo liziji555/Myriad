@@ -104,6 +104,8 @@ pub enum Discussion {
     Rounds,
     /// 每个 Bot 各答一份，答的时候看不到别人这一次的答案。
     Blind,
+    /// 由入口 Bot 当主 Agent：它把活派给成员，成员做完自动交回给它，由它决定下一步。
+    Lead,
 }
 
 str_enum!(Discussion {
@@ -111,6 +113,7 @@ str_enum!(Discussion {
     Parallel => "parallel",
     Rounds => "rounds",
     Blind => "blind",
+    Lead => "lead",
 });
 
 /// 轮流讨论默认转两圈。
@@ -365,6 +368,10 @@ pub struct Message {
     /// Bot 之间转了几手：人发的是 0，被人叫到的 Bot 回的是 0，它再去找别的 Bot 是 1，依此类推。
     #[serde(default)]
     pub hop: u32,
+    /// 这条消息是在回哪几条：Bot 的回复是叫起它的那句话（人说的、交接给它的、成员交回来的结果），
+    /// Bot 交接时说的话是它所在的那条回复。人说的话是空的。
+    #[serde(default)]
+    pub reply_to: Vec<MessageId>,
     #[serde(default)]
     pub kind: MessageKind,
     /// 任务卡、运行、交付卡是哪个任务的。

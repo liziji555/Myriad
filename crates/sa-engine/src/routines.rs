@@ -257,6 +257,7 @@ impl Engine {
                 content: format!("{}\n\n{}", routine.title, routine.prompt),
                 mentions: vec![routine.bot_id.clone()],
                 hop: 0,
+                reply_to: vec![],
                 kind: MessageKind::Routine,
                 task_id: None,
                 run_id: None,

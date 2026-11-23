@@ -9,6 +9,7 @@ function message(patch: Partial<Message> & Pick<Message, "id" | "seq">): Message
     content: "话",
     mentions: [],
     hop: 0,
+    reply_to: [],
     kind: "chat",
     steps: [],
     state: "complete",

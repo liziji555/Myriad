@@ -15,7 +15,7 @@ use sa_protocol::{
     MessageState, Room, RoomActivity, RoomId, Sender, SessionId, Source, StepApproval, StepState,
     ToolStep, MAX_ROUNDS,
 };
-use sa_tools::{Fence, ToolCtx};
+use sa_tools::{Fence, ToolCtx, ToolRegistry};
 use serde_json::Value;
 use std::collections::{BTreeSet, HashMap};
 use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
@@ -111,7 +111,10 @@ fn load_cursor(transcript: &Transcript) -> SavedCursor {
 type Sessions = HashMap<BotId, Arc<tokio::sync::Mutex<Session>>>;
 
 /// 一个 Bot 说完一轮：是谁，结果如何。
-type Lanes = JoinSet<(BotId, Result<(), String>)>;
+/// 每条道结束时交回：谁、它这一轮的回复（开口了才有）、结果。
+/// 谁、它这一轮的回复（开口了才有）、这一轮是不是主 Agent 派的活、结果。
+type LaneEnd = (BotId, Option<MessageId>, bool, Result<(), String>);
+type Lanes = JoinSet<LaneEnd>;
 
 /// 在阻塞线程上做数据库操作。
 pub(crate) async fn db<T: Send + 'static>(
@@ -189,9 +192,9 @@ async fn finished(
     link: &RoomLink,
     sessions: &Sessions,
     owed: &mut HashMap<BotId, i64>,
-    done: Result<(BotId, Result<(), String>), tokio::task::JoinError>,
+    done: Result<LaneEnd, tokio::task::JoinError>,
 ) {
-    let (bot_id, result) = match done {
+    let (bot_id, reply, for_lead, result) = match done {
         Ok(done) => done,
         Err(error) => {
             // 道出了意外（不该发生）：哪个 Bot 不知道了，把已经结束的道都清掉。
@@ -207,6 +210,8 @@ async fn finished(
     };
     link.lanes.lock().unwrap().retain(|(id, _)| id != &bot_id);
     link.speaking.lock().unwrap().retain(|id| id != &bot_id);
+    // 主 Agent 派出去的成员做完了（做成、出错都算）：结果交回给它。
+    link.episode().settle(&bot_id, reply, for_lead);
     match &result {
         Ok(()) => {}
         Err(error) if error.ends_with(STOPPED) => {
@@ -267,6 +272,7 @@ async fn work(
     let (room, members) = db(move || members_of(&engine, &id))
         .await
         .map_err(|e| e.to_string())?;
+    link.episode().set_lead(lead_of(&room, &members));
 
     if link.handled.load(Ordering::SeqCst) < 0 {
         // 刚启动：哪些人类消息已经有 Bot 看过，从会话记录里算。
@@ -325,7 +331,7 @@ async fn work(
                 continue;
             };
             if members.iter().any(|bot| &bot.id == target) {
-                episode.owe(target.clone());
+                episode.owe(target.clone(), Some(message.id.clone()));
             }
         }
     }
@@ -359,11 +365,13 @@ async fn work(
             .push((bot.id.clone(), cancel.clone()));
         let (shared, room_id, link) = (shared.clone(), room_id.clone(), link.clone());
         lanes.spawn(async move {
+            let reply = Mutex::new(None);
+            let for_lead = job.for_lead;
             let result = turn(
-                &shared, &room_id, &bot, &job, &others, &link, &session, cancel,
+                &shared, &room_id, &bot, &job, &others, &link, &session, cancel, &reply,
             )
             .await;
-            (bot.id, result)
+            (bot.id, reply.into_inner().unwrap(), for_lead, result)
         });
     }
     Ok(())
@@ -514,7 +522,7 @@ async fn owe_unread(
                 !session.seen(message.seq) && message.seq > session.dismissed
             };
             if unread {
-                link.episode().owe(target.clone());
+                link.episode().owe(target.clone(), Some(message.id.clone()));
             }
         }
     }
@@ -548,7 +556,7 @@ async fn dispatch(
         let latest = owed.entry(bot_id.clone()).or_default();
         *latest = (*latest).max(seq);
     };
-    let mut first: Vec<BotId> = vec![];
+    let mut first: Vec<(BotId, MessageId)> = vec![];
     let mut open = None;
     for message in fresh.iter().filter(|m| m.kind == MessageKind::Chat) {
         let named: Vec<&BotId> = message.mentions.iter().filter(|id| is_member(id)).collect();
@@ -562,20 +570,29 @@ async fn dispatch(
         for bot_id in named {
             if running.contains(bot_id) {
                 owe(bot_id, message.seq);
-            } else if !first.contains(bot_id) {
-                first.push(bot_id.clone());
+            } else if !first.iter().any(|(id, _)| id == bot_id) {
+                first.push((bot_id.clone(), message.id.clone()));
             }
         }
     }
     let mut first: Vec<Job> = first
         .into_iter()
-        .map(|bot_id| Job::new(bot_id, 0))
+        .map(|(bot_id, cause)| Job::new(bot_id, 0).replying(vec![cause]))
         .collect();
+    // 有主 Agent：没点名的话都交给它，由它决定派给谁。它正在说的话会在这一轮里看到。
+    if let Some(latest) = open.filter(|_| room.discussion == Discussion::Lead) {
+        if let Some(lead) = lead_of(room, members) {
+            if !running.contains(&lead) && !first.iter().any(|job| job.bot_id == lead) {
+                first.push(Job::new(lead, 0).replying(vec![latest.id.clone()]));
+            }
+            return first;
+        }
+    }
     // 房间设了别的讨论方式：没点名的话不挑人，按讨论方式叫上大家。
     if let Some(latest) = open.filter(|_| room.discussion != Discussion::Normal) {
         let everyone = members.iter().map(|bot| bot.id.clone());
         match room.discussion {
-            Discussion::Normal => {}
+            Discussion::Normal | Discussion::Lead => {}
             // 每个 Bot 各答一份，同时开始。正在说的会在这一轮里看到。
             Discussion::Parallel | Discussion::Blind => {
                 let blind = (room.discussion == Discussion::Blind).then_some(latest.seq);
@@ -583,7 +600,7 @@ async fn dispatch(
                     if !running.contains(&bot_id) && !first.iter().any(|job| job.bot_id == bot_id) {
                         first.push(Job {
                             blind,
-                            ..Job::new(bot_id, 0)
+                            ..Job::new(bot_id, 0).replying(vec![latest.id.clone()])
                         });
                     }
                 }
@@ -594,7 +611,7 @@ async fn dispatch(
                 for _ in 0..room.rounds.clamp(1, MAX_ROUNDS) {
                     first.extend(order.iter().map(|bot_id| Job {
                         in_turn: true,
-                        ..Job::new(bot_id.clone(), 0)
+                        ..Job::new(bot_id.clone(), 0).replying(vec![latest.id.clone()])
                     }));
                 }
             }
@@ -646,8 +663,18 @@ async fn dispatch(
     *link.routing.lock().unwrap() = None;
     chosen
         .into_iter()
-        .map(|bot_id| Job::new(bot_id, 0))
+        .map(|bot_id| Job::new(bot_id, 0).replying(vec![latest.id.clone()]))
         .collect()
+}
+
+/// 讨论方式是「主 Agent 派活」时，房间的主 Agent：入口 Bot，它停用了或不在房间里就是 `None`。
+fn lead_of(room: &Room, members: &[Bot]) -> Option<BotId> {
+    if room.discussion != Discussion::Lead {
+        return None;
+    }
+    room.host_bot_id
+        .clone()
+        .filter(|id| members.iter().any(|bot| &bot.id == id))
 }
 
 /// 打开（或取出已经打开的）某个 Bot 在这个房间里的会话记录。
@@ -722,6 +749,7 @@ async fn turn(
     link: &Arc<RoomLink>,
     session: &tokio::sync::Mutex<Session>,
     cancel: CancellationToken,
+    reply: &Mutex<Option<MessageId>>,
 ) -> Result<(), String> {
     let mut session = session.lock().await;
     let Session {
@@ -766,9 +794,13 @@ async fn turn(
 
     let engine = shared.engine.clone();
     let (room, bot_id) = (room_id.clone(), bot.id.clone());
-    let draft = db(move || engine.begin_bot_message(&room, &bot_id, hop))
+    let reply_to = job.reply_to.clone();
+    let draft = db(move || engine.begin_reply(&room, &bot_id, hop, reply_to))
         .await
         .map_err(|e| e.to_string())?;
+    *reply.lock().unwrap() = Some(draft.id.clone());
+    let lead = link.episode().lead().cloned();
+    let leading = lead.as_ref() == Some(&bot.id);
 
     link.speaking.lock().unwrap().push(bot.id.clone());
     announce(shared, room_id, link).await;
@@ -796,7 +828,8 @@ async fn turn(
             let skills = shared.skills_for(&bot.name).await;
             let config = TurnConfig {
                 model: model.model.clone(),
-                system_prompt: render_prompt(&shared.settings, bot, others, &skills.prompt),
+                system_prompt: render_prompt(&shared.settings, bot, others, &skills.prompt)
+                    + &crate::lead_rules(bot, others, lead.as_ref()),
                 max_steps: shared.settings.max_steps,
                 max_tokens: None,
                 thinking: model.thinking,
@@ -814,7 +847,12 @@ async fn turn(
             let mut ctx = ToolCtx::new(shared.settings.fence.clone());
             ctx.allow_private_network = shared.settings.allow_private_network;
             // 别的 Bot 可能同时在这个工作目录里干活（包括这一轮中途才进房间的）：改文件、执行命令一个一个来。
-            let mut tools = crate::serial::one_writer_at_a_time(shared.tools(), link.clone());
+            // 主 Agent 只看不动手：改文件、执行命令都派给成员。
+            let mut tools = if leading {
+                ToolRegistry::read_only()
+            } else {
+                crate::serial::one_writer_at_a_time(shared.tools(), link.clone())
+            };
             if let Some(tool) = skills.tool {
                 tools.register(tool);
             }
@@ -832,6 +870,7 @@ async fn turn(
                     from: bot.clone(),
                     hop: live_hop,
                     blind: job.blind,
+                    said_in: draft.id.clone(),
                 });
             }
             let provider = crate::budget::guard(shared, model.provider.clone(), None);
@@ -1071,6 +1110,24 @@ impl Inbox for RoomInbox {
                 continue;
             }
             self.see(message.seq, waiting);
+            // 成员没做成也要交回主 Agent：它要知道这件事失败了，才能决定下一步。
+            let mut message = message;
+            let leading = self.link.episode().lead() == Some(&self.bot_id);
+            let unfinished = match message.state {
+                MessageState::Failed => Some(format!(
+                    "这一轮出错了：{}",
+                    message.error.as_deref().unwrap_or("出错了")
+                )),
+                MessageState::Cancelled => Some("这一轮被用户停下了，没做完".into()),
+                MessageState::Interrupted => Some("这一轮中途断了，没做完".into()),
+                _ => None,
+            };
+            if let Some(note) = unfinished.filter(|_| leading && speaker.is_some()) {
+                if message.content.trim().is_empty() {
+                    message.content = "（没做成）".into();
+                }
+                message.content = format!("{}\n[{note}]", message.content);
+            }
             if message.content.trim().is_empty() {
                 continue;
             }

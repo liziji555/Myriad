@@ -421,6 +421,7 @@ fn build(
         content,
         mentions,
         hop: 0,
+        reply_to: vec![],
         kind,
         task_id: None,
         run_id: None,
