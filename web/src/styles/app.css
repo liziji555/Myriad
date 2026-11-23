@@ -802,6 +802,16 @@ button.sa-row:hover {
 .sa-steer[data-live="true"] {
   background: color-mix(in srgb, var(--sa-accent) 12%, transparent);
 }
+.sa-reply {
+  color: var(--sa-fg-muted);
+  font-size: var(--sa-text-xs);
+}
+.sa-reply[data-reply="replying"] {
+  color: var(--sa-accent);
+}
+.sa-reply[data-reply="failed"] {
+  color: var(--sa-danger);
+}
 .sa-msg-note {
   font-size: var(--sa-text-sm);
   color: var(--sa-fg-muted);

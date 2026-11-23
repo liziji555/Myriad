@@ -6,6 +6,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { RoomChat } from "../api/chat";
 import { safeUrl, sourceName, splitEvent } from "../api/links";
 import { shownTriggers, triggerTitle } from "../api/routines";
+import { repliesOf, type Reply } from "../api/replies";
 import { steersOf, type Steer } from "../api/steer";
 import { isLatestDelivery, type TaskBoard } from "../api/tasks";
 import type { TaskActions } from "../api/useWorkspace";
@@ -110,6 +111,10 @@ export function Timeline({
 
   const triggers = useMemo(() => shownTriggers(messages), [messages]);
   const steers = useMemo(() => steersOf(messages), [messages]);
+  const replies = useMemo(
+    () => repliesOf(messages, chat?.activity ?? undefined, (id) => steers.get(id)?.botIds ?? []),
+    [messages, chat?.activity, steers],
+  );
   // 开任务、做的过程、交结果挨在一起时连成一串，看得出哪个是哪个引出来的。
   const chain = useMemo(
     () => chainParts(messages.filter((message) => message.kind !== "routine" || triggers.has(message.id))),
@@ -212,6 +217,7 @@ export function Timeline({
               onDecide={onDecide}
               chain={chain.get(message.id)}
               steer={steers.get(message.id)}
+              reply={replies.get(message.id)}
               work={
                 message.kind === "run"
                   ? {
@@ -413,6 +419,7 @@ function MessageItem({
   work,
   chain,
   steer,
+  reply,
 }: {
   message: Message;
   bots: readonly Bot[];
@@ -421,6 +428,8 @@ function MessageItem({
   chain?: ChainPart;
   /** 这句话是在 Bot 回复的中途插进去的。 */
   steer?: Steer;
+  /** 人说的这句话有没有 Bot 接。 */
+  reply?: Reply;
 }) {
   const [stopping, setStopping] = useState(false);
   const { sender, state } = message;
@@ -458,6 +467,11 @@ function MessageItem({
             title={`在${steeredBot}回复的中途说的：它没有停下，下一次想之前会看到`}
           >
             插话
+          </span>
+        )}
+        {reply && (
+          <span className="sa-reply" data-reply={reply} role="status">
+            {REPLY_LABEL[reply]}
           </span>
         )}
         {state === "streaming" &&
@@ -697,3 +711,10 @@ function formatTime(ms: number): string {
     hour12: false,
   });
 }
+
+const REPLY_LABEL: Record<Reply, string> = {
+  replying: "回复中",
+  replied: "已回复",
+  stopped: "已停止",
+  failed: "回复失败",
+};
