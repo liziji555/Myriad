@@ -41,7 +41,7 @@ use sa_protocol::{
 use sa_tools::{Fence, ToolRegistry};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicI64;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{oneshot, Notify};
@@ -173,6 +173,9 @@ pub(crate) struct RoomLink {
     pub renewed: AtomicI64,
     /// 房间的后台任务是不是正在干活（挑人、Bot 说话、排着队）。
     pub active: std::sync::atomic::AtomicBool,
+    /// 人点了停止：这个 Bot（`None` 是房间里每个 Bot）到这一条（`seq`）为止没看的都不用答了，
+    /// 房间的后台任务记进会话记录，重启之后也不再答。
+    pub dismissals: Mutex<Vec<(Option<BotId>, i64)>>,
 }
 
 impl RoomLink {
@@ -188,6 +191,17 @@ impl RoomLink {
             handled: AtomicI64::new(-1),
             renewed: AtomicI64::new(0),
             active: std::sync::atomic::AtomicBool::new(false),
+            dismissals: Mutex::default(),
+        }
+    }
+
+    /// 记下「到现在为止的都不用答了」，叫醒房间的后台任务把它记进会话记录。
+    fn dismiss(&self, bot_id: Option<&BotId>) {
+        let upto = self.handled.load(Ordering::SeqCst);
+        if upto > 0 {
+            let mut dismissals = self.dismissals.lock().unwrap();
+            dismissals.push((bot_id.cloned(), upto));
+            self.wake.notify_one();
         }
     }
 
@@ -326,6 +340,7 @@ impl Orchestrator {
             episode.clear_queue();
             queued
         };
+        link.dismiss(None);
         let mut stopped = queued;
         if let Some(cancel) = link.routing.lock().unwrap().as_ref() {
             cancel.cancel();
@@ -351,6 +366,7 @@ impl Orchestrator {
             episode.drop_bot(bot_id);
             queued
         };
+        link.dismiss(Some(bot_id));
         let speaking = {
             let lanes = link.lanes.lock().unwrap();
             let lane = lanes.iter().find(|(id, _)| id == bot_id);

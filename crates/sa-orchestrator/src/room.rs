@@ -262,6 +262,7 @@ async fn work(
             owe_unread(shared, room_id, &members, sessions, link, least, seen).await;
         }
     }
+    apply_dismissals(shared, room_id, &members, sessions, link).await;
 
     let engine = shared.engine.clone();
     let (id, after) = (room_id.clone(), link.handled.load(Ordering::SeqCst));
@@ -401,6 +402,42 @@ fn audit_arguments(tool: &str, arguments: &str) -> String {
         .ok()
         .and_then(|input| input["path"].as_str().map(str::to_string));
     path.unwrap_or_default()
+}
+
+/// 人点停止时没在说话的 Bot（排着队的、欠着一条的）：到停止那一刻为止没看的，记成不用答。
+/// 正在说话的由 `finished` 记，这里不去抢它们的会话记录。
+async fn apply_dismissals(
+    shared: &Arc<Shared>,
+    room_id: &RoomId,
+    members: &[Bot],
+    sessions: &mut Sessions,
+    link: &Arc<RoomLink>,
+) {
+    let dismissals = std::mem::take(&mut *link.dismissals.lock().unwrap());
+    for (only, upto) in dismissals {
+        let speaking: Vec<BotId> = link
+            .lanes
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(id, _)| id.clone())
+            .collect();
+        for bot in members {
+            if only.as_ref().is_some_and(|id| id != &bot.id) || speaking.contains(&bot.id) {
+                continue;
+            }
+            match session_of(shared, room_id, &bot.id, sessions).await {
+                Ok(session) => {
+                    let mut session = session.lock().await;
+                    if upto > session.answered() {
+                        session.dismissed = upto;
+                        session.save_cursor();
+                    }
+                }
+                Err(error) => tracing::warn!(room = %room_id, "会话记录打不开：{error}"),
+            }
+        }
+    }
 }
 
 /// 新来的人类消息由谁接，返回要开始说话的 Bot（可以有好几个，同时开始）。
