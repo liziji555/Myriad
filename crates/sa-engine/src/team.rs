@@ -351,7 +351,7 @@ pub fn find_mentions(text: &str, candidates: &[Bot]) -> Vec<BotId> {
 }
 
 /// harness 的命令：内置的没有命令；自定义命令必须写；最长 300 个字。
-fn check_harness(harness: Harness, command: &str) -> Result<String> {
+pub(crate) fn check_harness(harness: Harness, command: &str) -> Result<String> {
     let command = command.trim();
     if harness == Harness::Builtin {
         return Ok(String::new());

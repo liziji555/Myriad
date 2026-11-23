@@ -201,6 +201,10 @@ impl Engine {
         for (_, bot) in &changed {
             crate::team::check_bot(&bot.name, &bot.persona)?;
         }
+        // 先把每个 harness 命令都查一遍：中途才发现不对，前面改过的 Bot 就留下了。
+        for bot in changed.iter().map(|(_, bot)| *bot).chain(fresh.iter().copied()) {
+            crate::team::check_harness(bot.harness, &bot.harness_command)?;
+        }
         if let Some(room) = &team.room {
             crate::check_room_name(&room.name)?;
         }
