@@ -412,6 +412,8 @@ async fn stop_cancels_the_reply_and_the_room_keeps_working() {
     let stopped = rig.settled(2).await.pop().unwrap();
     assert_eq!(stopped.state, MessageState::Cancelled);
     assert_eq!(stopped.content, "写到一半");
+    // 停下的消息先存好，房间再报空闲：等它报完再看。
+    rig.until_idle().await;
     assert!(!rig.orchestrator.stop(&rig.room));
 
     rig.say("换个话题").await;
