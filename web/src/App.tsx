@@ -137,11 +137,18 @@ function Shell() {
   const queued = (roomChat?.activity?.queued ?? []).flatMap(
     (id) => workspace.bots.find((bot) => bot.id === id)?.name ?? [],
   );
-  const setPanelOpen = (open: boolean) => changeLayout({ panelOpen: open });
+  // 窄窗口里房间抽屉和面板都盖在主线上，同一时间只开一个。
+  const setPanelOpen = (open: boolean) => {
+    changeLayout({ panelOpen: open });
+    if (open && !docked) setRoomsOpen(false);
+  };
+  const openRoomsDrawer = () => {
+    setPanelOpen(false);
+    setRoomsOpen(true);
+  };
   const showPanel = (next: PanelTab) => {
     setTab(next);
     setPanelOpen(true);
-    if (!docked) setRoomsOpen(false);
   };
   // 左栏里点的面板页：已经开着的再点一下是收起。抽屉里点了就把抽屉收起来，让出地方。
   const toggleTab = (next: PanelTab) => {
@@ -152,11 +159,8 @@ function Shell() {
   // 左上角那个按钮：宽窗口里收起、展开常驻的左栏，窄窗口里开关抽屉。
   const toggleRooms = () => {
     if (docked) changeLayout({ sidebarCollapsed: !collapsed });
-    else {
-      // 窄窗口里抽屉和面板都盖在主线上，同一时间只开一个。
-      if (!roomsOpen) setPanelOpen(false);
-      setRoomsOpen(!roomsOpen);
-    }
+    else if (roomsOpen) setRoomsOpen(false);
+    else openRoomsDrawer();
   };
   const roomsShown = docked ? !collapsed : roomsOpen || !room;
   // 每个打开过的房间此刻的样子：有步骤等批准是「等你」，有 Bot 在说、在排队、在挑人是「在忙」。
@@ -258,7 +262,7 @@ function Shell() {
       run: () => {
         // 填名字的地方在房间列表里：先把它打开。
         if (docked) changeLayout({ sidebarCollapsed: false });
-        else setRoomsOpen(true);
+        else openRoomsDrawer();
         setCreateSignal((n) => n + 1);
       },
     },
@@ -328,10 +332,7 @@ function Shell() {
         roomsOpen={roomsShown}
         drawerOpen={panelOpen}
         onToggleRooms={toggleRooms}
-        onToggleDrawer={() => {
-          if (!docked) setRoomsOpen(false);
-          setPanelOpen(!panelOpen);
-        }}
+        onToggleDrawer={() => setPanelOpen(!panelOpen)}
         onShowTasks={() => showPanel("tasks")}
         onOpenPalette={() => setPaletteOpen(true)}
         theme={theme}
