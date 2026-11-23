@@ -35,6 +35,9 @@ struct Session {
     cursor: i64,
     /// `cursor` 之后已经看过的：前面有别的 Bot 还没写完的回复，`cursor` 先停在那条前面，等它写完再看。
     ahead: BTreeSet<i64>,
+    /// 这条之前（含）给它的话不用再答：人在它说话时点了停止，那时它还没看到的。
+    /// 只管重启后挑人，不影响它看什么：下次说话时这些话照样在它的上下文里。
+    dismissed: i64,
 }
 
 impl Session {
@@ -47,6 +50,11 @@ impl Session {
         self.ahead.last().copied().unwrap_or(0).max(self.cursor)
     }
 
+    /// 重启时算哪些人类消息已经有着落：看过的，加上停下时不用再答的。
+    fn answered(&self) -> i64 {
+        self.latest().max(self.dismissed)
+    }
+
     /// 看到了哪里存在会话记录旁边：`ahead` 不空时 `cursor` 停在别的 Bot 没写完的回复前面，
     /// 重启后要从那里接着看，不能只看记录里最后一条消息。
     fn save_cursor(&self) {
@@ -54,6 +62,7 @@ impl Session {
         let saved = SavedCursor {
             cursor: self.cursor,
             ahead: self.ahead.clone(),
+            dismissed: self.dismissed,
         };
         let write = || -> std::io::Result<()> {
             let tmp = path.with_extension("cursor.tmp");
@@ -66,10 +75,12 @@ impl Session {
     }
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 struct SavedCursor {
     cursor: i64,
     ahead: BTreeSet<i64>,
+    #[serde(default)]
+    dismissed: i64,
 }
 
 fn cursor_path(transcript: &std::path::Path) -> std::path::PathBuf {
@@ -77,16 +88,23 @@ fn cursor_path(transcript: &std::path::Path) -> std::path::PathBuf {
 }
 
 /// 打开会话时看到了哪里：存下的位置为准，记录里比它新的消息都算看过。
-fn load_cursor(transcript: &Transcript) -> (i64, BTreeSet<i64>) {
+fn load_cursor(transcript: &Transcript) -> SavedCursor {
     let recorded = transcript.message_seqs();
     let saved = std::fs::read(cursor_path(transcript.path()))
         .ok()
         .and_then(|bytes| serde_json::from_slice::<SavedCursor>(&bytes).ok());
-    let Some(SavedCursor { cursor, mut ahead }) = saved else {
-        return (recorded.last().copied().unwrap_or(0), BTreeSet::new());
+    let Some(mut saved) = saved else {
+        return SavedCursor {
+            cursor: recorded.last().copied().unwrap_or(0),
+            ahead: BTreeSet::new(),
+            dismissed: 0,
+        };
     };
-    ahead.extend(recorded.into_iter().filter(|seq| *seq > cursor));
-    (cursor, ahead)
+    let cursor = saved.cursor;
+    saved
+        .ahead
+        .extend(recorded.into_iter().filter(|seq| *seq > cursor));
+    saved
 }
 
 type Sessions = HashMap<BotId, Arc<tokio::sync::Mutex<Session>>>;
@@ -172,8 +190,17 @@ async fn finished(
         Ok(()) => {}
         Err(error) if error.ends_with(STOPPED) => {
             tracing::info!(room = %room_id, "这一轮停下了：{error}");
-            // 人点了停止：它说话期间收到、还没看到的话也不再答。停止之后才来的另外排队（见 dispatch）。
-            owed.remove(&bot_id);
+            // 人点了停止：它说话期间收到、还没看到的话也不再答，重启之后也不答。
+            // 停止之后才来的另外排队（见 dispatch）。
+            if let Some(seq) = owed.remove(&bot_id) {
+                if let Some(session) = sessions.get(&bot_id) {
+                    let mut session = session.lock().await;
+                    if !session.seen(seq) && seq > session.dismissed {
+                        session.dismissed = seq;
+                        session.save_cursor();
+                    }
+                }
+            }
             return;
         }
         Err(error) => tracing::error!(room = %room_id, "这一轮没跑成：{error}"),
@@ -223,7 +250,7 @@ async fn work(
         let mut seen = 0;
         for bot in &members {
             match session_of(shared, room_id, &bot.id, sessions).await {
-                Ok(session) => seen = seen.max(session.lock().await.latest()),
+                Ok(session) => seen = seen.max(session.lock().await.answered()),
                 Err(error) => tracing::warn!(room = %room_id, "会话记录打不开：{error}"),
             }
         }
@@ -473,12 +500,17 @@ async fn session_of(
             .map_err(|e| e.to_string())?;
         let path = shared.settings.sessions_dir.join(format!("{id}.jsonl"));
         let transcript = Transcript::open(&path).map_err(|e| e.to_string())?;
-        let (cursor, ahead) = load_cursor(&transcript);
+        let SavedCursor {
+            cursor,
+            ahead,
+            dismissed,
+        } = load_cursor(&transcript);
         let session = Session {
             id,
             transcript,
             cursor,
             ahead,
+            dismissed,
         };
         sessions.insert(bot_id.clone(), Arc::new(tokio::sync::Mutex::new(session)));
     }
@@ -530,6 +562,7 @@ async fn turn(
         transcript,
         cursor,
         ahead,
+        ..
     } = &mut *session;
     let session_id = session_id.clone();
 
@@ -1430,18 +1463,28 @@ mod cursor_tests {
         heard(&mut transcript, 1);
         heard(&mut transcript, 3);
         // 没存过位置的旧记录：和以前一样，从记录里最后一条往后看。
-        assert_eq!(load_cursor(&transcript), (3, BTreeSet::new()));
+        assert_eq!(load_cursor(&transcript).cursor, 3);
+        assert!(load_cursor(&transcript).ahead.is_empty());
 
         // 第 2 条是别的 Bot 还没写完的回复：停在它前面，第 3 条记进 ahead。
         let saved = SavedCursor {
             cursor: 1,
             ahead: BTreeSet::from([3]),
+            dismissed: 4,
         };
         std::fs::write(cursor_path(&path), serde_json::to_vec(&saved).unwrap()).unwrap();
         // 存完位置之后又进了一条，进程才退出：它也算看过，不会再给一次。
         heard(&mut transcript, 5);
         drop(transcript);
         let transcript = Transcript::open(&path).unwrap();
-        assert_eq!(load_cursor(&transcript), (1, BTreeSet::from([3, 5])));
+        // 停下时没看到的第 4 条记着不用再答。
+        assert_eq!(
+            load_cursor(&transcript),
+            SavedCursor {
+                cursor: 1,
+                ahead: BTreeSet::from([3, 5]),
+                dismissed: 4,
+            }
+        );
     }
 }
