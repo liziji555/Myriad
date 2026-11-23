@@ -251,80 +251,6 @@ button.sa-stage-room:hover,
   }
 }
 
-/* 现场：每个 Bot 一块牌子，写着它此刻在做什么。 */
-.sa-presence {
-  display: flex;
-  gap: var(--sa-space-2);
-  flex: 1;
-  min-width: 0;
-  /* 给头像外面那一圈留出地方，不被裁掉。 */
-  padding: 4px 2px;
-  overflow-x: auto;
-  scrollbar-width: none;
-}
-.sa-presence li {
-  flex: none;
-  min-width: 0;
-}
-.sa-presence-chip {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  max-width: 320px;
-  height: 32px;
-  padding: 0 var(--sa-space-3) 0 5px;
-  border: 1px solid var(--sa-border);
-  border-radius: var(--sa-radius-pill);
-  background: var(--sa-bg-raised);
-  font-size: var(--sa-text-sm);
-  transition:
-    border-color var(--sa-motion),
-    background var(--sa-motion);
-}
-.sa-presence-chip:disabled {
-  cursor: default;
-}
-.sa-presence-chip:not(:disabled):hover {
-  border-color: var(--sa-border-strong);
-}
-.sa-presence-name {
-  font-weight: 600;
-  white-space: nowrap;
-}
-.sa-presence-text {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--sa-fg-muted);
-}
-.sa-presence-short {
-  display: none;
-  font-weight: 600;
-  white-space: nowrap;
-}
-.sa-presence-chip[data-state="idle"],
-.sa-presence-chip[data-state="off"] {
-  background: none;
-}
-.sa-presence-chip[data-state="idle"] .sa-presence-text,
-.sa-presence-chip[data-state="off"] .sa-presence-text {
-  color: var(--sa-fg-faint);
-}
-.sa-presence-chip[data-state="tool"],
-.sa-presence-chip[data-state="writing"],
-.sa-presence-chip[data-state="working"] {
-  border-color: color-mix(in srgb, var(--sa-accent) 45%, transparent);
-}
-.sa-presence-chip[data-state="approval"],
-.sa-presence-chip[data-state="asking"] {
-  border-color: var(--sa-warn);
-  background: color-mix(in srgb, var(--sa-warn) 12%, var(--sa-bg-raised));
-}
-.sa-presence-chip[data-state="approval"] .sa-presence-text,
-.sa-presence-chip[data-state="asking"] .sa-presence-text {
-  color: var(--sa-fg);
-}
 @keyframes sa-pulse {
   50% {
     opacity: 0.35;
@@ -1548,20 +1474,10 @@ button.sa-row:hover {
   }
 }
 @media (max-width: 820px) {
-  /* 现场牌子只剩头像；有事等人的多留「等你」两个字。说的是什么在提示和读屏里还有。 */
-  .sa-presence-name,
-  .sa-presence-text,
   .sa-stage .sa-brand,
   .sa-stage-sep,
   .sa-composer-hint {
     display: none;
-  }
-  .sa-presence-chip {
-    padding: 0 4px;
-  }
-  .sa-presence-short {
-    display: inline;
-    padding-right: 6px;
   }
   .sa-messages {
     --sa-gutter: 36px;
@@ -2717,438 +2633,456 @@ button.sa-row:hover {
   grid-column: 1 / -1;
 }
 
-/*
- * 协作视图：每个 Bot 一条竖线，往下一个节点就是做完一步。
- * 线之间的光是派活、交接和交回结果；亮着的一段是它正在做的这件事。
- */
-.sa-viewbar {
+
+/* ---- 工作树 · 泳道（右栏）和会话上方的 Bot 链：照 Lancer 的工作区排 ------------- */
+.sa-shell {
+  --sa-tree-width: clamp(380px, 34vw, 520px);
+}
+.sa-shell[data-panel-open="false"] {
+  grid-template-columns: var(--sa-side) minmax(0, 1fr) var(--sa-tree-width);
+}
+.sa-tree {
+  grid-row: 2;
+  grid-column: 3;
   display: flex;
-  align-items: center;
-  gap: 2px;
-  padding: 6px var(--sa-space-4) 0;
-  border-bottom: 1px solid var(--sa-border);
-}
-.sa-viewbar button {
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  border-left: 1px solid var(--sa-border);
+  background: var(--sa-bg);
   position: relative;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 12px 8px;
-  border: 0;
-  background: none;
-  color: var(--sa-fg-muted);
-  font: inherit;
-  font-size: var(--sa-text-sm);
-  cursor: pointer;
 }
-.sa-viewbar button[aria-selected="true"] {
-  color: var(--sa-fg);
-  font-weight: 600;
-}
-.sa-viewbar button[aria-selected="true"]::after {
-  content: "";
-  position: absolute;
-  left: 10px;
-  right: 10px;
-  bottom: -1px;
-  height: 2px;
-  border-radius: 2px;
-  background: var(--sa-fg);
-}
-.sa-viewbar-live {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--sa-accent);
-  animation: sa-flow-pulse 1.6s ease-in-out infinite;
-}
-.sa-viewbar-meta {
-  margin-left: auto;
-  color: var(--sa-fg-faint);
-  font-size: var(--sa-text-xs);
-  font-variant-numeric: tabular-nums;
-}
-
-.sa-viewpane {
-  display: contents;
-}
-
-.sa-viewpane[hidden] {
+.sa-shell[data-panel-open="true"] .sa-tree {
   display: none;
 }
-
-.sa-flow {
+.sa-tree-top {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--sa-border);
+  font-size: var(--sa-text-sm);
+}
+.sa-tree-top > span {
+  color: var(--sa-fg-faint);
+  font-size: var(--sa-text-xs);
+}
+.sa-tree-switch {
+  margin-left: auto;
+  display: flex;
+  border: 1px solid var(--sa-border);
+  border-radius: var(--sa-radius-sm);
+  overflow: hidden;
+}
+.sa-tree-switch button {
+  border: 0;
+  background: transparent;
+  color: var(--sa-fg-muted);
+  font-size: var(--sa-text-xs);
+  padding: 3px 9px;
+  cursor: pointer;
+}
+.sa-tree-switch button[aria-pressed="true"] {
+  background: var(--sa-fg);
+  color: var(--sa-bg);
+}
+.sa-tree-heads {
+  display: flex;
+  flex: none;
+  border-bottom: 1px solid var(--sa-border);
+  overflow: hidden;
+}
+.sa-tree-head {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px 8px 12px;
+  min-width: 0;
+  transition: opacity 0.2s;
+}
+.sa-tree-head[data-dim] {
+  opacity: 0.45;
+}
+.sa-tree-head-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--sa-text-sm);
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sa-tree-head-name i {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--lane);
+  flex: none;
+}
+.sa-tree-head-name em {
+  font-style: normal;
+  font-weight: 400;
+  font-size: 10px;
+  color: var(--lane);
+  border: 1px solid color-mix(in srgb, var(--lane) 45%, transparent);
+  border-radius: 4px;
+  padding: 0 4px;
+}
+.sa-tree-head-bar {
+  height: 2px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--lane) 22%, transparent);
+  overflow: hidden;
+  position: relative;
+}
+.sa-tree-head-bar[data-live]::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  width: 40%;
+  background: var(--lane);
+  animation: sa-tree-bar 1.4s ease-in-out infinite;
+}
+@keyframes sa-tree-bar {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(260%); }
+}
+.sa-tree-head small {
+  font-size: 10px;
+  color: var(--sa-fg-faint);
+}
+.sa-tree-scroll {
   flex: 1;
   min-height: 0;
   overflow: auto;
-  scrollbar-width: thin;
-  scrollbar-color: var(--sa-border-strong) transparent;
-  background:
-    radial-gradient(circle at 1px 1px, color-mix(in srgb, var(--sa-fg) 9%, transparent) 1px, transparent 1.4px) 0 0 / 22px
-      22px,
-    var(--sa-bg);
 }
-.sa-flow-canvas {
+.sa-tree-canvas {
   position: relative;
-  min-height: 100%;
 }
-.sa-flow-svg {
+.sa-tree-canvas svg {
   position: absolute;
   inset: 0;
   overflow: visible;
   pointer-events: none;
 }
-.sa-flow-svg g,
-.sa-flow-svg line,
-.sa-flow-svg path {
-  transition: opacity 180ms ease;
-}
-.sa-flow [data-dim="true"] {
-  opacity: 0.16;
-}
-
-/* 每一轮（你说一句话）之间一条很淡的分隔。 */
-.sa-flow-round line {
-  stroke: var(--sa-border);
-  stroke-dasharray: 2 6;
-}
-.sa-flow-round text {
-  fill: var(--sa-fg-faint);
-  font-size: 10px;
-  letter-spacing: 0.08em;
-}
-
-/* 正在干活的那条竖线后面一条很淡的色带，越往下越亮。 */
-.sa-flow-band {
-  stroke: none;
-}
-
-/* 竖线：平时是一根很淡的细线；做事的那一段亮起来、带一点光晕。 */
-.sa-flow-track {
-  stroke-width: 1;
-  stroke-opacity: 0.22;
-  stroke-dasharray: 1 5;
-  stroke-linecap: round;
-}
-.sa-flow-run-glow {
-  stroke-width: 9;
-  stroke-opacity: 0.1;
-  stroke-linecap: round;
-}
-.sa-flow-run-line {
-  stroke-width: 2.4;
-  stroke-opacity: 0.85;
-  stroke-linecap: round;
-}
-.sa-flow-run-stream {
-  stroke-width: 2.4;
-  stroke-linecap: round;
-  stroke-dasharray: 2 12;
-  filter: brightness(1.6);
-  animation: sa-flow-dash 900ms linear infinite;
-}
-
-/* 线和线之间的传递：派活实线，交回结果虚线，Bot 之间交接中间一颗菱形。 */
-.sa-flow-edge path {
+.sa-tree-rail {
   fill: none;
+  stroke-width: 2;
   stroke-linecap: round;
+  transition: opacity 0.2s;
 }
-.sa-flow-edge-glow {
-  stroke-width: 7;
-  stroke-opacity: 0.09;
+.sa-tree-rail[data-empty] {
+  stroke-width: 1;
+  stroke-dasharray: 2 5;
+  opacity: 0.35;
 }
-.sa-flow-edge-line {
-  stroke-width: 1.6;
-  stroke-opacity: 0.9;
+.sa-tree-rail[data-dim] {
+  opacity: 0.22;
 }
-.sa-flow-edge[data-kind="return"] .sa-flow-edge-line {
-  stroke-width: 1.3;
-  stroke-dasharray: 1 5;
-  stroke-opacity: 0.8;
+.sa-tree-edge {
+  fill: none;
+  stroke-width: 1.4;
+  opacity: 0.75;
+  transition: opacity 0.2s;
 }
-.sa-flow-edge[data-kind="return"] .sa-flow-edge-glow {
-  stroke-opacity: 0.05;
+.sa-tree-edge[data-kind="return"] {
+  stroke-dasharray: 4 3;
 }
-.sa-flow-edge[data-kind="ask"] .sa-flow-edge-line {
-  stroke-opacity: 0.55;
+.sa-tree-edge[data-live] {
+  stroke-dasharray: 5 4;
+  animation: sa-tree-flow 0.9s linear infinite;
 }
-.sa-flow-edge[data-kind="peer"] .sa-flow-edge-line {
-  stroke-width: 1.8;
+.sa-tree-edge[data-dim] {
+  opacity: 0.12;
 }
-.sa-flow-edge-mark {
-  fill: var(--sa-bg-raised);
-  stroke-width: 1.5;
+@keyframes sa-tree-flow {
+  to { stroke-dashoffset: -18; }
 }
-.sa-flow-edge-stream {
-  stroke-width: 2.6;
-  stroke-dasharray: 3 14;
-  filter: brightness(1.5);
-  animation: sa-flow-dash 1s linear infinite;
-}
-.sa-flow-comet {
-  filter: drop-shadow(0 0 3px currentColor);
-}
-
-/* 竖线顶上的牌子：谁、是不是主 Agent、此刻在干什么。 */
-.sa-flow-head {
-  position: sticky;
-  top: 0;
-  z-index: 2;
-  height: 66px;
-  background: var(--sa-bg);
-}
-.sa-flow-head::after {
-  content: "";
+.sa-tree-node {
   position: absolute;
-  inset: 100% 0 auto;
-  height: 18px;
-  background: linear-gradient(var(--sa-bg), transparent);
-  pointer-events: none;
-}
-.sa-flow-lane {
-  position: absolute;
-  top: 12px;
   display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-  padding: 6px 10px 6px 6px;
-  border: 1px solid var(--sa-border);
-  border-radius: var(--sa-radius-lg);
-  background: color-mix(in srgb, var(--sa-bg-raised) 88%, transparent);
-  backdrop-filter: blur(6px);
-  box-shadow: 0 1px 0 color-mix(in srgb, var(--sa-fg) 4%, transparent);
-}
-.sa-flow-lane[data-role="main"] {
-  border-color: color-mix(in srgb, var(--sa-fg) 22%, var(--sa-border));
-  box-shadow:
-    0 1px 0 color-mix(in srgb, var(--sa-fg) 4%, transparent),
-    0 6px 18px -12px color-mix(in srgb, var(--sa-fg) 40%, transparent);
-}
-.sa-flow-avatar {
-  width: 28px;
-  height: 28px;
-  font-size: 12px;
-}
-.sa-flow-lane-text {
-  display: grid;
-  min-width: 0;
-}
-.sa-flow-lane-text strong {
-  display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 6px;
-  font-size: var(--sa-text-sm);
-  white-space: nowrap;
-}
-.sa-flow-lane-text em {
-  padding: 0 5px;
-  border-radius: var(--sa-radius-pill);
-  background: var(--sa-hover);
-  color: var(--sa-fg-muted);
-  font-size: 10px;
-  font-style: normal;
-  font-weight: 500;
-}
-.sa-flow-lane-text em[data-role="main"] {
-  background: var(--sa-fg);
-  color: var(--sa-bg);
-}
-.sa-flow-lane-text small {
-  overflow: hidden;
-  color: var(--sa-fg-faint);
-  font-size: var(--sa-text-xs);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.sa-flow-lane[data-state="tool"] small,
-.sa-flow-lane[data-state="writing"] small,
-.sa-flow-lane[data-state="working"] small {
-  color: var(--sa-accent);
-}
-.sa-flow-lane[data-state="approval"] small,
-.sa-flow-lane[data-state="asking"] small {
-  color: var(--sa-warn);
-}
-
-/* 节点：圆点是做完的一步，空心圈是接下一件事，菱形是交给别人，方块是任务，大圆是说完了。 */
-.sa-flow-node {
-  --node: var(--sa-fg-muted);
-  position: absolute;
-  z-index: 1;
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  height: 22px;
-  padding: 0 6px 0 0;
+  padding: 2px 4px 2px 0;
   border: 0;
-  background: none;
-  color: var(--sa-fg-muted);
-  font: inherit;
-  font-size: var(--sa-text-xs);
-  transform: translate(-11px, -11px);
+  background: transparent;
+  color: var(--sa-fg);
+  text-align: left;
   cursor: pointer;
-  transition: opacity 180ms ease;
+  border-radius: var(--sa-radius-sm);
+  transition: opacity 0.2s;
+  z-index: 1;
 }
-.sa-flow-node > i {
-  position: relative;
+.sa-tree-node[data-dim] {
+  opacity: 0.22;
+}
+.sa-tree-node:hover span b,
+.sa-tree-node[data-on] span b {
+  color: var(--lane);
+}
+.sa-tree-node[data-on] > i {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--lane) 28%, transparent),
+    0 0 10px var(--lane);
+}
+.sa-tree-node > i {
   flex: none;
+  width: 14px;
+  height: 14px;
+  margin-top: 2px;
   display: grid;
   place-items: center;
-  width: 22px;
-  height: 22px;
+  border-radius: 50%;
+  background: var(--sa-bg);
+  position: relative;
 }
-.sa-flow-node > i::before {
+.sa-tree-node > i::before {
   content: "";
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: var(--node);
-  box-shadow:
-    0 0 0 3px var(--sa-bg),
-    0 0 10px color-mix(in srgb, var(--node) 55%, transparent);
+  background: var(--lane);
 }
-.sa-flow-node > span {
-  overflow: hidden;
-  padding: 1px 6px;
-  border-radius: var(--sa-radius-sm);
-  background: color-mix(in srgb, var(--sa-bg) 82%, transparent);
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.sa-tree-node span {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
 }
-.sa-flow-node:hover > span,
-.sa-flow-node:focus-visible > span {
-  background: var(--sa-bg-raised);
-  color: var(--sa-fg);
-  box-shadow: 0 0 0 1px var(--sa-border);
-}
-.sa-flow-node:focus-visible {
-  outline: none;
-}
-.sa-flow-node[data-kind="start"] > i::before,
-.sa-flow-node[data-kind="inbox"] > i::before {
-  width: 7px;
-  height: 7px;
-  background: var(--sa-bg);
-  border: 2px solid var(--node);
-}
-.sa-flow-node[data-kind="inbox"] > i::before {
-  background: radial-gradient(circle, var(--node) 0 2px, var(--sa-bg) 2.5px);
-}
-.sa-flow-node[data-kind="handoff"] > i::before {
-  width: 9px;
-  height: 9px;
-  border-radius: 2px;
-  transform: rotate(45deg);
-}
-.sa-flow-node[data-kind="task"] > i::before {
-  width: 9px;
-  height: 9px;
-  border-radius: 2px;
-  background: var(--sa-bg);
-  border: 2px solid var(--node);
-}
-.sa-flow-node[data-kind="ask"] > i::before {
-  width: 10px;
-  height: 10px;
-  border-radius: 3px;
-  background: var(--sa-fg);
-}
-.sa-flow-node[data-kind="ask"] > span {
-  color: var(--sa-fg);
+.sa-tree-node b {
+  font-size: 11px;
   font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
-.sa-flow-node[data-kind="done"] > i::before {
-  width: 12px;
-  height: 12px;
-  background: radial-gradient(circle, var(--sa-bg) 0 2px, var(--node) 2.5px);
-}
-.sa-flow-node[data-kind="done"] > span {
-  color: var(--sa-fg);
-}
-.sa-flow-node[data-tone="live"] > i::before {
-  background: var(--sa-bg);
-  border: 2px solid var(--node);
-  animation: sa-flow-beat 1.4s ease-in-out infinite;
-}
-.sa-flow-node[data-tone="live"] > i::after,
-.sa-flow-node[data-tone="waiting"] > i::after {
-  content: "";
-  position: absolute;
-  width: 18px;
-  height: 18px;
-  border-radius: 50%;
-  border: 1.5px solid transparent;
-  border-top-color: var(--node);
-  animation: sa-flow-spin 1.1s linear infinite;
-}
-.sa-flow-node[data-tone="waiting"] > i::before {
-  background: var(--sa-warn);
-}
-.sa-flow-node[data-tone="waiting"] > i::after {
-  border-top-color: var(--sa-warn);
-  animation-duration: 2.4s;
-}
-.sa-flow-node[data-tone="waiting"] > span {
-  color: var(--sa-warn);
-}
-.sa-flow-node[data-tone="error"] > i::before {
-  background: var(--sa-danger);
-}
-.sa-flow-node[data-tone="error"] > span {
-  color: var(--sa-danger);
-}
-.sa-flow-node[data-tone="muted"] > i::before {
-  background: var(--sa-bg);
-  border: 1.5px dashed var(--sa-fg-faint);
-  box-shadow: 0 0 0 3px var(--sa-bg);
-}
-.sa-flow-node[data-tone="muted"] > span {
+.sa-tree-node small {
+  font-size: 9px;
+  font-family: var(--sa-font-mono);
   color: var(--sa-fg-faint);
 }
-.sa-flow-empty {
+/* 事件形状：沿用 Lancer 的分类。 */
+[data-glyph="checkpoint"] > i::before {
+  background: var(--sa-bg);
+  border: 1.6px solid var(--lane);
+  width: 6px;
+  height: 6px;
+}
+[data-glyph="handoff"] > i::before {
+  border-radius: 1px;
+  transform: rotate(45deg);
+}
+[data-glyph="fork"] > i::before {
+  border-radius: 2px;
+}
+[data-glyph="done"] > i::before {
+  width: 11px;
+  height: 11px;
+}
+[data-glyph="xref"] > i::before {
+  background: transparent;
+  border: 1.4px dashed var(--lane);
+  width: 7px;
+  height: 7px;
+}
+[data-glyph="wait"] > i::before {
+  background: transparent;
+  border: 2px solid var(--sa-warn);
+  border-right-color: transparent;
+  animation: sa-spin 1s linear infinite;
+}
+[data-glyph="error"] > i::before {
+  background: var(--sa-danger);
+  content: "×";
+  color: #fff;
+  font-size: 9px;
+  line-height: 8px;
+  width: 10px;
+  height: 10px;
+  text-align: center;
+}
+[data-glyph="live"] > i::before {
+  animation: sa-tree-pulse 1.2s ease-in-out infinite;
+}
+@keyframes sa-tree-pulse {
+  50% { box-shadow: 0 0 0 4px color-mix(in srgb, var(--lane) 25%, transparent); }
+}
+@keyframes sa-spin {
+  to { transform: rotate(360deg); }
+}
+.sa-tree-empty {
   position: absolute;
-  top: 120px;
-  left: 50%;
-  width: min(360px, 80%);
-  margin: 0;
+  inset: 40px 24px auto;
   color: var(--sa-fg-faint);
   font-size: var(--sa-text-sm);
   text-align: center;
+}
+.sa-tree-legend {
+  --lane: var(--sa-fg-muted);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  padding: 8px 14px;
+  border-top: 1px solid var(--sa-border);
+  font-size: 10px;
+  color: var(--sa-fg-faint);
+}
+.sa-tree-legend span {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.sa-tree-legend span > i {
+  width: 12px;
+  height: 12px;
+  display: grid;
+  place-items: center;
+}
+.sa-tree-legend span > i::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--lane);
+}
+.sa-tree-legend [data-line] > i::before {
+  width: 14px;
+  height: 0;
+  border-radius: 0;
+  border-top: 1.4px solid var(--lane);
+  background: none;
+}
+.sa-tree-legend [data-line="dash"] > i::before {
+  border-top-style: dashed;
+}
+.sa-tree-hint {
+  position: absolute;
+  left: 50%;
+  bottom: 52px;
   transform: translateX(-50%);
+  margin: 0;
+  padding: 4px 10px;
+  border-radius: var(--sa-radius-pill);
+  background: var(--sa-fg);
+  color: var(--sa-bg);
+  font-size: var(--sa-text-xs);
+  white-space: nowrap;
+  z-index: 2;
 }
-
-@keyframes sa-flow-dash {
-  to {
-    stroke-dashoffset: -28;
-  }
+.sa-relay {
+  display: grid;
+  gap: 6px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--sa-border);
+  flex: none;
 }
-@keyframes sa-flow-spin {
-  to {
-    transform: rotate(360deg);
-  }
+.sa-relay-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 26px;
+  overflow-x: auto;
 }
-@keyframes sa-flow-beat {
-  50% {
-    box-shadow:
-      0 0 0 3px var(--sa-bg),
-      0 0 14px var(--node);
-  }
+.sa-relay-zone {
+  flex: none;
+  font-size: var(--sa-text-xs);
+  color: var(--sa-fg-faint);
+  width: 44px;
 }
-@keyframes sa-flow-pulse {
-  50% {
-    opacity: 0.35;
+.sa-relay-step {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+.sa-relay-arrow {
+  color: var(--sa-fg-faint);
+  font-size: 12px;
+}
+.sa-relay-chip {
+  height: 26px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--sa-border);
+  border-radius: 6px;
+  padding: 0 8px;
+  background: var(--sa-bg-raised);
+  color: var(--sa-fg);
+  font-size: 12px;
+  cursor: pointer;
+  transition: opacity 0.2s, border-color 0.2s;
+}
+.sa-relay-chip i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--lane);
+}
+.sa-relay-chip small {
+  color: var(--sa-ok);
+}
+.sa-relay-chip[data-state="live"] i {
+  animation: sa-tree-pulse 1.2s ease-in-out infinite;
+}
+.sa-relay-chip[data-state="wait"] {
+  border-color: var(--sa-warn);
+}
+.sa-relay-chip[data-state="error"] i {
+  background: var(--sa-danger);
+}
+.sa-relay-chip[data-on] {
+  border-color: var(--lane);
+  box-shadow: 0 0 0 1px var(--lane);
+}
+.sa-relay-chip[data-dim] {
+  opacity: 0.3;
+}
+@media (max-width: 1100px) {
+  .sa-tree {
+    display: none;
   }
 }
 @media (prefers-reduced-motion: reduce) {
-  .sa-flow-run-stream,
-  .sa-flow-edge-stream,
-  .sa-flow-comet {
-    display: none;
+  .sa-tree-edge[data-live],
+  .sa-tree-head-bar[data-live]::after,
+  [data-glyph="live"] > i::before,
+  [data-glyph="wait"] > i::before,
+  .sa-relay-chip[data-state="live"] i {
+    animation: none;
   }
-  .sa-flow-node > i::before,
-  .sa-flow-node > i::after,
-  .sa-viewbar-live {
+}
+.sa-tree-heads {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--sa-bg);
+}
+.sa-focus-curve {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  pointer-events: none;
+  z-index: 15;
+}
+.sa-focus-curve path {
+  fill: none;
+  stroke-width: 1.6;
+  opacity: 0.75;
+  stroke-linecap: round;
+  stroke-dasharray: 1000;
+  animation: sa-focus-draw 450ms ease-out;
+}
+@keyframes sa-focus-draw {
+  from { stroke-dashoffset: 1000; }
+  to { stroke-dashoffset: 0; }
+}
+[data-message-id][data-picked] {
+  box-shadow: inset 3px 0 0 var(--sa-accent);
+  background: color-mix(in srgb, var(--sa-accent) 6%, transparent);
+}
+@media (prefers-reduced-motion: reduce) {
+  .sa-focus-curve path {
     animation: none;
   }
 }

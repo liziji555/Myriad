@@ -20,8 +20,13 @@ import { applyTheme, loadTheme, nextTheme } from "./api/theme";
 import { Sidebar, type RoomState } from "./components/Sidebar";
 import { StageBar } from "./components/StageBar";
 import { Timeline } from "./components/Timeline";
-import { FlowView } from "./components/FlowView";
-import { flowOf } from "./api/flow";
+import {
+  FocusCurve,
+  laneColors,
+  RelayStrip,
+  WorkTree,
+} from "./components/WorkTree";
+import { flowOf, type FlowNode } from "./api/flow";
 import { LightProvider, useLight } from "./light/LightProvider";
 
 /** 窗口够宽时左栏常驻（可以收成窄条），窄了变成从左上角呼出的抽屉。 */
@@ -74,7 +79,7 @@ function Shell() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [theme, setTheme] = useState(loadTheme);
   const [createSignal, setCreateSignal] = useState(0);
-  const [view, setView] = useState<"chat" | "flow">("chat");
+  const [picked, setPicked] = useState<string | null>(null);
   // 房间列表收起后把「新建房间」的信号清掉，不然下次打开列表又弹出填名字的框。
   const listShown = docked ? !collapsed : roomsOpen;
   useEffect(() => {
@@ -225,21 +230,13 @@ function Shell() {
         room.discussion,
       )
     : null;
-  const liveLanes = flow
-    ? new Set(
-        flow.nodes
-          .filter((node) => node.tone === "live" || node.tone === "waiting")
-          .map((node) => node.lane),
-      ).size
-    : 0;
-  const handoffCount = flow
-    ? flow.edges.filter(
-        (edge) => edge.kind === "dispatch" || edge.kind === "peer",
-      ).length
-    : 0;
-  // 从协作视图点一个节点：回到对话，滚到那条消息闪一下。
+  const pickedNode = flow?.nodes.find((node) => node.id === picked) ?? null;
+  // 工作树或 Bot 链上点一个节点：其余节点变淡，会话滚到那条消息闪一下。
+  const pickNode = (node: FlowNode | null) => {
+    setPicked(node?.id ?? null);
+    if (node) openMessage(node.messageId);
+  };
   const openMessage = (messageId: string) => {
-    setView("chat");
     window.setTimeout(() => {
       const target = document.querySelector(`[data-message-id="${messageId}"]`);
       if (!target) return;
@@ -253,11 +250,7 @@ function Shell() {
   ).length;
   // 点了现场栏上的牌子：主线上有那条消息就滚过去闪一下，否则打开那个任务。
   const jumpTo = (row: Presence) => {
-    // 在协作视图里点的：先切回对话，等主线显示出来再滚。
-    if (view === "flow") {
-      setView("chat");
-      window.setTimeout(() => reveal(row), 60);
-    } else reveal(row);
+    reveal(row);
   };
   const reveal = (row: Presence) => {
     const target =
@@ -429,7 +422,6 @@ function Shell() {
       )}
       <StageBar
         room={room}
-        presence={presence}
         connected={workspace.connected}
         pendingTasks={pendingTasks}
         docked={docked}
@@ -445,7 +437,6 @@ function Shell() {
           applyTheme(next);
           setTheme(next);
         }}
-        onPick={jumpTo}
       />
       {(docked || roomsShown) && (
         <>
@@ -493,46 +484,9 @@ function Shell() {
               }}
               onShowUsage={() => showPanel("usage")}
             />
-            <div className="sa-viewbar" role="tablist" aria-label="看法">
-              <button
-                type="button"
-                role="tab"
-                aria-selected={view === "chat"}
-                onClick={() => setView("chat")}
-              >
-                对话
-              </button>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={view === "flow"}
-                onClick={() => setView("flow")}
-              >
-                协作
-                {liveLanes > 0 && (
-                  <span
-                    className="sa-viewbar-live"
-                    aria-label={`${liveLanes} 个在做`}
-                  />
-                )}
-              </button>
-              {flow && view === "flow" && (
-                <span className="sa-viewbar-meta">
-                  {flow.lanes.length - 1} 条线 · {handoffCount} 次派活和交接
-                  {liveLanes > 0 ? ` · ${liveLanes} 个在做` : ""}
-                </span>
-              )}
-            </div>
-            {view === "flow" && flow && (
-              <FlowView
-                key={room.id}
-                flow={flow}
-                presence={presence}
-                onOpen={openMessage}
-              />
+            {flow && (
+              <RelayStrip flow={flow} selected={picked} onSelect={pickNode} />
             )}
-            {/* 协作视图时主线只藏起来不卸载：没写完的打回意见、审批卡都还在。 */}
-            <div className="sa-viewpane" hidden={view === "flow" && !!flow}>
               <Timeline
                 key={room.id}
                 chat={roomChat}
@@ -551,9 +505,7 @@ function Shell() {
                 onDecide={workspace.decideApproval}
                 onLightDemo={runLightDemo}
                 onExample={setPrefill}
-                hidden={view === "flow" && !!flow}
               />
-            </div>
             {roomChat?.activity?.routing ? (
               <p className="sa-room-status" role="status">
                 正在挑选由谁来回答…
@@ -592,6 +544,16 @@ function Shell() {
           </div>
         )}
       </main>
+      {room && flow && (
+        <WorkTree flow={flow} selected={picked} onSelect={pickNode} />
+      )}
+      {pickedNode && flow && !panelOpen && (
+        <FocusCurve
+          nodeId={pickedNode.id}
+          messageId={pickedNode.messageId}
+          color={laneColors(flow).get(pickedNode.lane) ?? "#10bfa2"}
+        />
+      )}
       {room && (
         <ContextPanel
           tab={tab}

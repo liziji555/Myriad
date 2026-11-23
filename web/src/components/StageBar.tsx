@@ -1,15 +1,11 @@
-import type { Presence } from "../api/presence";
-import { presenceSummary } from "../api/presence";
 import { THEME_LABEL, type Theme } from "../api/theme";
 import type { Room } from "../api/types";
-import { BotAvatar } from "./BotAvatar";
 import { Icon } from "./Icon";
 
 const THEME_ICON = { system: "auto", light: "sun", dark: "moon" } as const;
 
 interface Props {
   room: Room | undefined;
-  presence: readonly Presence[];
   connected: boolean;
   /** 等人处理的任务有几个。 */
   pendingTasks: number;
@@ -24,17 +20,14 @@ interface Props {
   theme: Theme;
   /** 换一种明暗：跟随系统 → 浅色 → 深色。 */
   onCycleTheme(): void;
-  /** 点了一个 Bot 的牌子：跳到它正在做的那件事。 */
-  onPick(row: Presence): void;
 }
 
 /**
- * 顶上的现场栏：现在在哪个房间、每个 Bot 此刻在做什么。
- * 牌子上的话会变，点一下跳到主线上对应的地方。
+ * 顶上一条：现在在哪个房间，搜索、任务、明暗、面板。
+ * 每个 Bot 此刻在做什么看左侧栏，不在这里重复。
  */
 export function StageBar({
   room,
-  presence,
   connected,
   pendingTasks,
   docked,
@@ -46,7 +39,6 @@ export function StageBar({
   onOpenPalette,
   theme,
   onCycleTheme,
-  onPick,
 }: Props) {
   const mac = /Mac|iPhone|iPad/.test(navigator.platform);
   return (
@@ -73,42 +65,18 @@ export function StageBar({
         </button>
       )}
 
-      <ul className="sa-presence" aria-label={`现场：${presenceSummary(presence)}`}>
-        {presence.map((row) => {
-          const jumps = Boolean(row.messageId || row.taskId);
-          return (
-            <li key={row.botId}>
-              <button
-                type="button"
-                className="sa-presence-chip"
-                data-state={row.state}
-                disabled={!jumps}
-                title={jumps ? `${row.name}：${row.text}（点一下去看）` : `${row.name}：${row.text}`}
-                aria-label={`${row.name}：${row.text}`}
-                onClick={() => onPick(row)}
-              >
-                <BotAvatar id={row.botId} name={row.name} state={row.state} />
-                <span className="sa-presence-name">{row.name}</span>
-                <span className="sa-presence-text">{row.text}</span>
-                {/* 窗口窄的时候只剩头像；有事等人时多留两个字。 */}
-                {(row.state === "approval" || row.state === "asking") && (
-                  <span className="sa-presence-short" aria-hidden="true">
-                    等你
-                  </span>
-                )}
-              </button>
-            </li>
-          );
-        })}
-      </ul>
-
       <div className="sa-stage-actions">
         {!connected && (
           <span className="sa-stage-offline" role="status">
             连接中断，正在重连…
           </span>
         )}
-        <button type="button" className="sa-stage-search" onClick={onOpenPalette} title="搜索、跳转">
+        <button
+          type="button"
+          className="sa-stage-search"
+          onClick={onOpenPalette}
+          title="搜索、跳转"
+        >
           <Icon name="search" />
           <span className="sa-stage-search-text">搜索、跳转</span>
           <kbd className="sa-kbd">{mac ? "⌘ K" : "Ctrl K"}</kbd>
@@ -123,7 +91,9 @@ export function StageBar({
           >
             <Icon name="tasks" />
             <span>任务</span>
-            {pendingTasks > 0 && <span className="sa-count">{pendingTasks} 个等你</span>}
+            {pendingTasks > 0 && (
+              <span className="sa-count">{pendingTasks} 个等你</span>
+            )}
           </button>
         )}
         <button
@@ -140,7 +110,9 @@ export function StageBar({
             type="button"
             className="sa-icon-button"
             aria-pressed={drawerOpen}
-            title={drawerOpen ? "收起面板" : "打开面板：任务、成员、用量、审计…"}
+            title={
+              drawerOpen ? "收起面板" : "打开面板：任务、成员、用量、审计…"
+            }
             aria-label={drawerOpen ? "收起面板" : "打开面板"}
             onClick={onToggleDrawer}
           >
