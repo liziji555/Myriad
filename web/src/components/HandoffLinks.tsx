@@ -29,7 +29,6 @@ export function HandoffLinks({ handoffs }: { handoffs: readonly Handoff[] }) {
   const [drawn, setDrawn] = useState<Drawn[]>([]);
   const [tick, setTick] = useState(0);
   const emit = useLight();
-  const reduced = useRef(window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false);
 
   useEffect(() => {
     const list = self.current?.parentElement;
@@ -107,11 +106,9 @@ export function HandoffLinks({ handoffs }: { handoffs: readonly Handoff[] }) {
               <>
                 <path className="sa-link-glow" d={link.d} stroke={link.to} />
                 <path className="sa-link-flow" d={link.d} stroke={`url(#sa-link-${index})`} />
-                {!reduced.current && (
-                  <circle className="sa-link-head" r="2.6" fill={link.to}>
-                    <animateMotion dur="1.6s" repeatCount="indefinite" path={link.d} />
-                  </circle>
-                )}
+                <circle className="sa-link-head" r="2.6" fill={link.to}>
+                  <animateMotion dur="1.6s" repeatCount="indefinite" path={link.d} />
+                </circle>
               </>
             )}
           </g>

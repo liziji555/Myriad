@@ -1643,6 +1643,10 @@ button.sa-row:hover {
   .sa-msg[data-state="streaming"]::before {
     animation: none !important;
   }
+  /* 沿着交接线跑的小圆点是 SVG 自己的动画，CSS 停不住，直接不显示。 */
+  .sa-link-head {
+    display: none;
+  }
   .sa-step[data-state="running"] .sa-step-title {
     animation: none;
     background: none;
