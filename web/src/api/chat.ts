@@ -1,4 +1,13 @@
-import type { Message, MessageDelta, MessagePage, MessageRef, RoomActivity, RoomId } from "./types";
+import type {
+  Message,
+  MessageDelta,
+  MessagePage,
+  MessageRef,
+  QueuedInput,
+  RoomActivity,
+  RoomId,
+  RoomQueue,
+} from "./types";
 
 export interface RoomChat {
   /** 按 `seq` 升序。 */
@@ -9,6 +18,8 @@ export interface RoomChat {
   readonly loaded: boolean;
   /** 现在谁在说话、谁在排队。没收到过就是没有。 */
   readonly activity?: RoomActivity;
+  /** 待发队列：Bot 忙的时候说的话，排在前面的先发。没拉到之前是空的。 */
+  readonly queue: readonly QueuedInput[];
 }
 
 export interface ChatState {
@@ -20,7 +31,7 @@ export interface ChatState {
 
 export const emptyChat: ChatState = { rooms: {}, pending: [] };
 
-const emptyRoom: RoomChat = { messages: [], hasMore: false, loaded: false };
+const emptyRoom: RoomChat = { messages: [], hasMore: false, loaded: false, queue: [] };
 const MAX_PENDING = 2000;
 
 /** 开始关注一个房间：之后它的消息事件会被记下来。 */
@@ -63,6 +74,13 @@ export function setActivity(state: ChatState, activity: RoomActivity): ChatState
   const room = state.rooms[activity.room_id];
   if (!room) return state;
   return { ...state, rooms: { ...state.rooms, [activity.room_id]: { ...room, activity } } };
+}
+
+/** 房间的待发队列变了。总是整个替换：接口和事件流给的都是完整的队列。 */
+export function setQueue(state: ChatState, queue: RoomQueue): ChatState {
+  const room = state.rooms[queue.room_id];
+  if (!room) return state;
+  return { ...state, rooms: { ...state.rooms, [queue.room_id]: { ...room, queue: queue.items } } };
 }
 
 /** 拉到的一页消息并进来。`older` 表示这是往前翻的一页，否则是最新的一页。 */

@@ -1263,6 +1263,94 @@ button.sa-row:hover {
 .sa-stop:hover {
   background: color-mix(in srgb, var(--sa-danger) 10%, transparent);
 }
+.sa-steer {
+  height: 30px;
+  padding: 0 var(--sa-space-3);
+  border: 1px solid color-mix(in srgb, var(--sa-accent) 45%, transparent);
+  border-radius: var(--sa-radius-pill);
+  background: none;
+  color: var(--sa-accent);
+  font-size: var(--sa-text-sm);
+}
+.sa-steer:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--sa-accent) 10%, transparent);
+}
+.sa-steer:disabled {
+  opacity: 0.5;
+}
+.sa-queue {
+  margin-bottom: var(--sa-space-2);
+  padding: var(--sa-space-2) var(--sa-space-3);
+  border: 1px dashed var(--sa-border-strong);
+  border-radius: var(--sa-radius-lg);
+  background: var(--sa-bg-raised);
+}
+.sa-queue-title {
+  margin: 0 0 var(--sa-space-1);
+  color: var(--sa-fg-muted);
+  font-size: var(--sa-text-xs);
+}
+.sa-queue-list {
+  display: grid;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  max-height: 180px;
+  overflow-y: auto;
+}
+.sa-queue-item {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sa-space-2);
+  min-width: 0;
+  padding: 2px 0;
+  font-size: var(--sa-text-sm);
+}
+.sa-queue-index {
+  flex: none;
+  min-width: 1.4em;
+  color: var(--sa-fg-faint);
+  font-variant-numeric: tabular-nums;
+}
+.sa-queue-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sa-queue-edit {
+  flex: 1;
+  min-width: 0;
+  resize: vertical;
+  font: inherit;
+  color: inherit;
+  background: var(--sa-bg);
+  border: 1px solid var(--sa-border-strong);
+  border-radius: var(--sa-radius-sm);
+  padding: 2px 6px;
+}
+.sa-queue-actions {
+  display: flex;
+  flex: none;
+  gap: 2px;
+}
+.sa-queue-actions button {
+  padding: 0 6px;
+  border: none;
+  border-radius: var(--sa-radius-sm);
+  background: none;
+  color: var(--sa-fg-muted);
+  font-size: var(--sa-text-xs);
+}
+.sa-queue-actions button:hover:not(:disabled) {
+  background: var(--sa-hover);
+  color: var(--sa-fg);
+}
+.sa-queue-actions button:disabled {
+  opacity: 0.35;
+}
 .sa-composer-error {
   margin: 0 0 var(--sa-space-2);
   font-size: var(--sa-text-sm);
@@ -2587,4 +2675,13 @@ button.sa-row:hover {
 .sa-exec-approve {
   height: 28px;
   background: var(--sa-warn);
+}
+
+.sa-discussion {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--sa-space-2);
+}
+.sa-discussion .sa-field:only-child {
+  grid-column: 1 / -1;
 }

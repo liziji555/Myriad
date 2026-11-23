@@ -36,7 +36,8 @@ use episode::Episode;
 use sa_engine::{Engine, EngineError, Incoming, Receipt};
 use sa_llm::Provider;
 use sa_protocol::{
-    ApprovalDecision, ApprovalId, Bot, BotId, Message, MessageKind, ModelTier, RoomId, Sender,
+    ApprovalDecision, ApprovalId, Bot, BotId, Message, MessageKind, ModelTier, RoomId, RoomQueue,
+    Sender,
 };
 use sa_tools::{Fence, ToolRegistry};
 use std::collections::HashMap;
@@ -270,6 +271,32 @@ impl Orchestrator {
         Ok(message)
     }
 
+    /// 人在 Bot 忙的时候说的一句话先排进待发队列：房间里没有 Bot 在说、也没有 Bot 排着要说的时候，
+    /// 排在最前面的一句才发出去。房间本来就闲着就马上发。点停止不会清掉队列。
+    pub async fn queue_message(
+        &self,
+        room_id: &RoomId,
+        content: String,
+    ) -> Result<RoomQueue, OrchestratorError> {
+        if self.shared.shutdown.is_cancelled() {
+            return Err(OrchestratorError::ShuttingDown);
+        }
+        let engine = self.shared.engine.clone();
+        let room = room_id.clone();
+        let queue = room::db(move || {
+            let room = engine.get_room(&room)?;
+            if room.host_bot_id.is_none() {
+                return Err(EngineError::Invalid(
+                    "这个房间里还没有 Bot，发了也没人回应".into(),
+                ));
+            }
+            engine.queue_input(&room.id, &content)
+        })
+        .await?;
+        self.wake(room_id);
+        Ok(queue)
+    }
+
     /// 外面送来一件事（GitHub 事件、Telegram 里的一句话）。收下的成了房间里的消息，回应在后台进行。
     pub async fn receive(&self, incoming: Incoming) -> Result<Receipt, OrchestratorError> {
         if self.shared.shutdown.is_cancelled() {
@@ -296,6 +323,7 @@ impl Orchestrator {
     /// 重做一遍不安全，中断的回复留在时间线上由人决定。到点没做成的定时任务也不补做。
     pub fn resume_rooms(&self) -> Result<usize, EngineError> {
         let mut woken = 0;
+        let queued = self.shared.engine.queued_rooms()?;
         for room in self.shared.engine.list_rooms()? {
             if room.host_bot_id.is_none() {
                 continue;
@@ -316,7 +344,8 @@ impl Orchestrator {
                     && matches!(message.kind, MessageKind::Event | MessageKind::Chat)
                     && !message.mentions.is_empty()
             });
-            let waiting = waiting || targeted;
+            // 上次关掉时还排着的话：房间闲下来接着一句一句发。
+            let waiting = waiting || targeted || queued.contains(&room.id);
             if waiting {
                 self.wake(&room.id);
                 woken += 1;

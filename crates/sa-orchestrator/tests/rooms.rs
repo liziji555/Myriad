@@ -412,6 +412,8 @@ async fn stop_cancels_the_reply_and_the_room_keeps_working() {
     let stopped = rig.settled(2).await.pop().unwrap();
     assert_eq!(stopped.state, MessageState::Cancelled);
     assert_eq!(stopped.content, "写到一半");
+    // 停下的消息先存好，房间再报空闲：等它报完再看。
+    rig.until_idle().await;
     assert!(!rig.orchestrator.stop(&rig.room));
 
     rig.say("换个话题").await;
@@ -2230,8 +2232,186 @@ async fn the_watchdog_stops_bots_that_keep_saying_the_same_thing() {
     assert_eq!(found[0].room_id.as_ref(), Some(&t.rig.room));
 
     // 正在说话的那个被停下，房间安静下来；再看一遍没有新的提醒。
+    // 几个 Bot 同时在说，被停下的那条不一定排在最后。
     let messages = t.rig.settled(5).await;
-    assert_eq!(messages.last().unwrap().state, MessageState::Cancelled);
+    let cancelled = messages
+        .iter()
+        .filter(|m| m.state == MessageState::Cancelled)
+        .count();
+    assert_eq!(cancelled, 1, "{messages:#?}");
     assert!(t.rig.orchestrator.watchdog_tick().await.is_empty());
+    t.rig.orchestrator.shutdown().await;
+}
+
+#[tokio::test]
+async fn queued_words_wait_until_the_room_is_free_and_go_out_one_by_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let rig = start(
+        dir.path(),
+        vec![
+            MockReply::Hang(vec![StreamEvent::TextDelta("写到一半".into())]),
+            MockReply::text("回二"),
+            MockReply::text("回三"),
+        ],
+        true,
+    );
+    rig.say("一").await;
+    rig.until("回复开始出字", |m| m.content == "写到一半").await;
+    let queue = rig
+        .orchestrator
+        .queue_message(&rig.room, "二".into())
+        .await
+        .unwrap();
+    assert_eq!(queue.items.len(), 1);
+    rig.orchestrator
+        .queue_message(&rig.room, "三".into())
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(rig.messages().len(), 2, "Bot 还在说，排着的不发");
+    assert_eq!(rig.provider.requests().len(), 1);
+
+    // 停止只停正在说的，排着的照样一句一句发。
+    assert!(rig.orchestrator.stop(&rig.room));
+    let messages = rig.settled(6).await;
+    let said: Vec<_> = messages.iter().map(|m| m.content.as_str()).collect();
+    assert_eq!(said, ["一", "写到一半", "二", "回二", "三", "回三"]);
+    let second = &rig.provider.requests()[1];
+    assert_eq!(
+        second.messages.last().unwrap().content,
+        "二",
+        "回二时还没看到三"
+    );
+    assert!(rig.engine.list_queue(&rig.room).unwrap().items.is_empty());
+    rig.orchestrator.shutdown().await;
+}
+
+#[tokio::test]
+async fn words_still_queued_at_shutdown_go_out_after_a_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let rig = start(dir.path(), vec![MockReply::text("接着回")], true);
+    rig.engine.queue_input(&rig.room, "关之前排的").unwrap();
+    assert_eq!(rig.orchestrator.resume_rooms().unwrap(), 1);
+    let messages = rig.settled(2).await;
+    let said: Vec<_> = messages.iter().map(|m| m.content.as_str()).collect();
+    assert_eq!(said, ["关之前排的", "接着回"]);
+    rig.orchestrator.shutdown().await;
+}
+
+impl Team {
+    fn discuss(&self, discussion: sa_protocol::Discussion, rounds: u32) {
+        let edit = sa_protocol::UpdateRoomRequest {
+            discussion: Some(discussion),
+            rounds: Some(rounds),
+            ..Default::default()
+        };
+        self.rig.engine.edit_room(&self.rig.room, &edit).unwrap();
+    }
+}
+
+/// 并行回复：没点名的话每个 Bot 各答一份，不问路由。点了名的照旧只给被点到的。
+#[tokio::test]
+async fn in_parallel_mode_every_bot_answers_an_unaddressed_message() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = team(dir.path(), vec![], vec![]);
+    t.discuss(sa_protocol::Discussion::Parallel, 2);
+    t.script("助手", vec![MockReply::text("助手的看法")]);
+    t.script(
+        "Coder",
+        vec![MockReply::text("Coder 的看法"), MockReply::text("只有我")],
+    );
+    t.script("Reviewer", vec![MockReply::text("Reviewer 的看法")]);
+    t.rig.say("大家怎么看").await;
+    let all = t.rig.settled(4).await;
+    let mut said: Vec<&str> = all[1..].iter().map(|m| m.content.as_str()).collect();
+    said.sort();
+    assert_eq!(said, ["Coder 的看法", "Reviewer 的看法", "助手的看法"]);
+    assert!(t.router.requests().is_empty());
+
+    t.rig.say("@Coder 你再说说").await;
+    let all = t.rig.settled(6).await;
+    assert_eq!(all.len(), 6, "{all:#?}");
+    assert_eq!(sender_of(&all[5]), Some(&t.coder));
+    t.rig.orchestrator.shutdown().await;
+}
+
+/// 轮流讨论：按进房间的先后一个接一个说，转两圈；后说的看得到先说的。
+#[tokio::test]
+async fn in_rounds_mode_bots_speak_one_after_another_for_each_round() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = team(dir.path(), vec![], vec![]);
+    t.discuss(sa_protocol::Discussion::Rounds, 2);
+    t.script(
+        "助手",
+        vec![MockReply::text("助手一"), MockReply::text("助手二")],
+    );
+    t.script(
+        "Coder",
+        vec![MockReply::text("Coder 一"), MockReply::text("Coder 二")],
+    );
+    let reviewer = t.script(
+        "Reviewer",
+        vec![
+            MockReply::text("Reviewer 一"),
+            MockReply::text("Reviewer 二"),
+        ],
+    );
+    t.rig.say("讨论一下方案").await;
+    let all = t.rig.settled(7).await;
+    let said: Vec<&str> = all[1..].iter().map(|m| m.content.as_str()).collect();
+    assert_eq!(
+        said,
+        [
+            "助手一",
+            "Coder 一",
+            "Reviewer 一",
+            "助手二",
+            "Coder 二",
+            "Reviewer 二"
+        ]
+    );
+    let first = &reviewer.requests()[0];
+    let heard: Vec<&str> = first.messages.iter().map(|m| m.content.as_str()).collect();
+    assert!(heard.iter().any(|m| m.contains("Coder 一")), "{heard:#?}");
+    assert!(t.router.requests().is_empty());
+    t.rig.orchestrator.shutdown().await;
+}
+
+/// 独立评议：一次只能一个 Bot 说时，后说的也看不到前面的答案；人再说话时才看得到。
+#[tokio::test]
+async fn in_blind_mode_bots_do_not_see_each_others_answers_until_the_next_message() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = team_with(dir.path(), vec![], vec![], 1);
+    t.discuss(sa_protocol::Discussion::Blind, 2);
+    t.script("助手", vec![MockReply::text("助手打 7 分")]);
+    t.script("Coder", vec![MockReply::text("Coder 打 8 分")]);
+    let reviewer = t.script(
+        "Reviewer",
+        vec![
+            MockReply::text("Reviewer 打 6 分"),
+            MockReply::text("看到了"),
+        ],
+    );
+    t.rig.say("给这个方案打分").await;
+    t.rig.settled(4).await;
+    let first = &reviewer.requests()[0];
+    let heard: Vec<&str> = first.messages.iter().map(|m| m.content.as_str()).collect();
+    assert!(
+        heard.iter().any(|m| m.contains("给这个方案打分")),
+        "{heard:#?}"
+    );
+    assert!(
+        !heard
+            .iter()
+            .any(|m| m.contains("打 7 分") || m.contains("打 8 分")),
+        "{heard:#?}"
+    );
+
+    t.rig.say("@Reviewer 看看别人怎么打的").await;
+    t.rig.settled(6).await;
+    let second = &reviewer.requests()[1];
+    let heard: Vec<&str> = second.messages.iter().map(|m| m.content.as_str()).collect();
+    assert!(heard.iter().any(|m| m.contains("打 7 分")), "{heard:#?}");
+    assert!(heard.iter().any(|m| m.contains("打 8 分")), "{heard:#?}");
     t.rig.orchestrator.shutdown().await;
 }

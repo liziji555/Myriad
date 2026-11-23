@@ -1,4 +1,4 @@
-use crate::{ApprovalDecision, BotId, Message, ModelTier, RoomId, Run, Task};
+use crate::{ApprovalDecision, BotId, Discussion, Message, ModelTier, RoomId, Run, Task};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
@@ -27,6 +27,19 @@ pub struct ApiError {
 #[ts(export)]
 pub struct PostMessageRequest {
     pub content: String,
+}
+
+/// 改待发队列里的一句：改字、往前或往后挪一位。都不给就什么也不变。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct EditQueuedRequest {
+    #[serde(default)]
+    #[ts(optional)]
+    pub content: Option<String>,
+    /// `-1` 往前挪一位，`1` 往后挪一位。
+    #[serde(default)]
+    #[ts(optional)]
+    pub offset: Option<i32>,
 }
 
 /// 一页消息，按 `seq` 升序。`has_more` 表示更早的还有。
@@ -92,6 +105,13 @@ pub struct UpdateRoomRequest {
     #[serde(default)]
     #[ts(optional)]
     pub host_bot_id: Option<BotId>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub discussion: Option<Discussion>,
+    /// 轮流讨论转几圈，1 到 3。
+    #[serde(default)]
+    #[ts(optional)]
+    pub rounds: Option<u32>,
 }
 
 /// 人开一个任务。

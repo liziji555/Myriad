@@ -274,10 +274,16 @@ impl Orchestrator {
 
         let (engine, room_id) = (shared.engine.clone(), routine.room_id.clone());
         let after = db(move || engine.messages_after(&room_id, posted.seq)).await?;
-        let reply = after.iter().find(|message| {
-            message.kind == MessageKind::Chat
-                && matches!(&message.sender, Sender::Bot { bot_id } if bot_id == &routine.bot_id)
-        });
+        // 人后来说的话（包括待发队列里接着发出去的）引出的回复不算这一次的。
+        let reply = after
+            .iter()
+            .take_while(|message| {
+                !(message.kind == MessageKind::Chat && message.sender == Sender::User)
+            })
+            .find(|message| {
+                message.kind == MessageKind::Chat
+                    && matches!(&message.sender, Sender::Bot { bot_id } if bot_id == &routine.bot_id)
+            });
         Ok(Some(match reply {
             Some(reply) if reply.state == MessageState::Complete => {
                 (RoutineResult::Spoke, String::new())

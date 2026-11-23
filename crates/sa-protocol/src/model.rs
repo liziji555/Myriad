@@ -1,6 +1,6 @@
 use crate::{
-    ApprovalId, ArtifactId, BotId, LinkId, MessageId, Millis, NoticeId, RoomId, RoutineId, RuleId,
-    RunId, TaskId,
+    ApprovalId, ArtifactId, BotId, LinkId, MessageId, Millis, NoticeId, QueuedId, RoomId,
+    RoutineId, RuleId, RunId, TaskId,
 };
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -78,10 +78,48 @@ pub struct Room {
     /// 房间的入口 Bot：没有 @ 任何人时由它接话。
     pub host_bot_id: Option<BotId>,
     pub member_bot_ids: Vec<BotId>,
+    /// 没点名的话怎么接。
+    #[serde(default)]
+    pub discussion: Discussion,
+    /// 轮流讨论时一句话转几圈。
+    #[serde(default = "default_rounds")]
+    pub rounds: u32,
     #[ts(type = "number")]
     pub created_at: Millis,
     #[ts(type = "number")]
     pub updated_at: Millis,
+}
+
+/// 房间里没点名的话怎么接。点了名的总是只给被点到的。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum Discussion {
+    /// 挑一个最合适的 Bot 接。
+    #[default]
+    Normal,
+    /// 每个 Bot 各答一份，同时答。
+    Parallel,
+    /// 按成员顺序一个接一个说，后说的看得到前面的，转 `rounds` 圈。
+    Rounds,
+    /// 每个 Bot 各答一份，答的时候看不到别人这一次的答案。
+    Blind,
+}
+
+str_enum!(Discussion {
+    Normal => "normal",
+    Parallel => "parallel",
+    Rounds => "rounds",
+    Blind => "blind",
+});
+
+/// 轮流讨论默认转两圈。
+pub const DEFAULT_ROUNDS: u32 = 2;
+/// 轮流讨论最多转这么多圈。
+pub const MAX_ROUNDS: u32 = 3;
+
+fn default_rounds() -> u32 {
+    DEFAULT_ROUNDS
 }
 
 /// 消息是谁发的。
@@ -190,6 +228,27 @@ pub struct PermissionRule {
     pub pattern: String,
     #[ts(type = "number")]
     pub created_at: Millis,
+}
+
+/// 待发队列里的一句话：Bot 忙的时候人说的，房间闲下来按顺序发出去。发出去之后就不在队列里了。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct QueuedInput {
+    pub id: QueuedId,
+    pub room_id: RoomId,
+    pub content: String,
+    #[ts(type = "number")]
+    pub created_at: Millis,
+    #[ts(type = "number")]
+    pub updated_at: Millis,
+}
+
+/// 一个房间的待发队列，排在前面的先发。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct RoomQueue {
+    pub room_id: RoomId,
+    pub items: Vec<QueuedInput>,
 }
 
 /// 一条消息在时间线上是什么。

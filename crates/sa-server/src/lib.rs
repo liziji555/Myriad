@@ -75,6 +75,14 @@ pub fn router(state: AppState) -> Router {
             "/rooms/{room_id}/messages",
             get(routes::list_messages).post(routes::post_message),
         )
+        .route(
+            "/rooms/{room_id}/queue",
+            get(routes::list_queue).post(routes::queue_message),
+        )
+        .route(
+            "/queue/{queued_id}",
+            patch(routes::edit_queued).delete(routes::cancel_queued),
+        )
         .route("/rooms/{room_id}/stop", post(routes::stop))
         .route(
             "/rooms/{room_id}/bots/{bot_id}/stop",

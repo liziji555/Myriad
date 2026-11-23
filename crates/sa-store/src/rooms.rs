@@ -1,18 +1,20 @@
 use crate::Result;
 use rusqlite::{params, Connection};
-use sa_protocol::{BotId, Room, RoomId};
+use sa_protocol::{BotId, Discussion, Room, RoomId};
 use std::collections::HashMap;
 
 /// 写入房间及其成员。
 pub fn insert(conn: &Connection, room: &Room) -> Result<()> {
     conn.execute(
-        "INSERT INTO rooms (id, name, host_bot_id, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+        "INSERT INTO rooms (id, name, host_bot_id, created_at, updated_at, discussion, rounds) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         params![
             room.id.as_str(),
             room.name,
             room.host_bot_id.as_ref().map(BotId::as_str),
             room.created_at,
-            room.updated_at
+            room.updated_at,
+            room.discussion.as_str(),
+            room.rounds
         ],
     )?;
     for bot_id in &room.member_bot_ids {
@@ -41,7 +43,7 @@ pub fn list(conn: &Connection) -> Result<Vec<Room>> {
     }
 
     let mut stmt = conn.prepare(
-        "SELECT id, name, host_bot_id, created_at, updated_at FROM rooms ORDER BY updated_at DESC, id DESC",
+        "SELECT id, name, host_bot_id, created_at, updated_at, discussion, rounds FROM rooms ORDER BY updated_at DESC, id DESC",
     )?;
     let rows = stmt.query_map([], |row| {
         let id: String = row.get(0)?;
@@ -52,6 +54,8 @@ pub fn list(conn: &Connection) -> Result<Vec<Room>> {
             host_bot_id: row.get::<_, Option<String>>(2)?.map(BotId::from),
             created_at: row.get(3)?,
             updated_at: row.get(4)?,
+            discussion: Discussion::parse(&row.get::<_, String>(5)?).unwrap_or_default(),
+            rounds: row.get(6)?,
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -61,15 +65,17 @@ pub fn get(conn: &Connection, id: &RoomId) -> Result<Option<Room>> {
     Ok(list(conn)?.into_iter().find(|room| &room.id == id))
 }
 
-/// 改房间的名字和入口 Bot。
+/// 改房间的名字、入口 Bot 和讨论方式。
 pub fn update(conn: &Connection, room: &Room) -> Result<()> {
     conn.execute(
-        "UPDATE rooms SET name = ?2, host_bot_id = ?3, updated_at = ?4 WHERE id = ?1",
+        "UPDATE rooms SET name = ?2, host_bot_id = ?3, updated_at = ?4, discussion = ?5, rounds = ?6 WHERE id = ?1",
         params![
             room.id.as_str(),
             room.name,
             room.host_bot_id.as_ref().map(BotId::as_str),
-            room.updated_at
+            room.updated_at,
+            room.discussion.as_str(),
+            room.rounds
         ],
     )?;
     Ok(())

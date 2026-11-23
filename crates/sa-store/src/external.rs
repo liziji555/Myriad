@@ -266,6 +266,8 @@ mod tests {
 
     fn room(store: &Store) -> RoomId {
         let room = Room {
+            discussion: Default::default(),
+            rounds: sa_protocol::DEFAULT_ROUNDS,
             id: RoomId::new(),
             name: "房间".into(),
             host_bot_id: None,

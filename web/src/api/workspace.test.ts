@@ -16,6 +16,8 @@ const room = (id: string, name: string): Room => ({
   name,
   host_bot_id: bot.id,
   member_bot_ids: [bot.id],
+  discussion: "normal",
+  rounds: 2,
   created_at: 1,
   updated_at: 1,
 });

@@ -61,6 +61,9 @@ pub enum EventKind {
     /// 连接断开了。payload 是 [`crate::LinkRef`]。
     #[serde(rename = "link.deleted")]
     LinkDeleted,
+    /// 房间的待发队列变了（多了、改了、挪了、取消了、发出去了）。payload 是 [`crate::RoomQueue`]。
+    #[serde(rename = "queue.updated")]
+    QueueUpdated,
 }
 
 impl EventKind {
@@ -85,6 +88,7 @@ impl EventKind {
             Self::RoutineDeleted => "routine.deleted",
             Self::LinkCreated => "link.created",
             Self::LinkDeleted => "link.deleted",
+            Self::QueueUpdated => "queue.updated",
         }
     }
 
@@ -109,6 +113,7 @@ impl EventKind {
             "routine.deleted" => Some(Self::RoutineDeleted),
             "link.created" => Some(Self::LinkCreated),
             "link.deleted" => Some(Self::LinkDeleted),
+            "queue.updated" => Some(Self::QueueUpdated),
             _ => None,
         }
     }
@@ -162,6 +167,7 @@ mod tests {
             EventKind::LinkCreated,
             EventKind::LinkDeleted,
             EventKind::RunUpdated,
+            EventKind::QueueUpdated,
         ] {
             assert_eq!(EventKind::parse(kind.as_str()), Some(kind));
             assert_eq!(

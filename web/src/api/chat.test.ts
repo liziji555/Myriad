@@ -6,6 +6,7 @@ import {
   removeMessage,
   resetChat,
   setActivity,
+  setQueue,
   upsertMessage,
   watchRoom,
 } from "./chat";
@@ -129,7 +130,7 @@ describe("resetChat", () => {
   it("forgets everything but keeps watching the open room", () => {
     expect(resetChat(null)).toEqual(emptyChat);
     const state = resetChat(ROOM);
-    expect(state.rooms[ROOM]).toEqual({ messages: [], hasMore: false, loaded: false });
+    expect(state.rooms[ROOM]).toEqual({ messages: [], hasMore: false, loaded: false, queue: [] });
   });
 });
 
@@ -154,3 +155,16 @@ describe("removeMessage / setActivity", () => {
     expect(setActivity(watching, { ...activity, room_id: "room_other" })).toBe(watching);
   });
 });
+
+describe("setQueue", () => {
+  it("整个换掉关注着的房间的队列，没关注的房间不管", () => {
+    const item = { id: "que_1", room_id: ROOM, content: "等会儿说", created_at: 1, updated_at: 1 };
+    let state = watchRoom(emptyChat, ROOM);
+    state = setQueue(state, { room_id: ROOM, items: [item] });
+    expect(state.rooms[ROOM].queue).toEqual([item]);
+    state = setQueue(state, { room_id: ROOM, items: [] });
+    expect(state.rooms[ROOM].queue).toEqual([]);
+    expect(setQueue(state, { room_id: "room_other", items: [item] })).toBe(state);
+  });
+});
+

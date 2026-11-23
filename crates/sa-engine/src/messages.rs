@@ -28,6 +28,71 @@ pub(crate) fn add_message(
     Ok((message, seq))
 }
 
+/// 在事务里写入房间里的一句话。`mentions` 为 `None` 时从内容里认出房间里启用着的成员。
+/// 没有这个房间返回 `None`。
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn add_chat(
+    tx: &Transaction<'_>,
+    room_id: &RoomId,
+    sender: Sender,
+    content: String,
+    state: MessageState,
+    mentions: Option<Vec<BotId>>,
+    hop: u32,
+    now: i64,
+) -> sa_store::Result<Option<(Message, i64)>> {
+    let Some(room) = rooms::get(tx, room_id)? else {
+        return Ok(None);
+    };
+    let mentions = match mentions {
+        Some(mentions) => mentions,
+        None => {
+            let members: Vec<_> = bots::list(tx)?
+                .into_iter()
+                .filter(|bot| bot.enabled && room.member_bot_ids.contains(&bot.id))
+                .collect();
+            find_mentions(&content, &members)
+        }
+    };
+    let message = Message {
+        id: MessageId::new(),
+        seq: 0,
+        room_id: room_id.clone(),
+        sender,
+        content,
+        mentions,
+        hop,
+        kind: MessageKind::Chat,
+        task_id: None,
+        run_id: None,
+        origin: None,
+        steps: vec![],
+        state,
+        error: None,
+        rev: 0,
+        created_at: now,
+        updated_at: now,
+    };
+    let added = add_message(tx, message)?;
+    if added.0.state != MessageState::Streaming {
+        crate::external::relay(tx, &added.0)?;
+    }
+    Ok(Some(added))
+}
+
+/// 人写的一句话能不能发：不能是空的，不能太长。
+pub(crate) fn check_said(content: &str) -> Result<()> {
+    if content.trim().is_empty() {
+        return Err(EngineError::Invalid("消息不能为空".into()));
+    }
+    if content.chars().count() > MAX_MESSAGE_CHARS {
+        return Err(EngineError::Invalid(format!(
+            "消息不能超过 {MAX_MESSAGE_CHARS} 个字"
+        )));
+    }
+    Ok(())
+}
+
 /// 一次模型调用的用量。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsageRecord {
@@ -46,14 +111,7 @@ pub struct UsageRecord {
 impl Engine {
     /// 人在房间里发一条消息。
     pub fn post_user_message(&self, room_id: &RoomId, content: &str) -> Result<Message> {
-        if content.trim().is_empty() {
-            return Err(EngineError::Invalid("消息不能为空".into()));
-        }
-        if content.chars().count() > MAX_MESSAGE_CHARS {
-            return Err(EngineError::Invalid(format!(
-                "消息不能超过 {MAX_MESSAGE_CHARS} 个字"
-            )));
-        }
+        check_said(content)?;
         // 人写的 `@名字` 在这里认出来：只认房间里启用着的成员。
         self.insert_message(
             room_id,
@@ -117,45 +175,7 @@ impl Engine {
         let now = now_ms();
         let (message, seq) = self
             .store
-            .write(|tx| {
-                let Some(room) = rooms::get(tx, room_id)? else {
-                    return Ok(None);
-                };
-                let mentions = match mentions {
-                    Some(mentions) => mentions,
-                    None => {
-                        let members: Vec<_> = bots::list(tx)?
-                            .into_iter()
-                            .filter(|bot| bot.enabled && room.member_bot_ids.contains(&bot.id))
-                            .collect();
-                        find_mentions(&content, &members)
-                    }
-                };
-                let message = Message {
-                    id: MessageId::new(),
-                    seq: 0,
-                    room_id: room_id.clone(),
-                    sender,
-                    content,
-                    mentions,
-                    hop,
-                    kind: MessageKind::Chat,
-                    task_id: None,
-                    run_id: None,
-                    origin: None,
-                    steps: vec![],
-                    state,
-                    error: None,
-                    rev: 0,
-                    created_at: now,
-                    updated_at: now,
-                };
-                let added = add_message(tx, message)?;
-                if added.0.state != MessageState::Streaming {
-                    crate::external::relay(tx, &added.0)?;
-                }
-                Ok(Some(added))
-            })?
+            .write(|tx| add_chat(tx, room_id, sender, content, state, mentions, hop, now))?
             .ok_or_else(|| EngineError::NotFound("没有这个房间".into()))?;
         self.publish(seq);
         Ok(message)
