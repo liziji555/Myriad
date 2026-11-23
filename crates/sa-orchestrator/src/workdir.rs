@@ -117,6 +117,9 @@ pub async fn provision(
     task_id: &TaskId,
 ) -> Result<Workdir, String> {
     git(workspace, &["--version"]).await?;
+    // git 按工作目录解析相对路径，之后的查找按本服务的当前目录：先变成绝对路径。
+    let work_root =
+        &std::path::absolute(work_root).map_err(|e| format!("建不了任务目录：{e}"))?;
     let target = work_root.join(task_id.as_str());
     if target.exists() {
         return Err(format!("任务目录 {} 已经存在", target.display()));
