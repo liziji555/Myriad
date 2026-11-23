@@ -406,7 +406,7 @@ fn audit_arguments(tool: &str, arguments: &str) -> String {
 /// 新来的人类消息由谁接，返回要开始说话的 Bot（可以有好几个，同时开始）。
 /// 点了名的：被点到的都要接，正在说的那个会在下一步看到。没点名的：有 Bot 正在说，就由它们看到；
 /// 都空着，就由路由挑一个。`owed` 记下正在说的 Bot 该看到的最新一条。
-/// 重启时：定时任务和外面来的事只有指定的 Bot 看得到，别的 Bot 读过去了不等于它看过。
+/// 重启时：外面来的事只有指定的 Bot 看得到，别的 Bot 读过去了不等于它看过。
 /// `after` 到 `upto` 之间这样的事，指定的 Bot 自己没看过（停下时也没说不用答）的，记着要让它说一次。
 async fn owe_unread(
     shared: &Arc<Shared>,
@@ -427,7 +427,8 @@ async fn owe_unread(
         }
     };
     for message in earlier.iter().filter(|m| m.seq <= upto) {
-        if !matches!(message.kind, MessageKind::Routine | MessageKind::Event) {
+        // 没做完的定时任务由调度器重做，这里再补一次就做了两遍。
+        if message.kind != MessageKind::Event {
             continue;
         }
         let Some(target) = message.mentions.first() else {
