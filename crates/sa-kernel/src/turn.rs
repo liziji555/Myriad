@@ -190,17 +190,23 @@ impl Turn {
             })
             .collect();
 
+        // 头一批是叫它起来的那几句，上层已经取走了，总要记下；之后停下了就先收手：
+        // 停下之后进来的话留在收件箱里，下一轮再答，不能在这里读掉。
+        let mut first = true;
         loop {
-            // 先看停没停：停下之后进来的话留在收件箱里，下一轮再答，不能在这里读掉。
-            if cancel.is_cancelled() {
+            if !first && cancel.is_cancelled() {
                 return Ok(TurnEnd::Cancelled);
             }
+            first = false;
             for input in inbox.drain().await {
                 transcript.append(EntryBody::User {
                     content: input.content,
                     message_id: input.message_id,
                     message_seq: input.message_seq,
                 })?;
+            }
+            if cancel.is_cancelled() {
+                return Ok(TurnEnd::Cancelled);
             }
             if self.steps >= config.max_steps {
                 return Ok(TurnEnd::MaxSteps);
@@ -1249,6 +1255,26 @@ mod tests {
             "{:?}",
             observer.log()
         );
+    }
+
+    /// 还没开始就停了：叫它起来的那几句照样记下，后面的留在收件箱里。
+    #[tokio::test]
+    async fn cancel_before_the_turn_starts_still_keeps_what_woke_it() {
+        let mut rig = rig();
+        let provider = MockProvider::scripted([MockReply::text("好")]);
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let outcome = rig
+            .turn(
+                &provider,
+                vec![vec![says("写", 1)], vec![says("又问", 2)]],
+                &Recorder::default(),
+                &cancel,
+            )
+            .await;
+
+        assert_eq!(outcome.end, TurnEnd::Cancelled);
+        assert_eq!(rig.kinds(), ["user"]);
     }
 
     /// 要问人的调用：批准了才执行；不批准或者工具自己不让做，都不执行，并把原因告诉模型。
