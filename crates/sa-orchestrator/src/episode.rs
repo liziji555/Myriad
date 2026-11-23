@@ -297,7 +297,9 @@ impl Episode {
         message: &str,
     ) -> Result<Pending, String> {
         let most = self.max_turns();
-        if self.turns + self.queue.len() + self.pending.len() >= most {
+        // 主 Agent 说完还要看已经交回的结果：那一轮先留着。
+        let lead_after = usize::from(self.lead_busy && !self.returns.is_empty());
+        if self.turns + self.queue.len() + self.pending.len() + lead_after >= most {
             return Err(format!(
                 "这一轮里 Bot 已经发言 {most} 次，到上限了，不能再找别的 Bot。请直接把目前的情况告诉用户。"
             ));
@@ -708,6 +710,22 @@ mod tests {
         episode.settle(&bot("lead"), None, false);
         let lead = episode.next(&[]).unwrap();
         assert_eq!((lead.bot_id, lead.reply_to), (bot("lead"), vec![coded]));
+    }
+
+    #[test]
+    fn the_lead_turn_owed_for_returned_results_counts_toward_the_limit() {
+        let mut episode = Episode::default();
+        episode.set_lead(Some(bot("lead")));
+        episode.restart(vec![Job::new(bot("lead"), 0)], 0);
+        episode.next(&[]).unwrap();
+        let pending = episode.ask(&bot("lead"), 0, &bot("c"), "写登录页").unwrap();
+        episode.deliver(pending);
+        let job = episode.next(&[bot("lead")]).unwrap();
+        episode.settle(&bot("c"), Some(MessageId::new()), job.for_lead);
+        episode.turns = MAX_LEAD_TURNS - 1;
+        assert!(episode
+            .ask(&bot("lead"), 0, &bot("r"), "列安全要点")
+            .is_err());
     }
 
     #[test]
