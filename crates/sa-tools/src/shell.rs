@@ -46,7 +46,7 @@ impl Tool for ShellTool {
     fn description(&self) -> String {
         let shell = if cfg!(windows) { "PowerShell" } else { "bash" };
         format!(
-            "在工作目录里用 {shell} 执行一条命令，返回退出码和输出（标准输出和错误输出合在一起）。\
+            "在工作目录里用 {shell} 执行一条命令，返回退出码和输出（标准输出和错误输出合在一起），退出码不是 0 时按失败返回。\
              默认最多跑 {DEFAULT_TIMEOUT_SECS} 秒，可以用 timeout_secs 调整，上限 {MAX_TIMEOUT_SECS} 秒。\
              每条命令都要用户批准后才执行。不要用它读文件或搜索，那些有专门的工具。"
         )
@@ -158,11 +158,17 @@ impl Tool for ShellTool {
                 let code = status
                     .code()
                     .map_or("被信号终止".to_string(), |code| format!("退出码 {code}"));
-                Ok(if text.is_empty() {
+                let report = if text.is_empty() {
                     format!("{code}（没有输出）")
                 } else {
                     format!("{code}\n{text}")
-                })
+                };
+                // 退出码不是 0（或者被信号终止）就是命令没做成：按失败交回，界面上这一步也是「失败」。
+                if status.success() {
+                    Ok(report)
+                } else {
+                    Err(ToolError(report))
+                }
             }
         }
     }
@@ -253,8 +259,12 @@ mod tests {
         };
         assert_eq!(run("ls").await.unwrap(), "退出码 0\n标记.txt");
         assert_eq!(run("true").await.unwrap(), "退出码 0（没有输出）");
-        let failed = run("echo 出错了 >&2; echo 正常; exit 3").await.unwrap();
+        let failed = run("echo 出错了 >&2; echo 正常; exit 3")
+            .await
+            .unwrap_err()
+            .0;
         assert!(failed.starts_with("退出码 3\n"), "{failed}");
+        assert_eq!(run("exit 3").await.unwrap_err().0, "退出码 3（没有输出）");
         assert!(failed.contains("正常") && failed.contains("出错了"));
         assert!(run("  ").await.unwrap_err().0.contains("空的"));
     }

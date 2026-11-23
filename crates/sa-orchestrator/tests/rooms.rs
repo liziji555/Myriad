@@ -768,6 +768,22 @@ async fn unanswered_approval_expires_as_denied() {
     assert!(!rig.orchestrator.decide(&id, ApprovalDecision::Once));
 }
 
+/// 命令退出码不是 0：这一步是「失败」，退出码和输出照样交给模型。
+#[tokio::test]
+async fn a_command_that_exits_non_zero_is_a_failed_step() {
+    let dir = tempfile::tempdir().unwrap();
+    let replies = vec![shell("c1", "exit 3"), MockReply::text("命令没成功")];
+    let rig = start(dir.path(), replies, true);
+    rig.say("跑一下").await;
+
+    let id = rig.waiting_approval().await;
+    assert!(rig.orchestrator.decide(&id, ApprovalDecision::Once));
+    let messages = rig.settled(2).await;
+    assert_eq!(messages[1].state, MessageState::Complete);
+    assert_eq!(messages[1].steps[0].state, StepState::Error);
+    assert_eq!(rig.last_tool_result(), "退出码 3（没有输出）");
+}
+
 /// 等批准时点了停止：这一轮结束，卡片作废。
 #[tokio::test]
 async fn stop_while_waiting_for_approval_cancels_the_card() {
