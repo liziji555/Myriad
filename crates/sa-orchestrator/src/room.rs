@@ -280,10 +280,8 @@ async fn work(
                 // 人说了新的话：之前排着队的不算了，重新开始一轮。正在说的接着说。
                 episode.restart(first.collect(), running.len());
             } else {
-                // 正在说的 Bot 已经先读到这句话、为它重新算过上限：它为这句话找的人还排着，不能清掉。
-                for job in first {
-                    episode.push(job);
-                }
+                // 正在说的 Bot 已经先读到这句话、为它重新开始过这一轮：它为这句话找的人还排着，不能清掉。
+                episode.start(first.collect());
             }
         }
         // 定时任务和外面来的事各有指定的 Bot，别的 Bot 看不到它们：每个被指定的都要轮到。
@@ -933,7 +931,13 @@ impl Inbox for RoomInbox {
                 if started || message.seq > before {
                     if self.link.renewed.fetch_max(message.seq, Ordering::SeqCst) < message.seq {
                         let running = self.link.running().len();
-                        self.link.episode().renew(running);
+                        if only_me {
+                            self.link.episode().renew(running);
+                        } else {
+                            // 房间之后还要为这句话叫别的 Bot（见 work）：先像房间那样重新开始一轮，
+                            // 之前排着的不算了；这个 Bot 读到之后再找的人留着。
+                            self.link.episode().restart(vec![], running);
+                        }
                     }
                     self.hop.store(0, Ordering::SeqCst);
                 }

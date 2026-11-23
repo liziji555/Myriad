@@ -64,6 +64,15 @@ impl Episode {
         self.queue.extend(first);
     }
 
+    /// 人说的话点到了 `first` 里的这些 Bot，这一轮已经重新开始过了：让它们排上队，欠着它们的也算在这次里。
+    pub fn start(&mut self, first: Vec<Job>) {
+        self.owed
+            .retain(|bot_id| !first.iter().any(|job| &job.bot_id == bot_id));
+        for job in first {
+            self.push(job);
+        }
+    }
+
     /// 让 `job` 排上队（它该说的话还没看到）。已经排着的不重复排。
     pub fn push(&mut self, job: Job) {
         if !self.queue.iter().any(|queued| queued.bot_id == job.bot_id) {
@@ -273,6 +282,36 @@ mod tests {
         assert_eq!(episode.queued(), [bot("b")]);
         assert_eq!(episode.next(&[]), Some(pending.job));
         assert_eq!(episode.next(&[]), None);
+    }
+
+    #[test]
+    fn a_follow_up_read_first_by_a_speaker_keeps_its_handoffs_and_drops_older_ones() {
+        let mut episode = started("a");
+        episode.push(Job {
+            bot_id: bot("b"),
+            hop: 1,
+        });
+        episode.owe(bot("d"));
+        // 正在说的 a 先读到人说的新话：之前排着的 b 不算了。
+        episode.restart(vec![], 1);
+        // a 为这句话找了 c；房间随后叫上这句话点到的 d。
+        let pending = episode.ask(&bot("a"), 0, &bot("c"), "这句交给你").unwrap();
+        episode.deliver(pending);
+        episode.start(vec![Job {
+            bot_id: bot("d"),
+            hop: 0,
+        }]);
+        assert_eq!(episode.queued(), [bot("c"), bot("d")]);
+        assert_eq!(
+            episode.next(&[bot("a")]).map(|job| job.bot_id),
+            Some(bot("c"))
+        );
+        assert_eq!(
+            episode.next(&[bot("a")]).map(|job| job.bot_id),
+            Some(bot("d"))
+        );
+        // d 欠着的那件事也在这次里看到了，不会再叫一次。
+        assert_eq!(episode.next(&[bot("a")]), None);
     }
 
     #[test]
