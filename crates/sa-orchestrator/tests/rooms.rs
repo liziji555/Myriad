@@ -1540,6 +1540,36 @@ async fn a_message_for_another_bot_is_not_swallowed_by_the_speaker() {
     t.rig.orchestrator.shutdown().await;
 }
 
+/// 正在说话的 Bot 先读到一条同时点了它和别人的消息：被点到的别人照样要开始。
+#[tokio::test]
+async fn a_message_for_the_speaker_and_another_bot_reaches_both() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = team(dir.path(), vec![], vec![]);
+    t.script(
+        "Coder",
+        vec![
+            MockReply::tool_calls("", &[("c1", "shell", r#"{"command":"echo hi"}"#)]),
+            MockReply::text("命令跑完了"),
+        ],
+    );
+    t.script("Reviewer", vec![MockReply::text("我也来")]);
+    t.rig.say("@Coder 跑一下").await;
+    let approval = t.rig.waiting_approval().await;
+    // 只落库、不叫醒房间：让 Coder 先读到它。
+    t.rig
+        .engine
+        .post_user_message(&t.rig.room, "@Coder @Reviewer 一起看看")
+        .unwrap();
+    assert!(t.rig.orchestrator.decide(&approval, ApprovalDecision::Once));
+    t.rig
+        .until("Reviewer 答完", |m| {
+            m.content == "我也来" && m.state == MessageState::Complete
+        })
+        .await;
+    t.rig.until_idle().await;
+    t.rig.orchestrator.shutdown().await;
+}
+
 /// 点了一个 Bot 的停止：它说话期间收到、还没看到的话也不再答。
 #[tokio::test]
 async fn a_stopped_bot_does_not_come_back_for_an_unread_follow_up() {

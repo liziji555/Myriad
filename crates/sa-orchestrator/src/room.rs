@@ -826,8 +826,14 @@ impl Inbox for RoomInbox {
                 continue;
             }
             // 正在说话的 Bot 看到了这条给它的人类消息：不用再另外挑人来接。
+            // 同时点了别的 Bot 的不算处理过：被点到的别人还要靠房间叫起来。
             if speaker.is_none() && for_me {
-                let before = self.link.handled.fetch_max(message.seq, Ordering::SeqCst);
+                let only_me = named.iter().all(|id| **id == self.bot_id);
+                let before = if only_me {
+                    self.link.handled.fetch_max(message.seq, Ordering::SeqCst)
+                } else {
+                    self.link.handled.load(Ordering::SeqCst)
+                };
                 if started || message.seq > before {
                     // 人中途说了新的话，由正在说话的 Bot 接着答：和新开一轮一样，上限重新算。
                     let running = self.link.running().len();
