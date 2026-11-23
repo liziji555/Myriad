@@ -922,12 +922,14 @@ impl Inbox for RoomInbox {
                 } else {
                     self.link.handled.load(Ordering::SeqCst)
                 };
-                let renew = started || message.seq > before;
-                if renew && self.link.renewed.fetch_max(message.seq, Ordering::SeqCst) < message.seq
-                {
-                    // 人中途说了新的话，由正在说话的 Bot 接着答：和新开一轮一样，上限重新算。
-                    let running = self.link.running().len();
-                    self.link.episode().renew(running);
+                // 人中途说了新的话，由正在说话的 Bot 接着答：和新开一轮一样，上限重新算。
+                // 共用的次数只按这句话重新算一次（房间或者先读到的 Bot 算过就不再算），
+                // 转手次数是这一条道自己的，每个读到的 Bot 都从头算。
+                if started || message.seq > before {
+                    if self.link.renewed.fetch_max(message.seq, Ordering::SeqCst) < message.seq {
+                        let running = self.link.running().len();
+                        self.link.episode().renew(running);
+                    }
                     self.hop.store(0, Ordering::SeqCst);
                 }
             }
