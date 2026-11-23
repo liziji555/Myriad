@@ -112,9 +112,13 @@ impl Engine {
     }
 
     /// 把排在最前面的一句发出去：出队和变成房间里的消息在同一个事务里，不会发两遍，也不会丢。
+    /// 房间里一个 Bot 都没有时不发：发了没人回应，排着的还能改、能取消。
     pub fn dispatch_queued(&self, room_id: &RoomId) -> Result<Option<Message>> {
         let now = now_ms();
         let sent = self.store.write(|tx| {
+            if rooms::get(tx, room_id)?.is_none_or(|room| room.host_bot_id.is_none()) {
+                return Ok(None);
+            }
             let Some(item) = queue::list(tx, room_id)?.into_iter().next() else {
                 return Ok(None);
             };
@@ -192,5 +196,15 @@ mod tests {
         assert!(engine.queued_rooms().unwrap().is_empty());
         let messages = engine.list_messages(&room_id, None, 10).unwrap().messages;
         assert_eq!(messages.iter().filter(|m| m.content == "三改").count(), 1);
+    }
+
+    #[test]
+    fn nothing_goes_out_while_the_room_has_no_bot() {
+        let (engine, room) = engine_with_room();
+        engine.queue_input(&room, "还在吗").unwrap();
+        let host = engine.get_room(&room).unwrap().host_bot_id.unwrap();
+        engine.remove_room_member(&room, &host).unwrap();
+        assert!(engine.dispatch_queued(&room).unwrap().is_none());
+        assert_eq!(engine.list_queue(&room).unwrap().items.len(), 1);
     }
 }
