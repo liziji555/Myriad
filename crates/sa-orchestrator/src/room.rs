@@ -1042,7 +1042,18 @@ async fn harness_turn(
         .await
         .map_err(|e| e.to_string())?;
     let workdir = match desk.workdir.clone() {
-        Some(workdir) if std::path::Path::new(&workdir.path).is_dir() => workdir,
+        Some(workdir) if std::path::Path::new(&workdir.path).is_dir() => {
+            let source = std::path::Path::new(&workdir.source).canonicalize().ok();
+            if source.as_deref() != Some(shared.settings.fence.root()) {
+                return Ok(TurnEnd::Failed(format!(
+                    "{} 的独立目录是从 {} 开出来的，现在的工作目录是 {}。先在成员面板里丢掉它的旧改动，再让它干活",
+                    bot.name,
+                    workdir.source,
+                    shared.settings.fence.root_display()
+                )));
+            }
+            workdir
+        }
         _ => {
             observer
                 .tool_started("harness-desk", "workdir", "开独立目录", "")
