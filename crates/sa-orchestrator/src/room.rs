@@ -271,14 +271,19 @@ async fn work(
             .iter()
             .any(|message| message.kind == MessageKind::Chat)
         {
-            // 人说了新的话：之前排着队的不算了，重新开始一轮。正在说的接着说。
-            let first = first
-                .into_iter()
-                .map(|bot_id| Job { bot_id, hop: 0 })
-                .collect();
-            episode.restart(first, running.len());
-            if let Some(chat) = fresh.iter().rfind(|m| m.kind == MessageKind::Chat) {
-                link.renewed.fetch_max(chat.seq, Ordering::SeqCst);
+            let first = first.into_iter().map(|bot_id| Job { bot_id, hop: 0 });
+            let latest = fresh
+                .iter()
+                .rfind(|m| m.kind == MessageKind::Chat)
+                .map_or(0, |m| m.seq);
+            if link.renewed.fetch_max(latest, Ordering::SeqCst) < latest {
+                // 人说了新的话：之前排着队的不算了，重新开始一轮。正在说的接着说。
+                episode.restart(first.collect(), running.len());
+            } else {
+                // 正在说的 Bot 已经先读到这句话、为它重新算过上限：它为这句话找的人还排着，不能清掉。
+                for job in first {
+                    episode.push(job);
+                }
             }
         }
         // 定时任务和外面来的事各有指定的 Bot，别的 Bot 看不到它们：每个被指定的都要轮到。
