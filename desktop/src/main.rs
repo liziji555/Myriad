@@ -8,7 +8,8 @@
 //! 连上了窗口才换到隧道这头的地址（和 `sa connect` 一样），没连上就留在本机、在面板里说原因。
 //! 连着服务器时本机的服务不停，随时能换回来；关掉窗口只断开隧道，服务器上的任务照常跑。
 //!
-//! 主窗口里的页面只能调「连接」面板要用的那几个命令（[`from_main`]），别的桌面能力一概拿不到。
+//! 主窗口没有系统的标题栏和菜单栏：窗口按钮由页面自己画，顶栏就是标题栏。
+//! 主窗口里的页面只能调「连接」面板和窗口按钮要用的那几个命令（[`from_main`]），别的桌面能力一概拿不到。
 //! 内置的启动页只在本机服务起不来时出现：那时没有主界面可看。
 
 // 发布版在 Windows 上不带黑色的终端窗口。
@@ -20,7 +21,7 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Mutex};
 use std::time::Duration;
-use tauri::menu::{MenuBuilder, SubmenuBuilder};
+use tauri::menu::{Menu, MenuBuilder, SubmenuBuilder};
 use tauri::webview::{DownloadEvent, NewWindowResponse};
 use tauri::{AppHandle, Manager, RunEvent, Url, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
@@ -246,10 +247,12 @@ fn main() {
             use_local,
             pick_key,
             pick_workdir,
+            open_data_dir,
+            window_chrome,
             retry
         ])
         .setup(|app| {
-            set_menu(app.handle())?;
+            app.handle().on_menu_event(on_menu);
             // 等服务起来要等，不能占着主线程。
             let handle = app.handle().clone();
             std::thread::spawn(move || start(&handle));
@@ -413,6 +416,14 @@ fn show(handle: &AppHandle, shell: &Shell, url: Url, title: &str) {
         if let Err(error) = window.delete_cookie(cookie) {
             tracing::warn!("没清掉上一个页面的登录：{error}");
         }
+    }
+    // 换过去的页面未必会自己画窗口按钮（服务器上的 sa 可能是老版本）：先把系统的标题栏和菜单还回来，
+    // 新页面画了按钮再来收走（[`window_chrome`]）。
+    let framed = menu(handle)
+        .and_then(|menu| window.set_menu(menu).map(drop))
+        .and_then(|()| window.set_decorations(true));
+    if let Err(error) = framed {
+        tracing::warn!("没能把标题栏还回来：{error}");
     }
     if let Err(error) = window.navigate(url).and_then(|()| window.set_title(title)) {
         tracing::warn!("主窗口换不了页面：{error}");
@@ -796,6 +807,43 @@ fn change_workdir(handle: &AppHandle, dir: PathBuf) {
     relaunch(handle);
 }
 
+/// 在系统的文件管理器里打开数据目录。
+#[tauri::command]
+fn open_data_dir(window: WebviewWindow) -> Result<(), String> {
+    from_main(&window)?;
+    show_data_dir(window.app_handle()).map_err(|error| error.to_string())
+}
+
+fn show_data_dir(handle: &AppHandle) -> Result<(), tauri_plugin_opener::Error> {
+    let dir = handle
+        .state::<Shell>()
+        .data_dir
+        .root()
+        .to_string_lossy()
+        .into_owned();
+    handle.opener().open_path(dir, None::<&str>)
+}
+
+/// 主窗口没有系统的标题栏：页面自己画最小化、最大化、关闭，拖顶栏挪窗口，都从这里走。
+/// `own` 是页面说「按钮我画好了」，这时才把系统的标题栏和菜单收走。
+#[tauri::command]
+fn window_chrome(window: WebviewWindow, action: &str) -> Result<(), String> {
+    from_main(&window)?;
+    match action {
+        "own" => window
+            .remove_menu()
+            .map(drop)
+            .and_then(|()| window.set_decorations(false)),
+        "drag" => window.start_dragging(),
+        "minimize" => window.minimize(),
+        "maximize" if window.is_maximized().unwrap_or(false) => window.unmaximize(),
+        "maximize" => window.maximize(),
+        "close" => window.close(),
+        _ => return Err(format!("不认识的窗口操作：{action}")),
+    }
+    .map_err(|error| error.to_string())
+}
+
 /// 启动页上点「重试」。
 #[tauri::command]
 fn retry(window: WebviewWindow) -> Result<(), String> {
@@ -806,9 +854,9 @@ fn retry(window: WebviewWindow) -> Result<(), String> {
     Ok(())
 }
 
-/// 主窗口想要的大小和四周留的边（标题栏、菜单栏、窗口边框都算在留的边里）。
+/// 主窗口想要的大小和四周留的边。主窗口没有系统的标题栏，留的边只是让它别贴着屏幕。
 const MAIN_SIZE: (f64, f64) = (1280.0, 820.0);
-const MAIN_CHROME: (f64, f64) = (32.0, 96.0);
+const MAIN_CHROME: (f64, f64) = (32.0, 48.0);
 
 /// 主窗口打开时的大小：屏幕放得下就用 [`MAIN_SIZE`]，放不下就缩到屏幕里。
 fn main_size(handle: &AppHandle) -> (f64, f64) {
@@ -840,6 +888,8 @@ fn open_main(handle: &AppHandle, shell: &Shell, url: Url) -> tauri::Result<()> {
         .inner_size(width, height)
         .min_inner_size(width.min(720.0), height.min(480.0))
         .center()
+        // 标题栏由页面自己画，和界面是一块玻璃。
+        .decorations(false)
         // 页面靠它知道自己在桌面版里，再用 desktop_state 问现在连的是哪个。
         .initialization_script("window.__SA_DESKTOP__ = true;")
         // 窗口里只看 Myriad 自己的页面；别的网址（PR 链接之类）交给系统的浏览器。
@@ -935,12 +985,14 @@ fn open_failed(handle: &AppHandle, shell: &Shell, reason: &str) -> tauri::Result
     WebviewWindowBuilder::new(handle, START, WebviewUrl::App("index.html".into()))
         .title("Myriad")
         .inner_size(800.0, 560.0)
+        .menu(menu(handle)?)
         .initialization_script(format!("window.__SA_START__ = {details};"))
         .build()
         .map(drop)
 }
 
-fn set_menu(handle: &AppHandle) -> tauri::Result<()> {
+/// 系统的菜单栏。只有带系统标题栏的窗口才有：启动页，和页面不会自己画窗口按钮时的主窗口。
+fn menu(handle: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let shell = handle.state::<Shell>();
     let mut file = SubmenuBuilder::new(handle, "文件");
     // 用 --workdir 启动的，重启后还是那个目录，菜单里改了也不算数：干脆不给这几项。
@@ -955,8 +1007,11 @@ fn set_menu(handle: &AppHandle) -> tauri::Result<()> {
         .separator()
         .text("quit", "退出")
         .build()?;
-    handle.set_menu(MenuBuilder::new(handle).item(&file).build()?)?;
-    handle.on_menu_event(|handle, event| match event.id().as_ref() {
+    MenuBuilder::new(handle).item(&file).build()
+}
+
+fn on_menu(handle: &AppHandle, event: tauri::menu::MenuEvent) {
+    match event.id().as_ref() {
         "workdir" => {
             let handle = handle.clone();
             pick_folder(&handle.clone()).pick_folder(move |picked| {
@@ -978,20 +1033,13 @@ fn set_menu(handle: &AppHandle) -> tauri::Result<()> {
             }
         }
         "data-dir" => {
-            let dir = handle
-                .state::<Shell>()
-                .data_dir
-                .root()
-                .to_string_lossy()
-                .into_owned();
-            if let Err(error) = handle.opener().open_path(dir, None::<&str>) {
+            if let Err(error) = show_data_dir(handle) {
                 tracing::warn!("打不开数据目录：{error}");
             }
         }
         "quit" => handle.exit(0),
         _ => {}
-    });
-    Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -1001,7 +1049,7 @@ mod tests {
     #[test]
     fn the_main_window_fits_inside_a_small_screen() {
         assert_eq!(fit(MAIN_SIZE, (1920.0, 1040.0)), MAIN_SIZE);
-        // 1920×1080 放大到 125%，去掉任务栏：整个窗口连标题栏、菜单栏都要在屏幕里。
+        // 1920×1080 放大到 125%，去掉任务栏：整个窗口都要在屏幕里。
         let (width, height) = fit(MAIN_SIZE, (1536.0, 816.0));
         assert_eq!(width, 1280.0);
         assert!(height + MAIN_CHROME.1 <= 816.0);

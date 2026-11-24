@@ -20,6 +20,7 @@ import { Notices } from "./components/Notices";
 import { applyTheme, loadTheme, nextTheme } from "./api/theme";
 import { Sidebar, type RoomState } from "./components/Sidebar";
 import { StageBar } from "./components/StageBar";
+import { WindowControls } from "./components/WindowControls";
 import { Timeline } from "./components/Timeline";
 import { FlowView } from "./components/FlowView";
 import { flowOf } from "./api/flow";
@@ -143,6 +144,7 @@ function Shell() {
   if (workspace.phase === "unauthorized") {
     return (
       <main className="sa-gate">
+        <WindowControls />
         <h1>需要访问令牌</h1>
         <p>
           请回到运行 <code>sa serve</code>{" "}
@@ -154,6 +156,7 @@ function Shell() {
   if (workspace.phase === "loading") {
     return (
       <main className="sa-gate">
+        <WindowControls />
         <p>{workspace.connected ? "正在加载…" : "正在连接本机服务…"}</p>
       </main>
     );

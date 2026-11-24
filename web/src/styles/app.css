@@ -3271,6 +3271,44 @@ button.sa-row:hover {
   border-color: var(--sa-danger);
 }
 
+/* 桌面版的窗口按钮：贴着顶栏右上角，和顶栏一样高。 */
+.sa-window-controls {
+  display: flex;
+  align-self: stretch;
+  margin: 0 calc(-1 * var(--sa-space-3)) 0 var(--sa-space-2);
+}
+.sa-gate > .sa-window-controls {
+  position: fixed;
+  top: 0;
+  right: 0;
+  height: 36px;
+  margin: 0;
+}
+.sa-stage-actions:has(.sa-window-controls) {
+  align-self: stretch;
+}
+.sa-window-button {
+  display: grid;
+  place-items: center;
+  width: 46px;
+  border: 0;
+  background: none;
+  color: var(--sa-fg-muted);
+}
+.sa-window-button:hover {
+  background: var(--sa-hover);
+  color: var(--sa-fg);
+}
+.sa-window-button[data-action="close"]:hover {
+  background: #e5484d;
+  color: #fff;
+}
+/* 顶栏当标题栏用：拖的时候别选中上面的字。 */
+.sa-stage:has(.sa-window-controls),
+.sa-shell:has(.sa-window-controls) .sa-sidebar-head {
+  user-select: none;
+}
+
 /* ---- 玻璃态 ---------------------------------------------------------------
  * 三栏和顶栏是玻璃，透出 body 上的光斑；浮在内容上面的（输入框、菜单、面板、弹层）
  * 是更实一点的玻璃，把后面的字糊开。卡片只做半透明，不再各自模糊，免得叠太多层。 */
