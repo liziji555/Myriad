@@ -857,7 +857,7 @@ async fn turn(
                     others,
                     &skills.prompt,
                 ) + &crate::lead_rules(bot, others, lead.as_ref())
-                    + read_only_rules(shared, share.as_deref()),
+                    + &share_rules(shared, share.as_deref()),
                 max_steps: shared.settings.max_steps,
                 max_tokens: None,
                 thinking: model.thinking,
@@ -1015,14 +1015,19 @@ fn workspace(shared: &Shared, share: Option<&str>) -> String {
     )
 }
 
-/// 共享目录是只读的：单独接在提示词后面，自定义提示词里没写 `{workspace}` 也看得到。
-fn read_only_rules(shared: &Shared, share: Option<&str>) -> &'static str {
-    match share {
-        Some(name) if shared.shares.read_only(name) => {
-            "\n这个房间用的共享目录是只读的：只能看和搜，没有改文件、新建文件的工具；要改文件时直接说改不了，不要说已经改了。\n"
-        }
-        _ => "",
+/// 共享目录只读、不能执行命令时的说明：单独接在提示词后面，自定义提示词里没写 `{workspace}` 也看得到。
+fn share_rules(shared: &Shared, share: Option<&str>) -> String {
+    let Some(name) = share else {
+        return String::new();
+    };
+    let mut rules = String::new();
+    if shared.shares.read_only(name) {
+        rules.push_str("\n这个房间用的共享目录是只读的：只能看和搜，没有改文件、新建文件的工具；要改文件时直接说改不了，不要说已经改了。\n");
     }
+    if shared.shares.shell(name).is_none() {
+        rules.push_str("\n这个房间用的共享目录不能执行命令：没有执行命令的工具；要执行命令时直接说执行不了，不要假装执行过，也不要编造输出。\n");
+    }
+    rules
 }
 
 /// harness Bot 的一轮：在它自己的工位目录里启动它，把这一轮的话交给它。
