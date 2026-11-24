@@ -448,10 +448,12 @@ fn derive_public_key(private: &Path) -> Option<String> {
         .ok()
         .filter(|output| output.status.success())?;
     let text = String::from_utf8(output.stdout).ok()?;
-    let key = text.lines().next()?.trim();
+    // 只要类型和公钥本身，后面的备注不要：备注里什么字符都可能有。
+    let mut fields = text.lines().next()?.split_whitespace();
+    let key = format!("{} {}", fields.next()?, fields.next()?);
     let plain =
         (key.starts_with("ssh-") || key.starts_with("ecdsa-")) && !key.contains(['\'', '"', '\\']);
-    plain.then(|| key.to_string())
+    plain.then_some(key)
 }
 
 /// 这台服务器用的 ssh-agent 里有的公钥（`ssh-add -L`），没有 agent 就是空的。

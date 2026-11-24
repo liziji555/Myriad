@@ -72,7 +72,7 @@ export function ConnectPanel({ state, invoke, onClose }: Props) {
     // 密码交给谁由外壳定：就是上面写着「没连上」的那一台。装好了外壳接着连。
     setBusy("key");
     try {
-      await invoke("install_key", { password });
+      await invoke("install_key", { server: failed?.server, password });
     } catch (error) {
       const failure = toFailure(error, failed?.server ?? form.host);
       if (!failure.cancelled) setFailure(failure);

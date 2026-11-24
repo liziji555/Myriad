@@ -636,19 +636,24 @@ async fn test_server(
 /// 面板里填了服务器密码：登录一次装好这台电脑的公钥，接着就连。密码用完就丢。
 /// 密码只交给刚才不认密钥的那一台（[`Link::failed`]），不看面板里现在填的是谁。
 #[tauri::command]
-async fn install_key(window: WebviewWindow, password: String) -> Result<(), Value> {
+async fn install_key(window: WebviewWindow, server: String, password: String) -> Result<(), Value> {
     from_local(&window)?;
     let handle = window.app_handle().clone();
     let denied = handle.state::<Shell>().link.lock().unwrap().failed.clone();
     let Some(Failure {
         target: Some(target),
-        server,
+        server: denied,
         password: true,
         ..
     }) = denied
     else {
         return Err("先连一次：服务器不认密钥时才用得上密码".into());
     };
+    // 面板上写的那台和外壳记着的不是同一台（中间又试了别的）：不交密码，让面板重新显示。
+    if server != denied {
+        notify(&handle);
+        return Err("刚才又试了别的服务器：看清现在写的是哪一台，再填密码".into());
+    }
     tauri::async_runtime::spawn_blocking(move || {
         // 没装上（多半是密码不对）：密码框留着，可以再填。
         target.install_key(Some(&password)).map_err(
