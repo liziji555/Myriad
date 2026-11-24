@@ -319,6 +319,25 @@ impl Config {
             if !url.starts_with("http://") && !url.starts_with("https://") {
                 bail!("[mcp.{name}] 的 url 要是一个 http(s) 地址");
             }
+            // 没加密的线路上，令牌谁都看得到：只有本机的服务可以这样连。
+            let local_host = |rest: &str| {
+                let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+                let host = host.rsplit('@').next().unwrap_or("");
+                ["localhost", "127.0.0.1", "[::1]"].iter().any(|own| {
+                    host == *own
+                        || host
+                            .strip_prefix(own)
+                            .is_some_and(|port| port.starts_with(':'))
+                })
+            };
+            let secret = !server.headers.is_empty() || server.token_env.is_some();
+            if secret
+                && url
+                    .strip_prefix("http://")
+                    .is_some_and(|rest| !local_host(rest))
+            {
+                bail!("[mcp.{name}] 带着 headers 或 token_env 时 url 要用 https（本机的服务除外）");
+            }
         }
         if !self.telegram.api_base.starts_with("http") {
             bail!(
@@ -622,6 +641,14 @@ token_env = "DOCS_TOKEN"
             ),
             ("[mcp.docs]\nurl = \"ftp://x\"", "http(s) 地址"),
             (
+                "[mcp.docs]\nurl = \"http://x/mcp\"\ntoken_env = \"T\"",
+                "要用 https",
+            ),
+            (
+                "[mcp.docs]\nurl = \"http://localhost.evil.com/\"\nheaders = { A = \"b\" }",
+                "要用 https",
+            ),
+            (
                 "[mcp.files]\ncommand = \"npx\"\ntoken_env = \"T\"",
                 "只有写了 url",
             ),
@@ -629,6 +656,20 @@ token_env = "DOCS_TOKEN"
             let error = format!("{:#}", with(bad).unwrap_err());
             assert!(error.contains(needle), "{bad}: {error}");
         }
+    }
+
+    #[test]
+    fn a_token_may_go_over_plain_http_only_to_this_machine() {
+        let with = |extra: &str| Config::parse(&format!("{DEFAULT_CONFIG_TOML}\n{extra}"));
+        for url in [
+            "http://127.0.0.1:8000/mcp",
+            "http://localhost/mcp",
+            "http://[::1]:9/",
+        ] {
+            let text = format!("[mcp.docs]\nurl = \"{url}\"\ntoken_env = \"T\"");
+            with(&text).unwrap_or_else(|error| panic!("{url}: {error:#}"));
+        }
+        with("[mcp.docs]\nurl = \"http://x/mcp\"").unwrap();
     }
 
     #[test]
