@@ -94,6 +94,8 @@ pub fn run(data_dir: &DataDir, args: ShareArgs) -> Result<()> {
         }
     };
 
+    // 链接里有服务的令牌：批准执行的命令拿不到它。
+    sa_tools::hide_env_from_commands(["SA_SHARE_URL".to_string()]);
     let sharer = Arc::new(Sharer::new(
         fence,
         name,
