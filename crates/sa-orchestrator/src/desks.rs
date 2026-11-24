@@ -103,7 +103,7 @@ impl Orchestrator {
         accept: bool,
     ) -> Result<Vec<HarnessDesk>, OrchestratorError> {
         let shares = &self.shared.shares;
-        if shares.online(name) {
+        if shares.online(name) && shares.shell(name).is_some() {
             let close = share_desk::Close {
                 workdir: dir,
                 accept,
@@ -123,7 +123,7 @@ impl Orchestrator {
             }
         } else if accept {
             return Err(OrchestratorError::Conflict(format!(
-                "它的独立目录在共享目录「{name}」那台电脑上，那台电脑没连着，连上之后再带回"
+                "它的独立目录在共享目录「{name}」那台电脑上，那台电脑没连着（或者共享时没加 --commands），连上之后再带回"
             )));
         }
         let (engine, r, b) = (self.shared.engine.clone(), room.clone(), bot.clone());

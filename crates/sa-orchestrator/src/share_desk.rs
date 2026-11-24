@@ -21,9 +21,9 @@ pub const RUN: &str = "_harness";
 /// 带回或丢掉独立目录里的改动，收掉目录。
 pub const CLOSE: &str = "_desk_close";
 
-/// 这几件只有加了 `--commands` 的共享才做：harness 自己会执行命令。
+/// 这几件只有加了 `--commands` 的共享才做：harness 自己会执行命令，带回时 git 也会跑仓库里的钩子。
 pub fn needs_commands(tool: &str) -> bool {
-    matches!(tool, "shell" | OPEN | RUN)
+    matches!(tool, "shell" | OPEN | RUN | CLOSE)
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -177,8 +177,26 @@ impl Desks {
             .is_ok_and(|real| real.starts_with(&self.dir))
     }
 
-    /// 服务交来的独立目录确实是这边从共享目录开出来的。
+    /// 服务交来的独立目录确实是这边开的一个：`share-desks` 下面直接的一个 `desk-…`，git 目录也是它自己的。
+    fn own(&self, workdir: &Workdir) -> Result<(), String> {
+        let root = Path::new(&workdir.root);
+        let named = root
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().starts_with("desk-"));
+        let parent = root.parent().and_then(|p| p.canonicalize().ok());
+        let git_ok = workdir.kind != workdir::KIND_COPY
+            || Path::new(&workdir.git_dir) == Path::new(&format!("{}.git", workdir.root));
+        let path_ok = Path::new(&workdir.path).starts_with(root);
+        if named && parent.as_deref() == Some(self.dir.as_path()) && git_ok && path_ok {
+            Ok(())
+        } else {
+            Err("这个独立目录不是这边开的".into())
+        }
+    }
+
+    /// 服务交来的独立目录确实是这边从现在共享的目录开出来的。
     fn check(&self, workdir: &Workdir) -> Result<(), String> {
+        self.own(workdir)?;
         let source = Path::new(&workdir.source).canonicalize().ok();
         if source.as_deref() != Some(self.root.as_path()) {
             return Err(format!(
@@ -200,6 +218,10 @@ impl Desks {
                 self.check(&existing)?;
                 return Ok(existing);
             }
+        }
+        // 共享目录把这边的数据目录也包了进去：复制一份会把独立目录和令牌一起复制进去。
+        if self.dir.starts_with(&self.root) {
+            return Err("共享的目录里包含这台电脑上的 Myriad 数据目录，不能在这里给 harness 开独立目录。换一个小一点的目录共享".into());
         }
         let bot: String = open
             .bot
@@ -253,16 +275,55 @@ impl Desks {
             }
             self.check(dir)?;
             workdir::bring_back(dir).await?;
-        } else if Path::new(&dir.root).exists() {
-            self.check(dir)?;
-        }
-        if dir.kind == workdir::KIND_COPY
-            && Path::new(&dir.git_dir).exists()
-            && !self.inside(&dir.git_dir)
-        {
-            return Err("这个独立目录不是这边开的".into());
+        } else {
+            // 丢掉不管它是从哪个目录开的：共享换了目录之后，旧的也要能丢。
+            self.own(dir)?;
         }
         workdir::remove(&TaskId::from("desk".to_string()), dir).await;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn desk(root: &Path) -> Workdir {
+        Workdir {
+            path: root.display().to_string(),
+            kind: workdir::KIND_COPY.into(),
+            branch: None,
+            base_ref: String::new(),
+            root: root.display().to_string(),
+            git_dir: format!("{}.git", root.display()),
+            source: String::new(),
+        }
+    }
+
+    #[test]
+    fn only_desks_opened_here_can_be_closed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let share = tmp.path().join("共享");
+        std::fs::create_dir_all(&share).unwrap();
+        let desks = Desks::new(&share.canonicalize().unwrap(), &tmp.path().join("desks")).unwrap();
+        assert!(desks.own(&desk(&desks.dir.join("desk-b1-1"))).is_ok());
+        // 放独立目录的地方本身、别处的目录、git 目录指到别处的：都不认。
+        assert!(desks.own(&desk(&desks.dir)).is_err());
+        assert!(desks.own(&desk(&tmp.path().join("desk-b1-1"))).is_err());
+        let mut planted = desk(&desks.dir.join("desk-b1-1"));
+        planted.git_dir = desks.dir.join("desk-b2-1.git").display().to_string();
+        assert!(desks.own(&planted).is_err());
+    }
+
+    #[tokio::test]
+    async fn a_share_that_contains_the_desks_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let desks = Desks::new(&root, &root.join("data/work/share-desks")).unwrap();
+        let open = Open {
+            bot: "b1".into(),
+            existing: None,
+        };
+        assert!(desks.open(open).await.unwrap_err().contains("数据目录"));
     }
 }
