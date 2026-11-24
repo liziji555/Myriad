@@ -75,7 +75,7 @@ token_env = "TELEGRAM_BOT_TOKEN"
 api_base = "https://api.telegram.org"
 
 # 外部 MCP 服务：它们的工具会加给每个 Bot，名字是 mcp__<服务名>__<工具名>。
-# 只支持在本机启动、通过标准输入输出说话的服务。每一节是一个服务，例如：
+# 每一节是一个服务。在本机启动、通过标准输入输出说话的，例如：
 #
 # [mcp.files]
 # command = "npx"
@@ -87,5 +87,15 @@ api_base = "https://api.telegram.org"
 # # 它的工具每次调用都要你批准；这里列出的不用问：
 # auto_approve = ["read_file", "list_directory"]
 # # enabled = false   # 先停用
+#
+# 通过网址连的远程服务写 url，不写 command：
+#
+# [mcp.docs]
+# url = "https://example.com/mcp"
+# # 它要令牌的话，放在环境变量里，这里写变量名：请求会带上 Authorization: Bearer <令牌>
+# token_env = "DOCS_TOKEN"
+# # 别的请求头：
+# headers = { X-Team = "a" }
+# auto_approve = ["search"]
 #
 # 用 sa mcp test 试一下能不能连上、有哪些工具。

@@ -144,7 +144,7 @@ impl Orchestrator {
         for spec in specs {
             let this = self.clone();
             tokio::spawn(async move {
-                let _ = this.connect_mcp(Arc::new(McpServer::spawned(spec))).await;
+                let _ = this.connect_mcp(Arc::new(McpServer::new(spec))).await;
             });
         }
     }

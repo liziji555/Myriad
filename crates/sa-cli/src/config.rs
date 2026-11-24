@@ -96,11 +96,22 @@ pub struct GitHub {
     pub issue_labels: Vec<String>,
 }
 
-/// 一个外部 MCP 服务：启动一个本机的程序，通过标准输入输出和它说话。
+/// 一个外部 MCP 服务。写 `command` 的启动一个本机的程序，通过标准输入输出和它说话；
+/// 写 `url` 的通过网址连一个远程的服务。两样只写一样。
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct McpServer {
+    #[serde(default)]
     pub command: String,
+    /// 远程服务的网址。
+    #[serde(default)]
+    pub url: Option<String>,
+    /// 连远程服务时每个请求带的请求头。
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
+    /// 远程服务的令牌放在哪个环境变量里：作为 `Authorization: Bearer <令牌>` 带上。
+    #[serde(default)]
+    pub token_env: Option<String>,
     #[serde(default)]
     pub args: Vec<String>,
     /// 给它的环境变量。
@@ -256,8 +267,15 @@ impl Config {
                         .iter()
                         .map(|(key, value)| (key.clone(), value.clone())),
                 );
+                let mut headers: Vec<(String, String)> =
+                    server.headers.clone().into_iter().collect();
+                if let Some(token) = server.token_env.as_deref().and_then(&env) {
+                    headers.push(("Authorization".into(), format!("Bearer {token}")));
+                }
                 sa_tools::mcp::McpSpec {
                     name: name.clone(),
+                    url: server.url.clone(),
+                    headers,
                     command: server.command.clone(),
                     args: server.args.clone(),
                     env: vars,
@@ -281,8 +299,36 @@ impl Config {
             if name.is_empty() || name.len() > 24 || !name.chars().all(plain) {
                 bail!("[mcp.{name}] 的名字只能用小写字母、数字、横线和下划线，最多 24 个字符");
             }
-            if server.command.trim().is_empty() {
-                bail!("[mcp.{name}] 要写 command：启动这个服务的命令");
+            let local = !server.command.trim().is_empty();
+            let Some(url) = &server.url else {
+                if !local {
+                    bail!(
+                        "[mcp.{name}] 要写 command（启动这个服务的命令）或者 url（远程服务的网址）"
+                    );
+                }
+                if !server.headers.is_empty() || server.token_env.is_some() {
+                    bail!("[mcp.{name}] 的 headers 和 token_env 只有写了 url 的远程服务才用得上");
+                }
+                continue;
+            };
+            let extra =
+                !server.args.is_empty() || !server.env.is_empty() || !server.env_from.is_empty();
+            if local || extra {
+                bail!("[mcp.{name}] 写了 url 就不能再写 command、args、env、env_from");
+            }
+            if !url.starts_with("http://") && !url.starts_with("https://") {
+                bail!("[mcp.{name}] 的 url 要是一个 http(s) 地址");
+            }
+            // 没加密的线路上，令牌谁都看得到：只有本机的服务可以这样连。
+            let local_host = || {
+                let url = reqwest::Url::parse(url).ok()?;
+                let host = url.host_str()?.trim_matches(['[', ']']);
+                let ip = host.parse::<std::net::IpAddr>();
+                Some(host.eq_ignore_ascii_case("localhost") || ip.is_ok_and(|ip| ip.is_loopback()))
+            };
+            let secret = !server.headers.is_empty() || server.token_env.is_some();
+            if secret && url.starts_with("http://") && local_host() != Some(true) {
+                bail!("[mcp.{name}] 带着 headers 或 token_env 时 url 要用 https（本机的服务除外）");
             }
         }
         if !self.telegram.api_base.starts_with("http") {
@@ -532,14 +578,35 @@ auto_approve = ["read_file"]
 [mcp.off]
 command = "uvx"
 enabled = false
+
+[mcp.docs]
+url = "https://example.com/mcp"
+headers = { X-Team = "a" }
+token_env = "DOCS_TOKEN"
 "#,
         )
         .unwrap();
-        let env = |key: &str| (key == "FILES_TOKEN").then(|| "t0ken".to_string());
+        let env = |key: &str| match key {
+            "FILES_TOKEN" => Some("t0ken".to_string()),
+            "DOCS_TOKEN" => Some("s3cret".to_string()),
+            _ => None,
+        };
         let specs = config.mcp_specs(Path::new("/work"), env);
         // 停用的不启动；没设的环境变量不传。
-        assert_eq!(specs.len(), 1);
+        assert_eq!(specs.len(), 2);
+        // 远程的：令牌从环境变量里取，作为 Authorization 带上。
+        assert_eq!(specs[0].name, "docs");
+        assert_eq!(specs[0].url.as_deref(), Some("https://example.com/mcp"));
+        assert_eq!(
+            specs[0].headers,
+            [
+                ("X-Team".to_string(), "a".to_string()),
+                ("Authorization".to_string(), "Bearer s3cret".to_string())
+            ]
+        );
+        let specs = &specs[1..];
         assert_eq!(specs[0].name, "files");
+        assert_eq!(specs[0].url, None);
         assert_eq!(specs[0].command, "npx");
         assert_eq!(specs[0].args.len(), 3);
         assert_eq!(
@@ -556,11 +623,45 @@ enabled = false
             ("[mcp.\"My Files\"]\ncommand = \"npx\"", "名字只能用"),
             ("[mcp.files]\ncommand = \" \"", "要写 command"),
             ("[mcp.files]\nargs = []", "command"),
-            ("[mcp.files]\ncommand = \"npx\"\nurl = \"http://x\"", "url"),
+            (
+                "[mcp.files]\ncommand = \"npx\"\nurl = \"http://x\"",
+                "不能再写 command",
+            ),
+            (
+                "[mcp.docs]\nurl = \"http://x\"\nenv_from = [\"A\"]",
+                "不能再写 command",
+            ),
+            ("[mcp.docs]\nurl = \"ftp://x\"", "http(s) 地址"),
+            (
+                "[mcp.docs]\nurl = \"http://x/mcp\"\ntoken_env = \"T\"",
+                "要用 https",
+            ),
+            (
+                "[mcp.docs]\nurl = \"http://localhost.evil.com/\"\nheaders = { A = \"b\" }",
+                "要用 https",
+            ),
+            (
+                "[mcp.files]\ncommand = \"npx\"\ntoken_env = \"T\"",
+                "只有写了 url",
+            ),
         ] {
             let error = format!("{:#}", with(bad).unwrap_err());
             assert!(error.contains(needle), "{bad}: {error}");
         }
+    }
+
+    #[test]
+    fn a_token_may_go_over_plain_http_only_to_this_machine() {
+        let with = |extra: &str| Config::parse(&format!("{DEFAULT_CONFIG_TOML}\n{extra}"));
+        for url in [
+            "http://127.0.0.1:8000/mcp",
+            "http://localhost/mcp",
+            "http://[::1]:9/",
+        ] {
+            let text = format!("[mcp.docs]\nurl = \"{url}\"\ntoken_env = \"T\"");
+            with(&text).unwrap_or_else(|error| panic!("{url}: {error:#}"));
+        }
+        with("[mcp.docs]\nurl = \"http://x/mcp\"").unwrap();
     }
 
     #[test]

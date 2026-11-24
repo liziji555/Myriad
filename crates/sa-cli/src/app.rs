@@ -99,7 +99,13 @@ impl App {
                     config.github.token_env.clone(),
                     config.github.webhook_secret_env.clone(),
                     config.telegram.token_env.clone(),
-                ]),
+                ])
+                .chain(
+                    config
+                        .mcp
+                        .values()
+                        .filter_map(|server| server.token_env.clone()),
+                ),
         );
         let models = models(&config);
         let mut settings = Settings {
@@ -152,7 +158,7 @@ impl App {
     pub async fn connect_mcp(&self) {
         for spec in self.mcp_specs() {
             let name = spec.name.clone();
-            let server = Arc::new(sa_tools::mcp::McpServer::spawned(spec));
+            let server = Arc::new(sa_tools::mcp::McpServer::new(spec));
             if let Err(error) = self.orchestrator.connect_mcp(server).await {
                 eprintln!("MCP 服务「{name}」没连上：{error}");
             }
