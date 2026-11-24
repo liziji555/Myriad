@@ -116,6 +116,7 @@ impl Provider for Anthropic {
             idle_timeout: self.idle_timeout,
             out: VecDeque::new(),
             calls: HashMap::new(),
+            last_call: None,
             usage: Usage::default(),
             stop: None,
             finished: false,
@@ -285,6 +286,8 @@ struct Decoder {
     out: VecDeque<Result<StreamEvent, LlmError>>,
     /// 第几块是哪次工具调用。
     calls: HashMap<usize, String>,
+    /// 最近开始的那次工具调用。有的中转把参数的最后一段标错了块号，就算给它。
+    last_call: Option<String>,
     usage: Usage,
     stop: Option<StopReason>,
     finished: bool,
@@ -363,6 +366,7 @@ impl Decoder {
                             return self.fail(LlmError::Protocol("工具调用缺少 id 或名字".into()));
                         };
                         self.calls.insert(event.index, id.clone());
+                        self.last_call = Some(id.clone());
                         self.out
                             .push_back(Ok(StreamEvent::ToolCallStart { id, name }));
                     }
@@ -378,8 +382,8 @@ impl Decoder {
                     Some("thinking_delta") => self.thinking(delta.thinking),
                     Some("input_json_delta") => {
                         let fragment = delta.partial_json.filter(|f| !f.is_empty());
-                        if let (Some(id), Some(fragment)) = (self.calls.get(&event.index), fragment)
-                        {
+                        let id = self.calls.get(&event.index).or(self.last_call.as_ref());
+                        if let (Some(id), Some(fragment)) = (id, fragment) {
                             self.out.push_back(Ok(StreamEvent::ToolCallArgsDelta {
                                 id: id.clone(),
                                 json_fragment: fragment,
@@ -570,7 +574,9 @@ mod tests {
             r#"{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_a","name":"read","input":{}}}"#,
             r#"{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":""}}"#,
             r#"{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"path\":"}}"#,
-            r#"{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"\"a.md\"}"}}"#,
+            r#"{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"\"a.md\""}}"#,
+            // 有的中转把最后一段标成了不存在的块号。
+            r#"{"type":"content_block_delta","index":5,"delta":{"type":"input_json_delta","partial_json":"}"}}"#,
             r#"{"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"toolu_b","name":"list_dir","input":{}}}"#,
             r#"{"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":7}}"#,
             r#"{"type":"message_stop"}"#,
