@@ -11,10 +11,12 @@ pub struct Desk {
     pub workdir: Option<Workdir>,
     pub session: Option<String>,
     pub changes: Vec<DeskChange>,
+    /// 开在哪个共享目录那台电脑上。`None` 是开在服务这边。
+    pub share: Option<String>,
 }
 
 const COLUMNS: &str =
-    "bot_id, workdir, work_kind, branch, base_ref, work_tree, git_dir, source_dir, session, changes";
+    "bot_id, workdir, work_kind, branch, base_ref, work_tree, git_dir, source_dir, session, changes, share";
 
 fn from_row(row: &Row<'_>) -> rusqlite::Result<(BotId, Desk)> {
     let text = |i| row.get::<_, Option<String>>(i);
@@ -39,6 +41,7 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<(BotId, Desk)> {
             workdir,
             session: text(8)?,
             changes: serde_json::from_str(&changes).unwrap_or_default(),
+            share: text(10)?,
         },
     ))
 }
@@ -62,10 +65,10 @@ pub fn list(conn: &Connection, room: &RoomId) -> Result<Vec<(BotId, Desk)>> {
 pub fn put(conn: &Connection, room: &RoomId, bot: &BotId, desk: &Desk) -> Result<()> {
     let w = desk.workdir.as_ref();
     conn.execute(
-        "INSERT INTO harness_desks (room_id, bot_id, workdir, work_kind, branch, base_ref, work_tree, git_dir, source_dir, session, changes)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+        "INSERT INTO harness_desks (room_id, bot_id, workdir, work_kind, branch, base_ref, work_tree, git_dir, source_dir, session, changes, share)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
          ON CONFLICT (room_id, bot_id) DO UPDATE SET workdir = ?3, work_kind = ?4, branch = ?5, base_ref = ?6,
-             work_tree = ?7, git_dir = ?8, source_dir = ?9, session = ?10, changes = ?11",
+             work_tree = ?7, git_dir = ?8, source_dir = ?9, session = ?10, changes = ?11, share = ?12",
         params![
             room.as_str(),
             bot.as_str(),
@@ -78,6 +81,7 @@ pub fn put(conn: &Connection, room: &RoomId, bot: &BotId, desk: &Desk) -> Result
             w.map(|w| w.source.as_str()),
             desk.session,
             serde_json::to_string(&desk.changes).expect("只有字符串"),
+            desk.share,
         ],
     )?;
     Ok(())

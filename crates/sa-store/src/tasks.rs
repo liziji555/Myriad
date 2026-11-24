@@ -8,7 +8,7 @@ use sa_protocol::{
 };
 
 /// 任务的独立工作目录。这些只有后端用，不给界面。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Workdir {
     /// Bot 在哪个目录里干活。
     pub path: String,

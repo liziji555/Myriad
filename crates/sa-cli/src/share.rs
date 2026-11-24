@@ -9,6 +9,7 @@ use crate::paths::DataDir;
 use crate::remote::{self, RemoteService, SshTarget, Tunnel, TunnelStop, RETRY_FIRST, RETRY_MAX};
 use anyhow::{bail, Context, Result};
 use reqwest::StatusCode;
+use sa_orchestrator::share_desk::{self, Desks, Forward, Progress};
 use sa_orchestrator::shares::{share_name, READ_ONLY_TOOLS, STOP};
 use sa_protocol::{ShareCall, SharePoll, ShareReply};
 use sa_tools::{local_shell, Fence, ToolCtx, ToolRegistry};
@@ -23,6 +24,8 @@ const POLL_TIMEOUT: Duration = Duration::from_secs(40);
 const REPLY_TIMEOUT: Duration = Duration::from_secs(30);
 /// 交结果失败时最多重试几次。
 const REPLY_TRIES: u32 = 5;
+/// 交 harness 做到一半的进展最多试几次：丢了一两步不要紧，结果最后还会交。
+const PROGRESS_TRIES: u32 = 2;
 
 #[derive(clap::Args)]
 pub struct ShareArgs {
@@ -96,8 +99,12 @@ pub fn run(data_dir: &DataDir, args: ShareArgs) -> Result<()> {
 
     // 链接里有服务的令牌：批准执行的命令拿不到它。
     sa_tools::hide_env_from_commands(["SA_SHARE_URL".to_string()]);
+    // harness 的独立目录放在这边的数据目录里：文件工具碰不到，和服务那边一样。
+    let desks = Desks::new(fence.root(), &data_dir.work().join("share-desks"))
+        .with_context(|| format!("建不了放独立目录的地方 {}", data_dir.work().display()))?;
     let sharer = Arc::new(Sharer::new(
         fence,
+        desks,
         name,
         args.read_only,
         args.commands,
@@ -120,6 +127,7 @@ pub fn run(data_dir: &DataDir, args: ShareArgs) -> Result<()> {
 
 struct Sharer {
     fence: Fence,
+    desks: Desks,
     name: String,
     read_only: bool,
     commands: bool,
@@ -135,6 +143,7 @@ struct Sharer {
 impl Sharer {
     fn new(
         fence: Fence,
+        desks: Desks,
         name: String,
         read_only: bool,
         commands: bool,
@@ -157,6 +166,7 @@ impl Sharer {
         let http = reqwest::Client::builder().no_proxy().build()?;
         Ok(Self {
             fence,
+            desks,
             name,
             read_only,
             commands,
@@ -174,7 +184,7 @@ impl Sharer {
         let mode = if self.read_only {
             "只读"
         } else if self.commands {
-            "可以改、可以执行命令"
+            "可以改、可以执行命令和跑 harness"
         } else {
             "可以改"
         };
@@ -210,7 +220,11 @@ impl Sharer {
                     // 命令可能跑很久，边跑边接着取活（好收到「停下」）；有命令在跑时文件操作也不等，免得耽误叫停。
                     // 没命令在跑时文件操作做完再取下一件：旧的服务不看 `running`，边做边取会被它当成丢了。
                     match call {
-                        Some(call) if call.tool == STOP || call.tool == "shell" => self.start(call),
+                        Some(call)
+                            if matches!(call.tool.as_str(), STOP | "shell" | share_desk::RUN) =>
+                        {
+                            self.start(call)
+                        }
                         Some(call) => {
                             let (busy, cancel) = {
                                 let mut running = self.running.lock().unwrap();
@@ -296,25 +310,44 @@ impl Sharer {
 
     /// 做一件活，把结果交回去。交不回去就重试几次；还不行就算了，服务那边会当它丢了。
     async fn handle(&self, call: ShareCall, cancel: CancellationToken) {
-        let (ok, text) = match self.run_tool(&call, cancel).await {
+        // harness 做到一半的进展按顺序先交，最后再交结果。
+        let (progress, mut steps) = tokio::sync::mpsc::unbounded_channel::<Progress>();
+        let forward = async {
+            while let Some(step) = steps.recv().await {
+                let text = serde_json::to_string(&step).expect("只有字符串");
+                self.send(&self.reply(call.id, true, text, true), PROGRESS_TRIES)
+                    .await;
+            }
+        };
+        let (result, ()) = tokio::join!(self.run_tool(&call, cancel, progress), forward);
+        let (ok, text) = match result {
             Ok(text) => (true, text),
             Err(text) => (false, text),
         };
-        let reply = ShareReply {
+        self.send(&self.reply(call.id, ok, text, false), REPLY_TRIES)
+            .await;
+    }
+
+    fn reply(&self, id: u64, ok: bool, text: String, progress: bool) -> ShareReply {
+        ShareReply {
             name: self.name.clone(),
             session: self.session.clone(),
-            id: call.id,
+            id,
             ok,
             text,
-        };
+            progress,
+        }
+    }
+
+    async fn send(&self, reply: &ShareReply, tries: u32) {
         let mut retry = RETRY_FIRST;
-        for _ in 0..REPLY_TRIES {
+        for _ in 0..tries {
             let sent = self
                 .http
                 .post(format!("{}/reply", self.base))
                 .bearer_auth(&self.token)
                 .timeout(REPLY_TIMEOUT)
-                .json(&reply)
+                .json(reply)
                 .send()
                 .await;
             match sent {
@@ -336,10 +369,14 @@ impl Sharer {
         &self,
         call: &ShareCall,
         cancel: CancellationToken,
+        progress: tokio::sync::mpsc::UnboundedSender<Progress>,
     ) -> Result<String, String> {
         // 排着队时就被叫停了：不做了。
         if cancel.is_cancelled() {
             return Err("已停止，没有执行。".into());
+        }
+        if call.tool.starts_with("_desk") || call.tool == share_desk::RUN {
+            return self.desk_work(call, cancel, progress).await;
         }
         let Some(tool) = self.tools.get(&call.tool) else {
             return Err(if self.read_only {
@@ -367,6 +404,49 @@ impl Sharer {
         let mut ctx = ToolCtx::new(self.fence.clone());
         ctx.cancel = cancel;
         tool.call(input, &ctx).await.map_err(|error| error.0)
+    }
+}
+
+impl Sharer {
+    /// harness 的独立目录：开、在里面跑 harness、带回或丢掉。
+    async fn desk_work(
+        &self,
+        call: &ShareCall,
+        cancel: CancellationToken,
+        progress: tokio::sync::mpsc::UnboundedSender<Progress>,
+    ) -> Result<String, String> {
+        if self.read_only {
+            return Err("这个共享目录是只读的，harness 不能在这里干活。".into());
+        }
+        if share_desk::needs_commands(&call.tool) && !self.commands {
+            return Err("这台电脑共享时没加 --commands，harness 不能在这里跑。".into());
+        }
+        let input = call.input.clone();
+        let unreadable = |e: serde_json::Error| {
+            format!("看不懂服务交来的活（{e}），sa share 和服务的版本可能对不上")
+        };
+        match call.tool.as_str() {
+            share_desk::OPEN => {
+                let open = serde_json::from_value(input).map_err(unreadable)?;
+                let workdir = self.desks.open(open).await?;
+                println!("harness 的独立目录：{}", workdir.path);
+                Ok(serde_json::to_string(&workdir).expect("只有字符串"))
+            }
+            share_desk::RUN => {
+                let job: share_desk::Run = serde_json::from_value(input).map_err(unreadable)?;
+                println!("{} 开始在 {} 里干活", job.harness.label(), job.workdir.path);
+                let ran = self.desks.run(job, &Forward(progress), &cancel).await;
+                Ok(serde_json::to_string(&ran).expect("只有字符串"))
+            }
+            share_desk::CLOSE => {
+                let close: share_desk::Close = serde_json::from_value(input).map_err(unreadable)?;
+                let what = if close.accept { "带回" } else { "丢掉" };
+                self.desks.close(close).await?;
+                println!("harness 的改动已{what}");
+                Ok(String::new())
+            }
+            other => Err(format!("共享目录这边不能用 {other}。")),
+        }
     }
 }
 

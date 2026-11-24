@@ -294,6 +294,20 @@ pub async fn commit_and_diff(
         .collect())
 }
 
+/// 验收：先把独立目录里的改动提交掉，再带回它开出来的工作目录。带不回去时什么都不动。
+pub async fn bring_back(dir: &Workdir) -> Result<(), String> {
+    commit_and_diff(dir, "带回前记下改动").await?;
+    back_to_branch(dir).await?;
+    let outside = outside_changes(dir).await?;
+    if !outside.is_empty() {
+        return Err(format!(
+            "它还改了工作目录外面的文件，不能带回：{}",
+            outside.join("、")
+        ));
+    }
+    apply_to_workspace(dir).await
+}
+
 /// 人的工作目录里是不是有一个合并做到一半。
 async fn merging(workspace: &Path) -> bool {
     git(workspace, &["rev-parse", "-q", "--verify", "MERGE_HEAD"])
