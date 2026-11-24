@@ -18,6 +18,12 @@ api_key_env = "DEEPSEEK_API_KEY"
 #   api_key_env = "OPENCODE_API_KEY"
 #   session_header = "x-opencode-session"
 # 然后把 [tiers] 里的 provider 和 model 改成它（例如 model = "deepseek-v4.1-flash"）。
+# Claude 官方接口（或兼容 Anthropic 格式的中转）用 kind = "anthropic"：
+#   [providers.claude]
+#   kind = "anthropic"
+#   base_url = "https://api.anthropic.com"
+#   api_key_env = "ANTHROPIC_API_KEY"
+# 这种服务不开思考模式（thinking 写了也不开）；上下文窗口按 200,000 算。
 
 # 模型档位。Bot 只引用档位（cheap / mid / strong），换模型只改这里。
 # thinking 控制思考模式：true 开、false 关，不写就用模型服务的默认值。

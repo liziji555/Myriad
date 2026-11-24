@@ -193,7 +193,7 @@ fn message_json(message: &ChatMessage) -> Value {
     value
 }
 
-fn transport_error(error: reqwest::Error) -> LlmError {
+pub(crate) fn transport_error(error: reqwest::Error) -> LlmError {
     if error.is_timeout() {
         LlmError::Timeout
     } else {
@@ -201,7 +201,7 @@ fn transport_error(error: reqwest::Error) -> LlmError {
     }
 }
 
-fn status_error(status: u16, body: &str) -> LlmError {
+pub(crate) fn status_error(status: u16, body: &str) -> LlmError {
     #[derive(Deserialize)]
     struct Envelope {
         error: Detail,
