@@ -1178,7 +1178,7 @@ async fn harness_turn(
                 Err(end) => return Ok(end),
             };
             let resume = resume_of(bot, &desk);
-            let prompt = harness_prompt(bot, &said, resume.is_some());
+            let prompt = harness_prompt(bot, &said, resume.is_some(), &workdir.path);
             let launch = crate::harness::Launch {
                 harness: bot.harness,
                 command: &bot.harness_command,
@@ -1258,11 +1258,11 @@ fn resume_of(bot: &Bot, desk: &sa_engine::Desk) -> Option<String> {
         .map(String::from)
 }
 
-fn harness_prompt(bot: &Bot, said: &[String], resumed: bool) -> String {
+fn harness_prompt(bot: &Bot, said: &[String], resumed: bool, dir: &str) -> String {
     let mut prompt = String::new();
     if !resumed {
         prompt.push_str(&format!(
-            "你是「Myriad」房间里的 {}。{}\n你在自己的独立目录里干活，改动要人验收后才会带回。做完用几句话说清做了什么、结果怎样。\n\n",
+            "你是「Myriad」房间里的 {}。{}\n你在自己的独立目录 {dir} 里干活（就是现在的当前目录），它是工作目录的一份副本；别人说的「工作目录」「项目」都指这里。只改这个目录里的文件，不要去找、也不要改原来的工作目录或别的地方的文件。改动要人验收后才会带回。做完用几句话说清做了什么、结果怎样。\n\n",
             bot.name,
             bot.persona.trim()
         ));
@@ -1389,11 +1389,12 @@ async fn shared_harness(
     if cancel.is_cancelled() {
         return Err(TurnEnd::Cancelled);
     }
+    let prompt = harness_prompt(bot, said, resume.is_some(), &workdir.path);
     let job = share_desk::Run {
         workdir,
         harness: bot.harness,
         command: bot.harness_command.clone(),
-        prompt: harness_prompt(bot, said, resume.is_some()),
+        prompt,
         session: resume.clone(),
         summary,
     };
