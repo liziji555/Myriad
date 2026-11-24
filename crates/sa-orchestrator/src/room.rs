@@ -828,18 +828,19 @@ async fn turn(
         pulse: None,
     };
     let outcome = match shared.models.resolve(bot.tier) {
-        _ if bot.harness != Harness::Builtin && share.is_some() => {
-            let recorded = record_inputs(transcript, inbox.drain().await);
-            Err(recorded.err().unwrap_or_else(|| {
-                format!(
-                    "{} 是 harness，这个房间的工作目录是共享目录，harness 暂时还不能在共享目录里干活。",
-                    bot.name
-                )
-            }))
-        }
         _ if bot.harness != Harness::Builtin => {
             let inputs = inbox.drain().await;
-            harness_turn(shared, room_id, bot, transcript, inputs, &observer, &cancel).await
+            harness_turn(
+                shared,
+                room_id,
+                bot,
+                transcript,
+                inputs,
+                &observer,
+                &cancel,
+                share.as_deref(),
+            )
+            .await
         }
         Err(reason) => {
             // 模型用不了：这一轮的输入照样记进会话，配置好之后接着聊时模型能看到。
@@ -1007,7 +1008,7 @@ fn workspace(shared: &Shared, share: Option<&str>) -> String {
         .map(|known| format!("，在那边是 {}", known.root))
         .unwrap_or_default();
     let commands = match known.and_then(|known| known.shell) {
-        Some(shell) => format!("命令也在那台电脑的这个目录里用 {shell} 执行，每条都要人批准"),
+        Some(shell) => format!("命令也在那台电脑的这个目录里用 {shell} 执行，每条都要人批准；harness 成员也在那台电脑上跑"),
         None => "这里不能执行命令".into(),
     };
     format!(
@@ -1031,6 +1032,7 @@ fn share_rules(shared: &Shared, share: Option<&str>) -> String {
 }
 
 /// harness Bot 的一轮：在它自己的工位目录里启动它，把这一轮的话交给它。
+#[allow(clippy::too_many_arguments)]
 async fn harness_turn(
     shared: &Arc<Shared>,
     room_id: &RoomId,
@@ -1039,14 +1041,34 @@ async fn harness_turn(
     inputs: Vec<UserInput>,
     observer: &RoomObserver,
     cancel: &CancellationToken,
+    share: Option<&str>,
 ) -> Result<TurnEnd, String> {
     let said: Vec<String> = inputs.iter().map(|input| input.content.clone()).collect();
     record_inputs(transcript, inputs)?;
     let label = bot.harness.label();
+    if let Some(name) = share {
+        if shared.shares.shell(name).is_none() {
+            return Ok(TurnEnd::Failed(format!(
+                "{} 是 harness，要在共享目录「{name}」那台电脑上跑。那边运行 sa share 时得加 --commands（不能是只读的）",
+                bot.name
+            )));
+        }
+    }
 
     // 启动前问一次人：harness 里面的每一步 Myriad 管不到，只能在门口问。
-    let workspace = shared.settings.fence.root_display();
-    let title = format!("让 {}（{label}）在自己的独立目录里动手", bot.name);
+    let (workspace, title) = match share {
+        Some(name) => (
+            format!("共享目录「{name}」"),
+            format!(
+                "让 {}（{label}）在共享目录「{name}」那台电脑上的独立目录里动手",
+                bot.name
+            ),
+        ),
+        None => (
+            shared.settings.fence.root_display(),
+            format!("让 {}（{label}）在自己的独立目录里动手", bot.name),
+        ),
+    };
     let input = serde_json::json!({
         "bot": bot.id.as_str(),
         "harness": bot.harness,
@@ -1058,6 +1080,9 @@ async fn harness_turn(
     let mut reason = format!(
         "{label} 会自己改文件、执行命令，Myriad 管不到它里面的每一步。它只在从 {workspace} 开出来的独立目录里干活，改动要你验收后才带回。"
     );
+    if share.is_some() {
+        reason.push_str("\n它在那台电脑上跑，用的是那台电脑上装的程序和登录的账号；命令和你在那台电脑的终端里跑的一样，不只碰得到那个目录。");
+    }
     // 设置里写了命令就照它启动，不管名字叫什么：命令得让人看见。
     let command = bot.harness_command.trim();
     if !command.is_empty() {
@@ -1087,27 +1112,30 @@ async fn harness_turn(
         .tool_finished("harness-start", StepEnd::Ok, "")
         .await;
 
-    // 同时跑的 harness 有上限：满了就排队。
+    // 同时跑的 harness 有上限：满了就排队。在共享目录那台电脑上跑的不占这边的名额。
     let slots = shared.harness_slots.clone();
-    let _slot = match slots.clone().try_acquire_owned() {
-        Ok(slot) => slot,
-        Err(_) => {
-            let waiting = format!(
-                "排队：同时最多 {} 个 harness 在跑",
-                shared.settings.max_parallel_harness.max(1)
-            );
-            observer
-                .tool_started("harness-queue", "harness", &waiting, "")
-                .await;
-            let slot = tokio::select! {
-                _ = cancel.cancelled() => return Ok(TurnEnd::Cancelled),
-                slot = slots.acquire_owned() => slot.map_err(|e| e.to_string())?,
-            };
-            observer
-                .tool_finished("harness-queue", StepEnd::Ok, "轮到了")
-                .await;
-            slot
-        }
+    let _slot = match share {
+        Some(_) => None,
+        None => Some(match slots.clone().try_acquire_owned() {
+            Ok(slot) => slot,
+            Err(_) => {
+                let waiting = format!(
+                    "排队：同时最多 {} 个 harness 在跑",
+                    shared.settings.max_parallel_harness.max(1)
+                );
+                observer
+                    .tool_started("harness-queue", "harness", &waiting, "")
+                    .await;
+                let slot = tokio::select! {
+                    _ = cancel.cancelled() => return Ok(TurnEnd::Cancelled),
+                    slot = slots.acquire_owned() => slot.map_err(|e| e.to_string())?,
+                };
+                observer
+                    .tool_finished("harness-queue", StepEnd::Ok, "轮到了")
+                    .await;
+                slot
+            }
+        }),
     };
 
     let _desk_lock = shared.desk_lock(room_id, &bot.id).lock_owned().await;
@@ -1117,76 +1145,63 @@ async fn harness_turn(
     let mut desk = db(move || engine.desk(&room, &bot_id))
         .await
         .map_err(|e| e.to_string())?;
-    let workdir = match desk.workdir.clone() {
-        Some(workdir) if std::path::Path::new(&workdir.path).is_dir() => {
-            let source = std::path::Path::new(&workdir.source).canonicalize().ok();
-            if source.as_deref() != Some(shared.settings.fence.root()) {
-                return Ok(TurnEnd::Failed(format!(
-                    "{} 的独立目录是从 {} 开出来的，现在的工作目录是 {}。先在成员面板里丢掉它的旧改动，再让它干活",
-                    bot.name,
-                    workdir.source,
-                    shared.settings.fence.root_display()
-                )));
-            }
-            workdir
-        }
-        _ => {
-            observer
-                .tool_started("harness-desk", "workdir", "开独立目录", "")
-                .await;
-            let name = format!("desk-{}-{}", bot.id, sa_engine::now_ms());
-            let opened = crate::workdir::provision(
-                shared.settings.fence.root(),
-                &shared.settings.work_dir.join("desks"),
-                &sa_protocol::TaskId::from(name),
-            )
-            .await;
-            let workdir = match opened {
-                Ok(workdir) => workdir,
-                Err(reason) => {
-                    observer
-                        .tool_finished("harness-desk", StepEnd::Failed, &reason)
-                        .await;
-                    return Ok(TurnEnd::Failed(format!("独立目录开不出来：{reason}")));
-                }
-            };
-            observer
-                .tool_finished("harness-desk", StepEnd::Ok, &workdir.path)
-                .await;
-            desk.workdir = Some(workdir.clone());
-            desk.changes.clear();
-            save_desk(shared, room_id, &bot.id, &desk).await;
-            workdir
-        }
-    };
-
-    // 会话记着是哪个 harness、哪条命令开的：换了之后旧会话接不上，重新开。
-    let tag = format!("{:?} {}\n", bot.harness, bot.harness_command.trim());
-    let resume = desk
-        .session
-        .as_deref()
-        .and_then(|session| session.strip_prefix(&tag))
-        .map(String::from);
-    let mut prompt = String::new();
-    if resume.is_none() {
-        prompt.push_str(&format!(
-            "你是「Myriad」房间里的 {}。{}\n你在自己的独立目录里干活，改动要人验收后才会带回。做完用几句话说清做了什么、结果怎样。\n\n",
+    if desk.workdir.is_some() && desk.share.as_deref() != share {
+        let opened_at = match &desk.share {
+            Some(name) => format!("共享目录「{name}」那台电脑上"),
+            None => "服务这边".into(),
+        };
+        return Ok(TurnEnd::Failed(format!(
+            "{} 的独立目录开在{opened_at}，现在的工作目录是{}。先在成员面板里丢掉它的旧改动，再让它干活",
             bot.name,
-            bot.persona.trim()
-        ));
+            match share {
+                Some(name) => format!("共享目录「{name}」"),
+                None => format!(" {}", shared.settings.fence.root_display()),
+            }
+        )));
     }
-    prompt.push_str(&said.join("\n\n"));
-    let launch = crate::harness::Launch {
-        harness: bot.harness,
-        command: &bot.harness_command,
-        dir: std::path::Path::new(&workdir.path),
-        prompt: &prompt,
-        session: resume.as_deref(),
+    let summary = format!("{}：{}", bot.name, said.last().map_or("", |s| s.as_str()));
+    let summary: String = summary.chars().take(72).collect();
+    let (finished, changes) = match share {
+        Some(name) => {
+            match shared_harness(
+                shared, room_id, bot, &mut desk, name, &said, summary, observer, cancel,
+            )
+            .await
+            {
+                Ok(done) => done,
+                Err(end) => return Ok(end),
+            }
+        }
+        None => {
+            let workdir = match local_desk(shared, room_id, bot, &mut desk, observer).await {
+                Ok(workdir) => workdir,
+                Err(end) => return Ok(end),
+            };
+            let resume = resume_of(bot, &desk);
+            let prompt = harness_prompt(bot, &said, resume.is_some(), &workdir.path);
+            let launch = crate::harness::Launch {
+                harness: bot.harness,
+                command: &bot.harness_command,
+                dir: std::path::Path::new(&workdir.path),
+                prompt: &prompt,
+                session: resume.as_deref(),
+            };
+            if cancel.is_cancelled() {
+                return Ok(TurnEnd::Cancelled);
+            }
+            let finished = crate::harness::run(&launch, observer, cancel).await;
+            // 不管怎么结束的，目录里的改动都记下来，交回主 Agent 的话里带上改了什么。
+            let changes = crate::workdir::commit_and_diff(&workdir, &summary)
+                .await
+                .map(|files| {
+                    files
+                        .into_iter()
+                        .map(|(path, label)| sa_protocol::DeskChange { path, label })
+                        .collect()
+                });
+            (finished, changes)
+        }
     };
-    if cancel.is_cancelled() {
-        return Ok(TurnEnd::Cancelled);
-    }
-    let finished = crate::harness::run(&launch, observer, cancel).await;
     if !finished.text.is_empty() {
         transcript
             .append(sa_kernel::EntryBody::Assistant {
@@ -1197,15 +1212,9 @@ async fn harness_turn(
             .map_err(|e| e.to_string())?;
     }
 
-    // 不管怎么结束的，目录里的改动都记下来，交回主 Agent 的话里带上改了什么。
-    let summary = format!("{}：{}", bot.name, said.last().map_or("", |s| s.as_str()));
-    let summary: String = summary.chars().take(72).collect();
-    match crate::workdir::commit_and_diff(&workdir, &summary).await {
-        Ok(files) => {
-            desk.changes = files
-                .into_iter()
-                .map(|(path, label)| sa_protocol::DeskChange { path, label })
-                .collect();
+    match changes {
+        Ok(changes) => {
+            desk.changes = changes;
             if !desk.changes.is_empty() {
                 let listed: Vec<String> = desk
                     .changes
@@ -1230,9 +1239,202 @@ async fn harness_turn(
         }
         Err(reason) => tracing::warn!(room = %room_id, "harness 目录里的改动没记下来：{reason}"),
     }
-    desk.session = finished.session.map(|id| format!("{tag}{id}"));
+    desk.session = finished
+        .session
+        .map(|id| format!("{}{id}", session_tag(bot)));
     save_desk(shared, room_id, &bot.id, &desk).await;
     Ok(finished.end)
+}
+
+/// 会话记着是哪个 harness、哪条命令开的：换了之后旧会话接不上，重新开。
+fn session_tag(bot: &Bot) -> String {
+    format!("{:?} {}\n", bot.harness, bot.harness_command.trim())
+}
+
+fn resume_of(bot: &Bot, desk: &sa_engine::Desk) -> Option<String> {
+    desk.session
+        .as_deref()
+        .and_then(|session| session.strip_prefix(&session_tag(bot)))
+        .map(String::from)
+}
+
+fn harness_prompt(bot: &Bot, said: &[String], resumed: bool, dir: &str) -> String {
+    let mut prompt = String::new();
+    if !resumed {
+        prompt.push_str(&format!(
+            "你是「Myriad」房间里的 {}。{}\n你在自己的独立目录 {dir} 里干活（就是现在的当前目录），它是工作目录的一份副本；别人说的「工作目录」「项目」都指这里。只改这个目录里的文件，不要去找、也不要改原来的工作目录或别的地方的文件。改动要人验收后才会带回。做完用几句话说清做了什么、结果怎样。\n\n",
+            bot.name,
+            bot.persona.trim()
+        ));
+    }
+    prompt.push_str(&said.join("\n\n"));
+    prompt
+}
+
+/// 服务这边的独立目录：上次开的还在就接着用，不在了就开一个。
+async fn local_desk(
+    shared: &Arc<Shared>,
+    room_id: &RoomId,
+    bot: &Bot,
+    desk: &mut sa_engine::Desk,
+    observer: &RoomObserver,
+) -> Result<sa_engine::Workdir, TurnEnd> {
+    if let Some(workdir) = desk.workdir.clone() {
+        if std::path::Path::new(&workdir.path).is_dir() {
+            let source = std::path::Path::new(&workdir.source).canonicalize().ok();
+            if source.as_deref() != Some(shared.settings.fence.root()) {
+                return Err(TurnEnd::Failed(format!(
+                    "{} 的独立目录是从 {} 开出来的，现在的工作目录是 {}。先在成员面板里丢掉它的旧改动，再让它干活",
+                    bot.name,
+                    workdir.source,
+                    shared.settings.fence.root_display()
+                )));
+            }
+            return Ok(workdir);
+        }
+    }
+    observer
+        .tool_started("harness-desk", "workdir", "开独立目录", "")
+        .await;
+    let name = format!("desk-{}-{}", bot.id, sa_engine::now_ms());
+    let opened = crate::workdir::provision(
+        shared.settings.fence.root(),
+        &shared.settings.work_dir.join("desks"),
+        &sa_protocol::TaskId::from(name),
+    )
+    .await;
+    let workdir = match opened {
+        Ok(workdir) => workdir,
+        Err(reason) => {
+            observer
+                .tool_finished("harness-desk", StepEnd::Failed, &reason)
+                .await;
+            return Err(TurnEnd::Failed(format!("独立目录开不出来：{reason}")));
+        }
+    };
+    observer
+        .tool_finished("harness-desk", StepEnd::Ok, &workdir.path)
+        .await;
+    desk.workdir = Some(workdir.clone());
+    desk.share = None;
+    desk.changes.clear();
+    save_desk(shared, room_id, &bot.id, desk).await;
+    Ok(workdir)
+}
+
+type Changes = Result<Vec<sa_protocol::DeskChange>, String>;
+
+/// 在共享目录那台电脑上开独立目录、跑 harness：那边每做一步都报回来，放进房间。
+#[allow(clippy::too_many_arguments)]
+async fn shared_harness(
+    shared: &Arc<Shared>,
+    room_id: &RoomId,
+    bot: &Bot,
+    desk: &mut sa_engine::Desk,
+    name: &str,
+    said: &[String],
+    summary: String,
+    observer: &RoomObserver,
+    cancel: &CancellationToken,
+) -> Result<(crate::harness::Finished, Changes), TurnEnd> {
+    use crate::share_desk;
+    let fresh = desk.workdir.is_none();
+    if fresh {
+        observer
+            .tool_started("harness-desk", "workdir", "在那台电脑上开独立目录", "")
+            .await;
+    }
+    let open = share_desk::Open {
+        bot: bot.id.to_string(),
+        existing: desk.workdir.clone(),
+    };
+    let input = serde_json::to_value(open).expect("只有字符串");
+    let opened = shared
+        .shares
+        .ask(name, share_desk::OPEN, input, cancel, None)
+        .await
+        .and_then(|text| {
+            serde_json::from_str::<sa_engine::Workdir>(&text).map_err(|_| {
+                "那台电脑交回来的独立目录看不懂，sa share 和服务的版本可能对不上".into()
+            })
+        });
+    let workdir = match opened {
+        Ok(workdir) => workdir,
+        Err(reason) => {
+            if fresh {
+                observer
+                    .tool_finished("harness-desk", StepEnd::Failed, &reason)
+                    .await;
+            }
+            if cancel.is_cancelled() {
+                return Err(TurnEnd::Cancelled);
+            }
+            return Err(TurnEnd::Failed(format!("独立目录开不出来：{reason}")));
+        }
+    };
+    if fresh {
+        observer
+            .tool_finished("harness-desk", StepEnd::Ok, &workdir.path)
+            .await;
+    }
+    if desk.workdir.as_ref() != Some(&workdir) {
+        // 那边重新开了一个（上次的不在了）：旧会话跟着旧目录，不再接着用。
+        desk.workdir = Some(workdir.clone());
+        desk.share = Some(name.to_string());
+        desk.changes.clear();
+        desk.session = None;
+        save_desk(shared, room_id, &bot.id, desk).await;
+    }
+    let resume = resume_of(bot, desk);
+    if cancel.is_cancelled() {
+        return Err(TurnEnd::Cancelled);
+    }
+    let prompt = harness_prompt(bot, said, resume.is_some(), &workdir.path);
+    let job = share_desk::Run {
+        workdir,
+        harness: bot.harness,
+        command: bot.harness_command.clone(),
+        prompt,
+        session: resume.clone(),
+        summary,
+    };
+    let input = serde_json::to_value(job).expect("只有字符串");
+    let (progress, mut shown) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let ran = shared
+        .shares
+        .ask(name, share_desk::RUN, input, cancel, Some(progress));
+    tokio::pin!(ran);
+    let ran = loop {
+        tokio::select! {
+            biased;
+            Some(item) = shown.recv() => share_desk::show(&item, observer).await,
+            ran = &mut ran => break ran,
+        }
+    };
+    while let Ok(item) = shown.try_recv() {
+        share_desk::show(&item, observer).await;
+    }
+    let ran = match ran.map(|text| serde_json::from_str::<share_desk::Ran>(&text).map_err(|_| text))
+    {
+        Ok(Ok(ran)) => ran,
+        Ok(Err(reason)) | Err(reason) => share_desk::Ran {
+            ended: share_desk::Ended::Failed { reason },
+            session: resume,
+            text: String::new(),
+            changes: Err("那台电脑没交回改了哪些文件".into()),
+        },
+    };
+    let end = if cancel.is_cancelled() {
+        TurnEnd::Cancelled
+    } else {
+        ran.ended.into()
+    };
+    let finished = crate::harness::Finished {
+        end,
+        session: ran.session,
+        text: ran.text,
+    };
+    Ok((finished, ran.changes))
 }
 
 async fn save_desk(shared: &Arc<Shared>, room_id: &RoomId, bot_id: &BotId, desk: &sa_engine::Desk) {

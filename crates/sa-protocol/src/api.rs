@@ -373,4 +373,7 @@ pub struct ShareReply {
     pub id: u64,
     pub ok: bool,
     pub text: String,
+    /// 还没做完、先报一段进展（harness 的一步、说的一段话）。最后的结果不带它。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub progress: bool,
 }

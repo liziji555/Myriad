@@ -246,8 +246,8 @@ export function MembersPanel({ room, members, bots, team }: Props) {
       <p className="sa-panel-note">
         {room.share
           ? shares.find((share) => share.name === room.share)?.shell
-            ? `Bot 看、搜、改的是共享目录「${room.share}」里的文件，执行命令也在那台电脑上，每条都要你批准；那台电脑没连着时会等它连上。这里还不能开任务，也不能用 harness。`
-            : `Bot 看、搜、改的是共享目录「${room.share}」里的文件，在那台电脑上执行；那台电脑没连着时会等它连上。那边运行 sa share 时加了 --commands 才能执行命令；这里还不能开任务，也不能用 harness。`
+            ? `Bot 看、搜、改的是共享目录「${room.share}」里的文件，执行命令、跑 harness 也在那台电脑上，每条命令、每次启动 harness 都要你批准；那台电脑没连着时会等它连上。这里还不能开任务。`
+            : `Bot 看、搜、改的是共享目录「${room.share}」里的文件，在那台电脑上执行；那台电脑没连着时会等它连上。那边运行 sa share 时加了 --commands 才能执行命令、跑 harness；这里还不能开任务。`
           : "在别的电脑上运行 sa share 目录 --server 这台服务器，就能把那边的目录共享过来，在这里选它。"}
       </p>
 

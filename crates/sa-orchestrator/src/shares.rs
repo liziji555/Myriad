@@ -12,6 +12,7 @@ use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::{oneshot, Notify};
 use tokio_util::sync::CancellationToken;
 
@@ -107,6 +108,8 @@ impl Entry {
                 let call = self.calls.remove(&id).expect("刚找到的");
                 let _ = call.reply.send(Err(if call.tool == "shell" {
                     "和共享目录那台电脑的连接断了，不知道这条命令跑完没有。请先看一下结果再决定要不要重跑。"
+                } else if call.tool == crate::share_desk::RUN {
+                    "和共享目录那台电脑的连接断了，不知道 harness 跑完没有。请先看一下它的独立目录再决定要不要重做。"
                 } else {
                     "和共享目录那台电脑的连接断了，不知道这次改动做完没有。请先看一下文件再决定要不要重做。"
                 }
@@ -125,6 +128,8 @@ struct Call {
     writes: bool,
     sent: bool,
     reply: oneshot::Sender<Result<String, String>>,
+    /// 做到一半报回来的进展交给这里（跑 harness 时）。
+    progress: Option<UnboundedSender<String>>,
 }
 
 /// 共享的名字：去掉两头空白，不能为空，不能太长。
@@ -171,6 +176,12 @@ impl Shares {
     pub(crate) fn shell(&self, name: &str) -> Option<String> {
         let state = self.state.lock().unwrap();
         state.shares.get(name).and_then(|entry| entry.shell.clone())
+    }
+
+    /// 那台电脑现在连着没有。
+    pub(crate) fn online(&self, name: &str) -> bool {
+        let state = self.state.lock().unwrap();
+        state.shares.get(name).is_some_and(Entry::online)
     }
 
     /// `sa share` 来取活：有就马上给，没有就最多等 `wait`，还没有就给 `None`。
@@ -226,7 +237,8 @@ impl Shares {
                 .filter_map(|(id, call)| {
                     if call.writes && entry.read_only {
                         Some((*id, "这个共享目录是只读的，不能改。"))
-                    } else if call.tool == "shell" && entry.shell.is_none() {
+                    } else if crate::share_desk::needs_commands(&call.tool) && entry.shell.is_none()
+                    {
                         Some((
                             *id,
                             "共享目录那台电脑不让执行命令（sa share 没加 --commands）。",
@@ -301,6 +313,12 @@ impl Shares {
             return Err(TAKEN.into());
         }
         entry.last_seen = Some(Instant::now());
+        if reply.progress {
+            if let Some(progress) = entry.calls.get(&reply.id).and_then(|c| c.progress.as_ref()) {
+                let _ = progress.send(reply.text);
+            }
+            return Ok(());
+        }
         if let Some(call) = entry.calls.remove(&reply.id) {
             let result = if reply.ok {
                 Ok(reply.text)
@@ -321,6 +339,33 @@ impl Shares {
         writes: bool,
         cancel: &CancellationToken,
     ) -> ToolResult {
+        self.call_with(name, tool, input, writes, cancel, None)
+            .await
+    }
+
+    /// 交给那台电脑一件会改东西的事（harness 的独立目录），等它交回。做到一半的进展交给 `progress`。
+    pub(crate) async fn ask(
+        &self,
+        name: &str,
+        tool: &str,
+        input: Value,
+        cancel: &CancellationToken,
+        progress: Option<UnboundedSender<String>>,
+    ) -> Result<String, String> {
+        self.call_with(name, tool, input, true, cancel, progress)
+            .await
+            .map_err(|error| error.0)
+    }
+
+    async fn call_with(
+        &self,
+        name: &str,
+        tool: &str,
+        input: Value,
+        writes: bool,
+        cancel: &CancellationToken,
+        progress: Option<UnboundedSender<String>>,
+    ) -> ToolResult {
         let (reply, answer) = oneshot::channel();
         let id = {
             let mut state = self.state.lock().unwrap();
@@ -338,6 +383,7 @@ impl Shares {
                     writes,
                     sent: false,
                     reply,
+                    progress,
                 },
             );
             entry.queue.push_back(id);
@@ -621,6 +667,7 @@ mod tests {
             id: call.id,
             ok: true,
             text: "内容".into(),
+            progress: false,
         };
         shares.reply(reply).unwrap();
         assert_eq!(calling.await.unwrap().unwrap(), "内容");
@@ -654,6 +701,7 @@ mod tests {
             id: again.id,
             ok: true,
             text: "旧的".into(),
+            progress: false,
         };
         assert!(shares.reply(stale).is_err());
         // 被顶替的那次运行再来取活也回不来。
@@ -826,6 +874,7 @@ mod tests {
             id: call.id,
             ok: true,
             text: "写好了".into(),
+            progress: false,
         };
         shares.reply(reply).unwrap();
         assert_eq!(write.await.unwrap().unwrap(), "写好了");
@@ -860,6 +909,7 @@ mod tests {
             id: 1,
             ok: true,
             text: String::new(),
+            progress: false,
         };
         assert!(shares.reply(late).is_ok());
     }

@@ -20,11 +20,12 @@ mod room;
 mod router;
 mod routines;
 mod serial;
+pub mod share_desk;
 pub mod shares;
 mod telegram;
 mod watchdog;
 mod work;
-mod workdir;
+pub mod workdir;
 
 pub use budget::{Budget, Price};
 pub use episode::{MAX_BOT_TURNS, MAX_HOP, MAX_PAIR_ASKS};

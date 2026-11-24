@@ -369,3 +369,133 @@ fn read_only_shares_never_run_commands() {
     assert!(!output.status.success());
     assert!(server.shares().is_empty());
 }
+
+/// 加了 --commands 的共享里，harness 成员在那台电脑上的独立目录里干活：每次启动先批准，
+/// 步骤报回房间，改动点「带回」才回到共享目录；点停止连它开出来的进程一起结束。
+#[cfg(unix)]
+#[test]
+fn harness_members_work_on_the_shared_computer() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("另一台电脑").join("项目");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join("说明.md"), "原来的\n").unwrap();
+    let script = dir.path().join("fake-harness.sh");
+    std::fs::write(
+        &script,
+        r#"prompt=$(cat)
+echo '{"type":"session","id":"s1"}'
+echo '{"type":"step","id":"1","tool":"write","title":"写 harness写的.txt"}'
+pwd > harness写的.txt
+echo '{"type":"step_end","id":"1","ok":true,"output":"写好了"}'
+case "$prompt" in *慢*) sleep 30 & echo $! > sleep.pid; wait;; esac
+echo '{"type":"text","text":"假 harness 做完了"}'
+"#,
+    )
+    .unwrap();
+
+    let server = Server::start(dir.path());
+    let room = server.room();
+    let (status, bot) = server.request(
+        "POST",
+        "/api/bots",
+        Some(json!({
+            "name": "Fake",
+            "harness": "command",
+            "harness_command": format!("bash {}", script.display()),
+        })),
+    );
+    assert_eq!(status, 201, "{bot}");
+    let bot_id = bot["id"].as_str().unwrap();
+    let (status, body) =
+        server.request("PUT", &format!("/api/rooms/{room}/members/{bot_id}"), None);
+    assert!(status < 300, "{status} {body}");
+    let path = format!("/api/rooms/{room}");
+    let patch = json!({ "share": "我的项目", "host_bot_id": bot_id });
+    let (status, body) = server.request("PATCH", &path, Some(patch));
+    assert_eq!(status, 200, "{body}");
+
+    // 没加 --commands：harness 不能在那边跑，什么都没动。
+    let sharing = Sharing::start(dir.path(), &project, &server, &[]);
+    let reply = server.ask(&room, "干活", |_| {});
+    assert_eq!(reply["state"], "failed", "{reply:#}");
+    assert!(reply.to_string().contains("--commands"), "{reply:#}");
+    drop(sharing);
+
+    let _sharing = Sharing::start(dir.path(), &project, &server, &["--commands"]);
+    let mut decided = false;
+    let reply = server.ask(&room, "干活", |reply| {
+        approve_once(&server, reply, &mut decided)
+    });
+    assert!(decided, "没有出审批卡：{reply:#}");
+    assert_eq!(reply["state"], "complete", "{reply:#}");
+    assert!(reply.to_string().contains("假 harness 做完了"), "{reply:#}");
+    let steps: Vec<(String, String)> = reply["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| {
+            (
+                s["tool"].as_str().unwrap().into(),
+                s["state"].as_str().unwrap().into(),
+            )
+        })
+        .collect();
+    let ok = |tool: &str| steps.contains(&(tool.to_string(), "ok".to_string()));
+    assert!(ok("harness") && ok("workdir") && ok("write"), "{steps:?}");
+
+    // 改动在那台电脑的独立目录里，还没带回共享目录，服务这边也没有。
+    let (_, desks) = server.request("GET", &format!("/api/rooms/{room}/desks"), None);
+    let desk = &desks[0];
+    assert_eq!(desk["changes"][0]["path"], "harness写的.txt", "{desks:#}");
+    let desk_path = Path::new(desk["path"].as_str().unwrap());
+    assert!(
+        desk_path.starts_with(dir.path().join("share-data")),
+        "{desks:#}"
+    );
+    assert!(desk_path.join("harness写的.txt").exists());
+    assert!(!project.join("harness写的.txt").exists());
+    assert!(!dir.path().join("ws/harness写的.txt").exists());
+
+    // 带回：改动回到共享目录，独立目录收掉。
+    let accept = format!("/api/rooms/{room}/desks/{bot_id}/accept");
+    let (status, body) = server.request("POST", &accept, None);
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body, json!([]));
+    assert!(project.join("harness写的.txt").exists());
+    assert!(!desk_path.exists());
+
+    // 点停止：harness 和它开出来的进程一起结束。
+    let mut decided = false;
+    let mut stopped = false;
+    let reply = server.ask(&room, "慢慢干", |reply| {
+        approve_once(&server, reply, &mut decided);
+        let wrote = reply["steps"].as_array().is_some_and(|steps| {
+            steps
+                .iter()
+                .any(|s| s["tool"] == "write" && s["state"] == "ok")
+        });
+        if wrote && !stopped {
+            std::thread::sleep(Duration::from_millis(500));
+            let (status, body) = server.request("POST", &format!("/api/rooms/{room}/stop"), None);
+            assert!(status < 300, "{status} {body}");
+            stopped = true;
+        }
+    });
+    assert!(stopped, "没来得及点停止：{reply:#}");
+    assert_eq!(reply["state"], "cancelled", "{reply:#}");
+    let (_, desks) = server.request("GET", &format!("/api/rooms/{room}/desks"), None);
+    let desk_path = Path::new(desks[0]["path"].as_str().unwrap()).to_path_buf();
+    let pid = std::fs::read_to_string(desk_path.join("sleep.pid")).unwrap();
+    let alive = Path::new("/proc").join(pid.trim());
+    let since = Instant::now();
+    while alive.exists() && since.elapsed() < Duration::from_secs(10) {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(!alive.exists(), "harness 开出来的进程还在");
+
+    // 丢弃：独立目录删掉，共享目录不动。
+    let discard = format!("/api/rooms/{room}/desks/{bot_id}/discard");
+    let (status, body) = server.request("POST", &discard, None);
+    assert_eq!(status, 200, "{body}");
+    assert!(!desk_path.exists());
+}
