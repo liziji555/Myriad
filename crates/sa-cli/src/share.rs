@@ -47,7 +47,8 @@ pub struct ShareArgs {
 pub fn run(data_dir: &DataDir, args: ShareArgs) -> Result<()> {
     crate::app::init_logging(tracing::Level::WARN);
     // 数据目录不存在的话围栏认不出它：先建好，以后放进去的令牌、数据库才挡得住。
-    std::fs::create_dir_all(data_dir.root())
+    data_dir
+        .create()
         .with_context(|| format!("建不了数据目录 {}", data_dir.root().display()))?;
     let fence = Fence::new(&args.dir, &[data_dir.root().to_path_buf()])
         .with_context(|| format!("目录 {} 打不开", args.dir.display()))?;
