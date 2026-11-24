@@ -67,6 +67,8 @@ pub(crate) struct ServingNote {
     path: Option<PathBuf>,
     /// 要记下的数据目录。用的就是默认的那个时不用记。
     root: Option<PathBuf>,
+    /// 条子是不是这个服务自己留的。没起来的服务停的时候不能动正在跑的那个留的。
+    written: AtomicBool,
 }
 
 impl ServingNote {
@@ -80,12 +82,18 @@ impl ServingNote {
     }
 
     fn at(path: Option<PathBuf>, data_dir: &DataDir) -> Self {
-        let real = |dir: &Path| dir.canonicalize().unwrap_or(dir.to_path_buf());
+        // 数据目录头一回用时还没建出来；`sa url` 在别的目录里跑，条子上得是绝对路径。
+        let real = |dir: &Path| {
+            dir.canonicalize()
+                .or_else(|_| std::path::absolute(dir))
+                .unwrap_or(dir.to_path_buf())
+        };
         let root = real(data_dir.root());
         let default = path.as_deref().and_then(Path::parent).map(real);
         Self {
             root: (default.as_ref() != Some(&root)).then_some(root),
             path,
+            written: AtomicBool::new(false),
         }
     }
 
@@ -93,7 +101,9 @@ impl ServingNote {
     pub(crate) fn write(&self) {
         let Some(path) = &self.path else { return };
         let done = match &self.root {
-            Some(root) => note_down(path, root),
+            Some(root) => {
+                note_down(path, root).map(|()| self.written.store(true, Ordering::SeqCst))
+            }
             None => match std::fs::remove_file(path) {
                 Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error.into()),
                 _ => Ok(()),
@@ -114,7 +124,8 @@ impl Drop for ServingNote {
         let (Some(path), Some(root)) = (&self.path, &self.root) else {
             return;
         };
-        if read_note(path).as_deref() == Some(root.as_path()) {
+        if self.written.load(Ordering::SeqCst) && read_note(path).as_deref() == Some(root.as_path())
+        {
             let _ = std::fs::remove_file(path);
         }
     }
@@ -977,6 +988,20 @@ mod tests {
         assert_eq!(noted, dir.path().join("other").canonicalize().unwrap());
         drop(other);
         assert!(!note.exists());
+
+        // 同一个数据目录再起一个，没起来：正在跑的那个留的条子不动。
+        let running = ServingNote::at(Some(note.clone()), &data("other"));
+        running.write();
+        drop(ServingNote::at(Some(note.clone()), &data("other")));
+        assert!(note.exists());
+        drop(running);
+
+        // 还没建出来的相对路径：记下的是绝对路径。
+        let fresh = DataDir::resolve(Some(PathBuf::from("还没有的数据目录"))).unwrap();
+        let fresh = ServingNote::at(Some(note.clone()), &fresh);
+        fresh.write();
+        assert!(read_note(&note).unwrap().is_absolute());
+        drop(fresh);
 
         // 后来起来的服务留的条子，先起来的那个停的时候不动。
         let first = ServingNote::at(Some(note.clone()), &data("first"));
