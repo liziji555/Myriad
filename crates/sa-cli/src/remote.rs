@@ -11,6 +11,7 @@ use crate::serve::load_or_create_token;
 use anyhow::{bail, Context, Result};
 use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -171,11 +172,32 @@ impl SshTarget {
             .with_context(|| format!("服务器上的 sa url 输出看不懂：{}", stdout.trim()))
     }
 
+    /// `ssh -G`：这台服务器最终用哪些配置（~/.ssh/config 里写的也算上），不真的去连。
+    fn ssh_config(&self) -> Result<SshConfig> {
+        let output = self
+            .base_command()
+            .args(["-G", "--", &self.host])
+            .stdin(Stdio::null())
+            .output()
+            .map_err(ssh_missing)?;
+        if !output.status.success() {
+            bail!(
+                "读不了这台服务器的 SSH 配置：{}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        Ok(SshConfig::parse(
+            &String::from_utf8_lossy(&output.stdout),
+            dirs::home_dir().as_deref(),
+        ))
+    }
+
     /// 登录一次，把这台电脑的公钥加进服务器的 `~/.ssh/authorized_keys`（已经有了就不加）。
     /// 给了 `password` 就由 ssh 来问我们要（桌面版没有终端）；不给就由 ssh 在终端里问人。
     /// 密码只交给这一个 ssh，不写到哪里。
     pub fn install_key(&self, password: Option<&str>) -> Result<()> {
-        let key = local_public_key()?;
+        let config = self.ssh_config()?;
+        let key = local_public_key(&config.identities)?;
         let mut command = self.base_command();
         command.args([
             "-o",
@@ -254,25 +276,83 @@ pub fn answer_askpass() {
     std::process::exit(0);
 }
 
-/// 这台电脑上 ssh 默认会用的公钥。一个都没有就新建一对 ed25519（不设口令），和 ssh-copy-id 前要做的一样。
-fn local_public_key() -> Result<String> {
-    let home = dirs::home_dir().context("找不到主目录")?;
-    let ssh = home.join(".ssh");
-    for name in ["id_ed25519", "id_ecdsa", "id_rsa"] {
-        let public = ssh.join(format!("{name}.pub"));
-        if ssh.join(name).is_file() && public.is_file() {
-            return read_public_key(&public);
+/// `ssh -G` 里用得上的几项。
+#[derive(Debug, Default, PartialEq)]
+struct SshConfig {
+    /// 按 ssh 试的先后排好的私钥文件。
+    identities: Vec<PathBuf>,
+    /// 经跳板机（ProxyJump / ProxyCommand）连。
+    proxied: bool,
+}
+
+impl SshConfig {
+    fn parse(output: &str, home: Option<&Path>) -> Self {
+        let mut config = Self::default();
+        for line in output.lines() {
+            let Some((key, value)) = line.trim().split_once(' ') else {
+                continue;
+            };
+            let value = value.trim();
+            match key {
+                "identityfile" => config
+                    .identities
+                    .push(match (value.strip_prefix("~/"), home) {
+                        (Some(rest), Some(home)) => home.join(rest),
+                        _ => PathBuf::from(value),
+                    }),
+                "proxyjump" | "proxycommand" if value != "none" => config.proxied = true,
+                _ => {}
+            }
         }
+        config
     }
-    let private = ssh.join("id_ed25519");
-    if private.exists() {
-        bail!(
-            "{} 有私钥但没有公钥：在终端里运行 ssh-keygen -y -f {} 把公钥补上",
-            private.display(),
-            private.display()
-        );
+}
+
+/// ssh 连这台服务器时会试的公钥里，第一把不用输口令就能用的（没设口令，或者已经交给了 ssh-agent）。
+/// 一把都没有就新建一对 ed25519（不设口令），放在 ssh 会去找的位置，和 ssh-copy-id 前要做的一样。
+fn local_public_key(identities: &[PathBuf]) -> Result<String> {
+    let agent = agent_keys();
+    let mut locked = None;
+    for private in identities {
+        let public = public_path(private);
+        if !private.is_file() || !public.is_file() {
+            continue;
+        }
+        let Ok(key) = read_public_key(&public) else {
+            continue;
+        };
+        if unlocked(private) || key_in(&agent, &key) {
+            return Ok(key);
+        }
+        locked.get_or_insert(private.clone());
     }
-    std::fs::create_dir_all(&ssh).with_context(|| format!("建不了 {}", ssh.display()))?;
+    // 默认的那串里有 id_ed25519；配置里自己写了 IdentityFile 的，就建在写的第一个位置。
+    let private = identities
+        .iter()
+        .find(|path| path.file_name().is_some_and(|name| name == "id_ed25519"))
+        .or(identities.first())
+        .filter(|path| !path.exists())
+        .cloned();
+    let Some(private) = private else {
+        return Err(match locked {
+            Some(path) => anyhow::anyhow!(
+                "{} 设了口令：先运行 ssh-add {} 把它交给 ssh-agent，再连",
+                path.display(),
+                path.display()
+            ),
+            None => anyhow::anyhow!(
+                "找不到能用的 SSH 公钥（{} 这类要有对应的 .pub）",
+                identities
+                    .first()
+                    .map_or("~/.ssh/id_ed25519".into(), |path| path
+                        .display()
+                        .to_string())
+            ),
+        });
+    };
+    if let Some(dir) = private.parent() {
+        std::fs::create_dir_all(dir).with_context(|| format!("建不了 {}", dir.display()))?;
+    }
     let mut keygen = Command::new("ssh-keygen");
     keygen
         .args(["-q", "-t", "ed25519", "-N", "", "-C", "myriad", "-f"])
@@ -291,10 +371,49 @@ fn local_public_key() -> Result<String> {
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
-    read_public_key(&private.with_extension("pub"))
+    read_public_key(&public_path(&private))
 }
 
-fn read_public_key(path: &std::path::Path) -> Result<String> {
+fn public_path(private: &Path) -> PathBuf {
+    let mut name = private.as_os_str().to_owned();
+    name.push(".pub");
+    PathBuf::from(name)
+}
+
+/// 用空口令能读出这把私钥，就是没设口令。
+fn unlocked(private: &Path) -> bool {
+    let mut keygen = Command::new("ssh-keygen");
+    keygen
+        .args(["-y", "-P", "", "-f"])
+        .arg(private)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    hide_console(&mut keygen);
+    keygen.status().is_ok_and(|status| status.success())
+}
+
+/// ssh-agent 里有的公钥（`ssh-add -L`），没有 agent 就是空的。
+fn agent_keys() -> String {
+    let mut add = Command::new("ssh-add");
+    add.arg("-L").stdin(Stdio::null()).stderr(Stdio::null());
+    hide_console(&mut add);
+    add.output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+        .unwrap_or_default()
+}
+
+/// 比较公钥本身（类型和那一长串），不管后面的注释。
+fn key_in(agent: &str, key: &str) -> bool {
+    fn body(line: &str) -> Vec<&str> {
+        line.split_whitespace().take(2).collect()
+    }
+    agent.lines().any(|line| body(line) == body(key))
+}
+
+fn read_public_key(path: &Path) -> Result<String> {
     let text =
         std::fs::read_to_string(path).with_context(|| format!("读不了公钥 {}", path.display()))?;
     let key = text.lines().next().unwrap_or_default().trim();
@@ -754,6 +873,47 @@ mod tests {
             std::fs::read_to_string(&keys).unwrap(),
             "ssh-rsa BBBB old\nssh-ed25519 AAAA one\n"
         );
+    }
+
+    #[test]
+    fn the_resolved_ssh_config_is_read() {
+        let output =
+            "user me\nidentityfile ~/.ssh/id_rsa\nidentityfile /keys/work\nproxyjump none\n";
+        assert_eq!(
+            SshConfig::parse(output, Some(Path::new("/home/me"))),
+            SshConfig {
+                identities: vec!["/home/me/.ssh/id_rsa".into(), "/keys/work".into()],
+                proxied: false,
+            }
+        );
+        assert!(SshConfig::parse("proxyjump jump@bastion\n", None).proxied);
+        assert!(SshConfig::parse("proxycommand nc %h %p\n", None).proxied);
+    }
+
+    #[test]
+    fn keys_are_picked_by_what_ssh_would_try() {
+        let dir = tempfile::tempdir().unwrap();
+        let (rsa, ed) = (dir.path().join("id_rsa"), dir.path().join("id_ed25519"));
+        // 都还没有：建在 id_ed25519，而不是排第一的 id_rsa。
+        let made = local_public_key(&[rsa.clone(), ed.clone()]).unwrap();
+        assert!(made.starts_with("ssh-ed25519 ") && ed.is_file());
+        // 配置里只写了自己的 IdentityFile：用它，没有就建在那里。
+        let work = dir.path().join("work");
+        let mine = local_public_key(std::slice::from_ref(&work)).unwrap();
+        assert!(work.is_file() && mine != made);
+        assert_eq!(local_public_key(&[work.clone(), ed.clone()]).unwrap(), mine);
+        // 设了口令、agent 里也没有的跳过。
+        let status = Command::new("ssh-keygen")
+            .args(["-q", "-t", "ed25519", "-N", "secret", "-f"])
+            .arg(&rsa)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        assert_eq!(local_public_key(&[rsa.clone(), ed]).unwrap(), made);
+        let error = local_public_key(&[rsa]).unwrap_err().to_string();
+        assert!(error.contains("ssh-add"), "{error}");
+        assert!(key_in("ssh-ed25519 AAAA other\n", "ssh-ed25519 AAAA me"));
+        assert!(!key_in("ssh-ed25519 BBBB me\n", "ssh-ed25519 AAAA me"));
     }
 
     #[test]
