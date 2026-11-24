@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent } from "react";
-import { connectionLabel, type DesktopState } from "../api/desktop";
+import { connectionLabel, desktopInvoke, type DesktopState } from "../api/desktop";
 import type { Presence, PresenceState } from "../api/presence";
 import type { Bot, Room, RoomId } from "../api/types";
 import { BotAvatar } from "./BotAvatar";
@@ -118,8 +118,13 @@ export function Sidebar({
   return (
     <nav className="sa-sidebar" aria-label="左栏" data-collapsed={narrow}>
       <header className="sa-sidebar-head">
-        <BrandMark />
-        <span className="sa-brand">Myriad</span>
+        {/* 桌面版的窗口标题栏上已经有图标和名字，这里不再放一遍。 */}
+        {!desktopInvoke() && (
+          <>
+            <BrandMark />
+            <span className="sa-brand">Myriad</span>
+          </>
+        )}
         {docked && (
           <button
             type="button"

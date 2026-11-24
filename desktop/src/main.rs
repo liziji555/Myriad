@@ -806,14 +806,40 @@ fn retry(window: WebviewWindow) -> Result<(), String> {
     Ok(())
 }
 
+/// 主窗口想要的大小和四周留的边（标题栏、菜单栏、窗口边框都算在留的边里）。
+const MAIN_SIZE: (f64, f64) = (1280.0, 820.0);
+const MAIN_CHROME: (f64, f64) = (32.0, 96.0);
+
+/// 主窗口打开时的大小：屏幕放得下就用 [`MAIN_SIZE`]，放不下就缩到屏幕里。
+fn main_size(handle: &AppHandle) -> (f64, f64) {
+    let Ok(Some(monitor)) = handle.primary_monitor() else {
+        return MAIN_SIZE;
+    };
+    let area = monitor
+        .work_area()
+        .size
+        .to_logical::<f64>(monitor.scale_factor());
+    fit(MAIN_SIZE, (area.width, area.height))
+}
+
+fn fit(want: (f64, f64), area: (f64, f64)) -> (f64, f64) {
+    let side = |want: f64, area: f64, chrome: f64| want.min(area - chrome).max(320.0);
+    (
+        side(want.0, area.0, MAIN_CHROME.0),
+        side(want.1, area.1, MAIN_CHROME.1),
+    )
+}
+
 /// 主窗口：打开本机服务的页面。连上服务器后换到隧道这头的页面（[`show`]）。
 fn open_main(handle: &AppHandle, shell: &Shell, url: Url) -> tauri::Result<()> {
     *shell.homes.lock().unwrap() = vec![origin(&url)];
     let (links, popups, downloads) = (handle.clone(), handle.clone(), handle.clone());
+    let (width, height) = main_size(handle);
     WebviewWindowBuilder::new(handle, MAIN, WebviewUrl::External(url))
         .title("Myriad")
-        .inner_size(1280.0, 820.0)
-        .min_inner_size(720.0, 480.0)
+        .inner_size(width, height)
+        .min_inner_size(width.min(720.0), height.min(480.0))
+        .center()
         // 页面靠它知道自己在桌面版里，再用 desktop_state 问现在连的是哪个。
         .initialization_script("window.__SA_DESKTOP__ = true;")
         // 窗口里只看 Myriad 自己的页面；别的网址（PR 链接之类）交给系统的浏览器。
@@ -971,6 +997,16 @@ fn set_menu(handle: &AppHandle) -> tauri::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_main_window_fits_inside_a_small_screen() {
+        assert_eq!(fit(MAIN_SIZE, (1920.0, 1040.0)), MAIN_SIZE);
+        // 1920×1080 放大到 125%，去掉任务栏：整个窗口连标题栏、菜单栏都要在屏幕里。
+        let (width, height) = fit(MAIN_SIZE, (1536.0, 816.0));
+        assert_eq!(width, 1280.0);
+        assert!(height + MAIN_CHROME.1 <= 816.0);
+        assert_eq!(fit(MAIN_SIZE, (200.0, 100.0)), (320.0, 320.0));
+    }
 
     #[test]
     fn downloads_never_overwrite_an_existing_file() {
