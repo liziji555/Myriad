@@ -1,14 +1,17 @@
 //! 模型接口。
 //!
 //! 上层只认识 [`Provider`]：给它一个 [`ChatRequest`]，拿回一串 [`StreamEvent`]。
-//! 具体接哪家由适配器决定：[`OpenAiCompat`]（DeepSeek 及其他 OpenAI 兼容网关）和
+//! 具体接哪家由适配器决定：[`OpenAiCompat`]（DeepSeek 及其他 OpenAI 兼容网关）、
+//! [`Anthropic`]（Claude 官方接口和兼容它的中转）和
 //! 测试、演示用的 [`MockProvider`]。
 
+mod anthropic;
 mod mock;
 mod openai;
 mod retry;
 mod types;
 
+pub use anthropic::Anthropic;
 pub use mock::{MockProvider, MockReply};
 pub use openai::OpenAiCompat;
 pub use retry::{open_with_retry, RetryPolicy};

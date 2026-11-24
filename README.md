@@ -101,6 +101,17 @@ mid = { provider = "opencode-go", model = "deepseek-v4.1-flash" }
 strong = { provider = "opencode-go", model = "deepseek-v4.1-flash" }
 ```
 
+Claude 官方接口（或兼容 Anthropic 格式的中转）用 `kind = "anthropic"`，`base_url` 写到域名（或带 `/v1`），请求发往 `/v1/messages`：
+
+```toml
+[providers.claude]
+kind = "anthropic"
+base_url = "https://api.anthropic.com"
+api_key_env = "ANTHROPIC_API_KEY"
+```
+
+这种服务不开思考模式（档位里写了 `thinking` 也不开），上下文窗口按 200,000 算，模型更小时在档位里写 `context_window`。
+
 密钥只从环境变量读，不会写进配置文件或数据库。换模型、换服务地址改数据目录里的 `config.toml`，
 改完用 `sa doctor` 检查。接上真实模型之前，先按下面「花了多少、什么时候停」把 `[prices]` 改成你用的服务的价格。
 
@@ -581,7 +592,7 @@ pnpm --dir web dev              # 前端热更新，/api 转发到 127.0.0.1:451
 | `crates/sa-protocol` | Rust 和前端共用的类型 |
 | `crates/sa-store` | SQLite 持久层和迁移 |
 | `crates/sa-engine` | 领域层，唯一的状态写入者 |
-| `crates/sa-llm` | 模型接口：DeepSeek（OpenAI 兼容）流式调用、重试、测试用的假模型 |
+| `crates/sa-llm` | 模型接口：DeepSeek（OpenAI 兼容）和 Anthropic 流式调用、重试、测试用的假模型 |
 | `crates/sa-tools` | 工具（读、搜、抓网页、写、改、执行命令、待办）和路径围栏；技能；MCP 客户端 |
 | `crates/sa-kernel` | 会话记录（JSONL）、「模型—工具」循环、审批关口、自动压缩 |
 | `crates/sa-orchestrator` | 房间里来了消息，决定谁来接、让它跑一轮并把结果写回房间；Bot 之间的点名和次数上限；任务的调度、独立目录和工作会话 |

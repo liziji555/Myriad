@@ -1,7 +1,7 @@
 //! 把配置里的模型档位换成能调用的模型。
 
 use crate::config::{Config, ProviderKind};
-use sa_llm::{MockProvider, OpenAiCompat, Provider};
+use sa_llm::{Anthropic, MockProvider, OpenAiCompat, Provider};
 use sa_orchestrator::{ModelRouter, ResolvedModel};
 use sa_protocol::ModelTier;
 use std::collections::HashMap;
@@ -44,11 +44,6 @@ impl ModelRouter for ConfigModels {
             .providers
             .get(name)
             .ok_or_else(|| format!("config.toml 里没有模型服务「{name}」"))?;
-        if provider.kind == ProviderKind::Anthropic {
-            return Err(format!(
-                "模型服务「{name}」的类型是 anthropic，这个版本还不支持，请改用 openai_compat 类型的服务"
-            ));
-        }
         let mut clients = self.clients.lock().unwrap_or_else(|e| e.into_inner());
         let client = match clients.get(name) {
             Some(client) => client.clone(),
@@ -64,11 +59,25 @@ impl ModelRouter for ConfigModels {
                         )
                     })?;
                 let invalid = |e| format!("模型服务「{name}」配置有误：{e}");
-                let mut client = OpenAiCompat::new(&provider.base_url, key).map_err(invalid)?;
-                if let Some(header) = &provider.session_header {
-                    client = client.with_session_header(header).map_err(invalid)?;
-                }
-                let client: Arc<dyn Provider> = Arc::new(client);
+                let header = provider.session_header.as_deref();
+                let client: Arc<dyn Provider> = match provider.kind {
+                    ProviderKind::OpenaiCompat => {
+                        let mut client =
+                            OpenAiCompat::new(&provider.base_url, key).map_err(invalid)?;
+                        if let Some(header) = header {
+                            client = client.with_session_header(header).map_err(invalid)?;
+                        }
+                        Arc::new(client)
+                    }
+                    ProviderKind::Anthropic => {
+                        let mut client =
+                            Anthropic::new(&provider.base_url, key).map_err(invalid)?;
+                        if let Some(header) = header {
+                            client = client.with_session_header(header).map_err(invalid)?;
+                        }
+                        Arc::new(client)
+                    }
+                };
                 clients.insert(name.clone(), client.clone());
                 client
             }
@@ -137,16 +146,16 @@ mod tests {
     }
 
     #[test]
-    fn anthropic_kind_is_reported_as_unsupported() {
+    fn anthropic_kind_resolves_to_a_client() {
         let text =
             DEFAULT_CONFIG_TOML.replace(r#"kind = "openai_compat""#, r#"kind = "anthropic""#);
-        let err = models(&text, Some("sk-test"))
+        let mid = models(&text, Some("sk-test"))
             .resolve(ModelTier::Mid)
-            .err()
             .unwrap();
-        assert!(
-            err.contains("anthropic") && err.contains("还不支持"),
-            "{err}"
+        assert_eq!(mid.model, "deepseek-flash");
+        assert_eq!(
+            mid.provider.capabilities(&mid.model).context_window,
+            200_000
         );
     }
 }
