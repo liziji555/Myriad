@@ -179,13 +179,16 @@ impl Sharer {
             "可以改"
         };
         // 文件操作按交来的顺序一件件做（两次改同一个文件不能倒过来）；命令另外跑。
-        let (files, mut queued) =
-            tokio::sync::mpsc::unbounded_channel::<(ShareCall, tokio::sync::oneshot::Sender<()>)>();
+        let (files, mut queued) = tokio::sync::mpsc::unbounded_channel::<(
+            ShareCall,
+            CancellationToken,
+            tokio::sync::oneshot::Sender<()>,
+        )>();
         let worker = Arc::clone(self);
         tokio::spawn(async move {
-            while let Some((call, done)) = queued.recv().await {
+            while let Some((call, cancel, done)) = queued.recv().await {
                 let id = call.id;
-                worker.handle(call, CancellationToken::new()).await;
+                worker.handle(call, cancel).await;
                 worker.running.lock().unwrap().remove(&id);
                 let _ = done.send(());
             }
@@ -209,14 +212,15 @@ impl Sharer {
                     match call {
                         Some(call) if call.tool == STOP || call.tool == "shell" => self.start(call),
                         Some(call) => {
-                            let busy = {
+                            let (busy, cancel) = {
                                 let mut running = self.running.lock().unwrap();
                                 let busy = !running.is_empty();
-                                running.insert(call.id, CancellationToken::new());
-                                busy
+                                let cancel = CancellationToken::new();
+                                running.insert(call.id, cancel.clone());
+                                (busy, cancel)
                             };
                             let (done, finished) = tokio::sync::oneshot::channel();
-                            if files.send((call, done)).is_ok() && !busy {
+                            if files.send((call, cancel, done)).is_ok() && !busy {
                                 let _ = finished.await;
                             }
                         }
@@ -333,6 +337,10 @@ impl Sharer {
         call: &ShareCall,
         cancel: CancellationToken,
     ) -> Result<String, String> {
+        // 排着队时就被叫停了：不做了。
+        if cancel.is_cancelled() {
+            return Err("已停止，没有执行。".into());
+        }
         let Some(tool) = self.tools.get(&call.tool) else {
             return Err(if self.read_only {
                 format!("这个共享目录是只读的，不能用 {}。", call.tool)
