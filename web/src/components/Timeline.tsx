@@ -781,7 +781,7 @@ function StepItem({ step, onDecide }: { step: ToolStep; onDecide: Decide }) {
           id={step.approval.id}
           reason={step.approval.reason}
           expiresAt={step.approval.expires_at}
-          choices={approvalChoices(step.tool, step.approval)}
+          choices={approvalChoices(step.approval)}
           onDecide={onDecide}
         />
       )}

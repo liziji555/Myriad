@@ -1767,6 +1767,7 @@ impl Observer for RoomObserver {
             reason: request.reason.to_string(),
             expires_at: sa_engine::now_ms() + timeout.as_millis() as i64,
             can_allow_task,
+            can_allow_always: key.is_some(),
         };
         self.update_step(request.call_id, |step| {
             step.state = StepState::Waiting;
@@ -1794,7 +1795,9 @@ impl Observer for RoomObserver {
         let (decision, verdict) = tokio::select! {
             answer = answer => match answer {
                 Ok(ApprovalDecision::Once) => (ApprovalDecision::Once, ("approval.allowed", "允许一次")),
-                Ok(ApprovalDecision::Always) => (ApprovalDecision::Always, ("approval.allowed_always", "总是允许")),
+                Ok(ApprovalDecision::Always) if key.is_some() => (ApprovalDecision::Always, ("approval.allowed_always", "总是允许")),
+                // 记不成许可的操作（比如共享目录里的）：只算允许这一次。
+                Ok(ApprovalDecision::Always) => (ApprovalDecision::Once, ("approval.allowed", "允许一次")),
                 // 这张卡上没有这个选项（不是任务里的命令，或者已经选过）：只算允许这一次。
                 Ok(ApprovalDecision::Task) if can_allow_task => (ApprovalDecision::Task, ("approval.allowed_task", "这个任务里的命令都允许")),
                 Ok(ApprovalDecision::Task) => (ApprovalDecision::Once, ("approval.allowed", "允许一次")),

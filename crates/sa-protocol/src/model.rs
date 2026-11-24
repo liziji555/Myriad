@@ -278,6 +278,9 @@ pub struct StepApproval {
     /// 这张卡能不能选「这个任务里的命令都允许」：只有任务里的命令能，而且还没选过。
     #[serde(default)]
     pub can_allow_task: bool,
+    /// 这张卡能不能选「总是允许」：只有能记成一条许可的操作能；共享目录里的操作每次都问。
+    #[serde(default)]
+    pub can_allow_always: bool,
 }
 
 /// 人对一次审批的答复。

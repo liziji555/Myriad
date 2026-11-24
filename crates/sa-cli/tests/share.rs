@@ -271,6 +271,10 @@ fn approve_once(server: &Server, reply: &Value, decided: &mut bool) {
         .as_array()
         .and_then(|steps| steps.iter().find(|s| s["state"] == "waiting"));
     if let (Some(step), false) = (waiting, *decided) {
+        assert_eq!(
+            step["approval"]["can_allow_always"], false,
+            "共享目录里的操作每次都问"
+        );
         let id = step["approval"]["id"].as_str().unwrap();
         let path = format!("/api/approvals/{id}/decide");
         let (status, body) = server.request("POST", &path, Some(json!({ "decision": "once" })));

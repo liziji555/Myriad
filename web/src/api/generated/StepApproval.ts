@@ -16,4 +16,8 @@ expires_at: number,
 /**
  * 这张卡能不能选「这个任务里的命令都允许」：只有任务里的命令能，而且还没选过。
  */
-can_allow_task: boolean, };
+can_allow_task: boolean, 
+/**
+ * 这张卡能不能选「总是允许」：只有能记成一条许可的操作能；共享目录里的操作每次都问。
+ */
+can_allow_always: boolean, };
