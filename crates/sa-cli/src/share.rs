@@ -178,6 +178,18 @@ impl Sharer {
         } else {
             "可以改"
         };
+        // 文件操作按交来的顺序一件件做（两次改同一个文件不能倒过来）；命令另外跑。
+        let (files, mut queued) =
+            tokio::sync::mpsc::unbounded_channel::<(ShareCall, tokio::sync::oneshot::Sender<()>)>();
+        let worker = Arc::clone(self);
+        tokio::spawn(async move {
+            while let Some((call, done)) = queued.recv().await {
+                let id = call.id;
+                worker.handle(call, CancellationToken::new()).await;
+                worker.running.lock().unwrap().remove(&id);
+                let _ = done.send(());
+            }
+        });
         let mut connected = false;
         let mut retry = RETRY_FIRST;
         loop {
@@ -192,17 +204,22 @@ impl Sharer {
                         connected = true;
                     }
                     retry = RETRY_FIRST;
-                    // 命令可能跑很久，边跑边接着取活（好收到「停下」）；有命令在跑时别的活也这样，免得耽误叫停。
+                    // 命令可能跑很久，边跑边接着取活（好收到「停下」）；有命令在跑时文件操作也不等，免得耽误叫停。
                     // 没命令在跑时文件操作做完再取下一件：旧的服务不看 `running`，边做边取会被它当成丢了。
                     match call {
-                        Some(call)
-                            if call.tool == STOP
-                                || call.tool == "shell"
-                                || !self.running.lock().unwrap().is_empty() =>
-                        {
-                            self.start(call)
+                        Some(call) if call.tool == STOP || call.tool == "shell" => self.start(call),
+                        Some(call) => {
+                            let busy = {
+                                let mut running = self.running.lock().unwrap();
+                                let busy = !running.is_empty();
+                                running.insert(call.id, CancellationToken::new());
+                                busy
+                            };
+                            let (done, finished) = tokio::sync::oneshot::channel();
+                            if files.send((call, done)).is_ok() && !busy {
+                                let _ = finished.await;
+                            }
                         }
-                        Some(call) => self.handle(call, CancellationToken::new()).await,
                         None => {}
                     }
                 }
@@ -255,7 +272,7 @@ impl Sharer {
         }
     }
 
-    /// 开始做一件活（不等它做完，接着去取下一件），或者叫停正在做的那件。
+    /// 开始执行一条命令（不等它跑完，接着去取下一件），或者叫停正在跑的那条。
     fn start(self: &Arc<Self>, call: ShareCall) {
         if call.tool == STOP {
             if let Some(cancel) = self.running.lock().unwrap().get(&call.id) {
