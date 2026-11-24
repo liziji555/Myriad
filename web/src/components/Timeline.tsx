@@ -49,7 +49,6 @@ interface Props {
   onLoadOlder(): Promise<void>;
   /** 答复一张审批卡。 */
   onDecide: Decide;
-  onLightDemo(source: HTMLElement): void;
   /** 空房间里点了一句示例：把它填进输入框，由人自己决定发不发。 */
   onExample(text: string): void;
   /** 切到协作视图时主线藏起来；藏着的时候滚不动，回来时补滚一次。 */
@@ -78,7 +77,6 @@ export function Timeline({
   onRetry,
   onLoadOlder,
   onDecide,
-  onLightDemo,
   onExample,
   hidden = false,
 }: Props) {
@@ -203,14 +201,6 @@ export function Timeline({
             </li>
           ))}
         </ul>
-        <p>也可以先看看「过程连到结果」的光线效果：</p>
-        <button
-          type="button"
-          className="sa-button"
-          onClick={(event) => onLightDemo(event.currentTarget)}
-        >
-          演示光线
-        </button>
       </div>
     );
   } else {

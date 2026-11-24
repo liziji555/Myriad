@@ -14,7 +14,6 @@ import { CommandPalette, type PaletteEntry } from "./components/CommandPalette";
 import { Composer } from "./components/Composer";
 import {
   ContextPanel,
-  type ActivityNode,
   type PanelTab,
 } from "./components/ContextPanel";
 import { Notices } from "./components/Notices";
@@ -24,7 +23,7 @@ import { StageBar } from "./components/StageBar";
 import { Timeline } from "./components/Timeline";
 import { FlowView } from "./components/FlowView";
 import { flowOf } from "./api/flow";
-import { LightProvider, useLight } from "./light/LightProvider";
+import { LightProvider } from "./light/LightProvider";
 
 /** 窗口够宽时左栏常驻（可以收成窄条），窄了变成从左上角呼出的抽屉。 */
 const DOCKED = "(min-width: 1101px)";
@@ -53,7 +52,6 @@ export function App() {
 
 function Shell() {
   const workspace = useWorkspace();
-  const emit = useLight();
   const [selected, setSelected] = useState<RoomId | null>(null);
   const [tab, setTab] = useState<PanelTab>("execution");
   const [roomsOpen, setRoomsOpen] = useState(false);
@@ -89,7 +87,6 @@ function Shell() {
       return next;
     });
   const [focusTask, setFocusTask] = useState<TaskId | null>(null);
-  const [demoNodes, setDemoNodes] = useState<ActivityNode[]>([]);
   const [version, setVersion] = useState("");
   const [loadError, setLoadError] = useState<string | null>(null);
   const [retry, setRetry] = useState(0);
@@ -298,33 +295,6 @@ function Shell() {
       setFocusTask(row.taskId);
       showPanel("tasks");
     }
-  };
-
-  // 演示：先把节点放进右栏，再让光线从按钮飞到这个节点。
-  const runLightDemo = (source: HTMLElement) => {
-    const id = `demo-${Date.now()}`;
-    setDemoNodes((nodes) => [
-      ...nodes,
-      { id, title: "演示节点", arrived: false },
-    ]);
-    showPanel("activity");
-    requestAnimationFrame(async () => {
-      const result = await emit({
-        id,
-        source,
-        target: () => document.querySelector(`[data-node-id="${id}"]`),
-        color: getComputedStyle(document.documentElement)
-          .getPropertyValue("--sa-accent")
-          .trim(),
-      });
-      setDemoNodes((nodes) =>
-        result === "arrived"
-          ? nodes.map((node) =>
-              node.id === id ? { ...node, arrived: true } : node,
-            )
-          : nodes.filter((node) => node.id !== id),
-      );
-    });
   };
 
   const tabAction = (id: PanelTab, title: string): PaletteEntry => ({
@@ -586,7 +556,6 @@ function Shell() {
                 onRetry={() => setRetry((n) => n + 1)}
                 onLoadOlder={() => workspace.loadOlder(room.id)}
                 onDecide={workspace.decideApproval}
-                onLightDemo={runLightDemo}
                 onExample={setPrefill}
                 hidden={view === "flow" && !!flow}
               />
@@ -650,7 +619,6 @@ function Shell() {
           routineActions={workspace.routineActions}
           links={workspace.links.filter((link) => link.room_id === room.id)}
           linkActions={workspace.linkActions}
-          activity={demoNodes}
           usageKey={workspace.notices.length}
           execution={execution}
           onJump={jumpTo}

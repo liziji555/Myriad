@@ -25,12 +25,6 @@ export type PanelTab =
   | "files"
   | "activity";
 
-export interface ActivityNode {
-  id: string;
-  title: string;
-  arrived: boolean;
-}
-
 const TABS: readonly { id: PanelTab; label: string }[] = [
   { id: "execution", label: "执行" },
   { id: "tasks", label: "任务" },
@@ -66,7 +60,6 @@ interface Props {
   /** 这个房间和外面的连接。 */
   links: readonly Link[];
   linkActions: LinkActions;
-  activity: readonly ActivityNode[];
   /** 变了就让「用量」页重新拉一次。 */
   usageKey: number;
   /** 「执行」页：每个 Bot 一张卡片。 */
@@ -94,7 +87,6 @@ export function ContextPanel({
   routineActions,
   links,
   linkActions,
-  activity,
   usageKey,
   execution,
   onJump,
@@ -200,7 +192,6 @@ export function ContextPanel({
         {tab === "files" && <p className="sa-panel-empty">还没有文件。</p>}
         {tab === "members" && <MembersPanel room={room} members={members} bots={bots} team={team} />}
         {tab === "activity" && (
-          <>
             <TaskGraph
               key={room.id}
               tasks={board.rooms[room.id] ?? []}
@@ -212,22 +203,6 @@ export function ContextPanel({
               }}
               loadRuns={taskActions.loadRuns}
             />
-            {activity.length > 0 && (
-              <ol className="sa-nodes">
-                {activity.map((node) => (
-                  <li key={node.id} className="sa-node" data-node-id={node.id} data-arrived={node.arrived}>
-                    {!node.arrived && (
-                      <svg className="light-running-border" aria-hidden="true">
-                        <rect x="1" y="1" width="calc(100% - 2px)" height="calc(100% - 2px)" rx="8" pathLength="100" />
-                      </svg>
-                    )}
-                    <span className="sa-row-label">{node.title}</span>
-                    <span className="sa-row-meta">{node.arrived ? "已到达" : "飞行中"}</span>
-                  </li>
-                ))}
-              </ol>
-            )}
-          </>
         )}
       </div>
     </aside>
