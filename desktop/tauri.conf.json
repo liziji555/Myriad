@@ -22,7 +22,6 @@
     "windows": {
       "nsis": {
         "installMode": "currentUser",
-        "compression": "none",
         "languages": ["SimpChinese", "English"]
       }
     }
