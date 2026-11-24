@@ -341,23 +341,26 @@ async fn deliver(inbox: &Inbox, message: &Value) {
 fn events(
     response: reqwest::Response,
 ) -> impl futures_util::Stream<Item = Result<eventsource_stream::Event, ()>> + Unpin {
-    let (mut pending, mut blank) = (0usize, false);
+    // 还没完的那个事件有多长；是不是在一行的开头；上一个字节是不是 \r。
+    let (mut pending, mut blank, mut after_cr) = (0usize, true, false);
     let capped = response.bytes_stream().map(move |chunk| {
         let chunk = chunk.map_err(|_| ())?;
-        // 空行是一个事件的结尾：只数它后面还没完的那一段。
         for byte in chunk.iter() {
+            let crlf = *byte == b'\n' && after_cr;
+            after_cr = *byte == b'\r';
             match byte {
-                b'\n' if blank => pending = 0,
-                b'\n' => blank = true,
-                b'\r' => {}
+                b'\n' if crlf => {}
+                // 空行是一个事件的结尾。
+                b'\n' | b'\r' if blank => pending = 0,
+                b'\n' | b'\r' => blank = true,
                 _ => {
                     blank = false;
                     pending += 1;
+                    if pending > MAX_LINE_BYTES {
+                        return Err(());
+                    }
                 }
             }
-        }
-        if pending > MAX_LINE_BYTES {
-            return Err(());
         }
         Ok::<_, ()>(chunk)
     });
