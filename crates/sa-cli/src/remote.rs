@@ -136,6 +136,7 @@ impl SshTarget {
     fn command(&self) -> Command {
         let mut command = self.base_command();
         command.args(["-o", "BatchMode=yes"]);
+        hide_console(&mut command);
         command
     }
 
@@ -150,7 +151,6 @@ impl SshTarget {
         if let Some(port) = self.port {
             command.arg("-p").arg(port.to_string());
         }
-        hide_console(&mut command);
         command
     }
 
@@ -190,7 +190,9 @@ impl SshTarget {
             &self.host,
             INSTALL_KEY,
         ]);
+        // 命令行里由 ssh 在终端问密码，Windows 上要留着控制台；桌面版由我们来答，不弹窗。
         if let Some(password) = password {
+            hide_console(&mut command);
             let exe = std::env::current_exe().context("找不到自己的可执行文件")?;
             command
                 .env("SSH_ASKPASS", exe)
