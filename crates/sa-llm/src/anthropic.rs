@@ -304,7 +304,11 @@ struct Seen {
 
 impl Seen {
     fn usage(&self) -> Option<Usage> {
-        if self.input.is_none() && self.output.is_none() {
+        if self.input.is_none()
+            && self.output.is_none()
+            && self.cache_read.is_none()
+            && self.cache_write.is_none()
+        {
             return None;
         }
         let cached = self.cache_read.unwrap_or(0);
