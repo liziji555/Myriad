@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type ChangeEvent, type FormEvent } from "r
 import { api } from "../api/client";
 import { importSummary, MAX_TEMPLATE_BYTES, saveTextFile } from "../api/templates";
 import type { Team } from "../api/useWorkspace";
-import type { Bot, Discussion, Harness, HarnessDesk, ModelTier, Room } from "../api/types";
+import type { Bot, Discussion, Harness, HarnessDesk, ModelTier, Room, Share } from "../api/types";
 
 /** 一个房间里最多几个 Bot。和服务端的上限一致，超过时服务端也会拒绝。 */
 const MAX_MEMBERS = 6;
@@ -23,6 +23,35 @@ const HARNESSES: readonly { id: Harness; label: string }[] = [
 ];
 
 const harnessLabel = (harness: Harness) => HARNESSES.find((h) => h.id === harness)?.label ?? harness;
+
+/** 多久看一次共享目录连没连着。 */
+const SHARES_REFRESH_MS = 10_000;
+
+/** 别的电脑用 `sa share` 共享过来的目录，每隔一会儿刷新一次。 */
+function useShares(): Share[] {
+  const [shares, setShares] = useState<Share[]>([]);
+  useEffect(() => {
+    let alive = true;
+    const load = () =>
+      api.listShares().then(
+        (found) => alive && setShares(found),
+        () => {},
+      );
+    void load();
+    const timer = window.setInterval(() => void load(), SHARES_REFRESH_MS);
+    return () => {
+      alive = false;
+      window.clearInterval(timer);
+    };
+  }, []);
+  return shares;
+}
+
+/** 选择框里一个共享目录的样子。 */
+export function shareLabel(share: Share): string {
+  const state = share.online ? "在线" : "没连着";
+  return `${share.name}（${state}${share.read_only ? "，只读" : ""}）`;
+}
 
 /** 没点名的话怎么接。点了名的总是只给被点到的。 */
 export const DISCUSSIONS: readonly { id: Discussion; label: string; note: string }[] = [
@@ -54,6 +83,7 @@ export function MembersPanel({ room, members, bots, team }: Props) {
   const [busy, setBusy] = useState(false);
   const [imported, setImported] = useState<string | null>(null);
   const [updateExisting, setUpdateExisting] = useState(false);
+  const shares = useShares();
   const filePicker = useRef<HTMLInputElement>(null);
   const [desks, setDesks] = useState<readonly HarnessDesk[]>([]);
   const hasHarness = members.some((bot) => bot.harness !== "builtin");
@@ -188,6 +218,34 @@ export function MembersPanel({ room, members, bots, team }: Props) {
       </div>
       <p className="sa-panel-note">
         {DISCUSSIONS.find(({ id }) => id === room.discussion)?.note}。用 @ 点了名的话只给被点到的。
+      </p>
+
+      <h3 className="sa-panel-heading">工作目录</h3>
+      <div className="sa-discussion">
+        <label className="sa-field">
+          <span>文件在哪</span>
+          <select
+            aria-label="工作目录"
+            value={room.share ?? ""}
+            disabled={busy}
+            onChange={(event) => void run(() => team.updateRoom(room.id, { share: event.target.value }))}
+          >
+            <option value="">这台服务的工作目录</option>
+            {shares.map((share) => (
+              <option key={share.name} value={share.name}>
+                {shareLabel(share)}
+              </option>
+            ))}
+            {room.share && !shares.some((share) => share.name === room.share) && (
+              <option value={room.share}>{room.share}（没连着）</option>
+            )}
+          </select>
+        </label>
+      </div>
+      <p className="sa-panel-note">
+        {room.share
+          ? `Bot 看、搜、改的是共享目录「${room.share}」里的文件，在那台电脑上执行；那台电脑没连着时会等它连上。这里还不能执行命令、开任务，也不能用 harness。`
+          : "在别的电脑上运行 sa share 目录 --server 这台服务器，就能把那边的目录共享过来，在这里选它。"}
       </p>
 
       <h3 className="sa-panel-heading">成员</h3>

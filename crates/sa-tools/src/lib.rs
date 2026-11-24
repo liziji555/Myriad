@@ -160,6 +160,12 @@ impl ToolRegistry {
         self.tools.push(Arc::new(tool));
     }
 
+    /// 放进一个别处已经有的工具。
+    pub fn register_shared(&mut self, tool: Arc<dyn Tool>) {
+        debug_assert!(self.get(tool.name()).is_none(), "工具重名：{}", tool.name());
+        self.tools.push(tool);
+    }
+
     pub fn get(&self, name: &str) -> Option<&Arc<dyn Tool>> {
         self.tools.iter().find(|tool| tool.name() == name)
     }

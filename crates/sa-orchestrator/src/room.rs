@@ -803,6 +803,12 @@ async fn turn(
     *reply.lock().unwrap() = Some(draft.id.clone());
     let lead = link.episode().lead().cloned();
     let leading = lead.as_ref() == Some(&bot.id);
+    let engine = shared.engine.clone();
+    let this_room = room_id.clone();
+    let share = db(move || engine.get_room(&this_room))
+        .await
+        .map_err(|e| e.to_string())?
+        .share;
 
     link.speaking.lock().unwrap().push(bot.id.clone());
     announce(shared, room_id, link).await;
@@ -814,6 +820,7 @@ async fn turn(
         session_id: session_id.clone(),
         message_id: draft.id.clone(),
         fence: shared.settings.fence.clone(),
+        share: share.clone(),
         rule_scope: None,
         steps: Mutex::new(vec![]),
         saving: tokio::sync::Mutex::new(()),
@@ -821,6 +828,15 @@ async fn turn(
         pulse: None,
     };
     let outcome = match shared.models.resolve(bot.tier) {
+        _ if bot.harness != Harness::Builtin && share.is_some() => {
+            let recorded = record_inputs(transcript, inbox.drain().await);
+            Err(recorded.err().unwrap_or_else(|| {
+                format!(
+                    "{} 是 harness，这个房间的工作目录是共享目录，harness 暂时还不能在共享目录里干活。",
+                    bot.name
+                )
+            }))
+        }
         _ if bot.harness != Harness::Builtin => {
             let inputs = inbox.drain().await;
             harness_turn(shared, room_id, bot, transcript, inputs, &observer, &cancel).await
@@ -834,8 +850,13 @@ async fn turn(
             let skills = shared.skills_for(&bot.name).await;
             let config = TurnConfig {
                 model: model.model.clone(),
-                system_prompt: render_prompt(&shared.settings, bot, others, &skills.prompt)
-                    + &crate::lead_rules(bot, others, lead.as_ref()),
+                system_prompt: render_prompt(
+                    &workspace(shared, share.as_deref()),
+                    &shared.settings,
+                    bot,
+                    others,
+                    &skills.prompt,
+                ) + &crate::lead_rules(bot, others, lead.as_ref()),
                 max_steps: shared.settings.max_steps,
                 max_tokens: None,
                 thinking: model.thinking,
@@ -855,19 +876,32 @@ async fn turn(
             ctx.allow_private_network = shared.settings.allow_private_network;
             // 别的 Bot 可能同时在这个工作目录里干活（包括这一轮中途才进房间的）：改文件、执行命令一个一个来。
             // 主 Agent 只看不动手：改文件、执行命令都派给成员。
-            let mut tools = if leading {
+            // 用的是共享目录：文件工具交给那台电脑去做。
+            let base = if leading {
                 ToolRegistry::read_only()
             } else {
-                crate::serial::one_writer_at_a_time(shared.tools(), link.clone())
+                shared.tools()
+            };
+            let base = match &share {
+                Some(name) => crate::shares::tools(&shared.shares, name, &base),
+                None => base,
+            };
+            let mut tools = if leading {
+                base
+            } else {
+                crate::serial::one_writer_at_a_time(base, link.clone())
             };
             if let Some(tool) = skills.tool {
                 tools.register(tool);
             }
-            tools.register(CreateTaskTool {
-                shared: shared.clone(),
-                room_id: room_id.clone(),
-                from: bot.clone(),
-            });
+            // 任务要在服务这边开独立目录，共享目录开不了。
+            if share.is_none() {
+                tools.register(CreateTaskTool {
+                    shared: shared.clone(),
+                    room_id: room_id.clone(),
+                    from: bot.clone(),
+                });
+            }
             // 房间里有别的 Bot 时才给它「找别的 Bot」这个工具。
             if !others.is_empty() {
                 tools.register(AskBotTool {
@@ -955,6 +989,23 @@ async fn turn(
         }
         Err(format!("{} 的回复没有正常结束", bot.name))
     }
+}
+
+/// 提示词里说的工作目录。
+fn workspace(shared: &Shared, share: Option<&str>) -> String {
+    let Some(name) = share else {
+        return shared.settings.fence.root_display();
+    };
+    let root = shared
+        .shares
+        .list()
+        .into_iter()
+        .find(|known| known.name == name)
+        .map(|known| format!("，在那边是 {}", known.root))
+        .unwrap_or_default();
+    format!(
+        "共享目录「{name}」（在另一台电脑上{root}）。文件工具看到和改的都是那台电脑上的文件；那台电脑没连着时，工具会等它连上。这里还不能执行命令"
+    )
 }
 
 /// harness Bot 的一轮：在它自己的工位目录里启动它，把这一轮的话交给它。
@@ -1490,6 +1541,8 @@ pub(crate) struct RoomObserver {
     pub message_id: MessageId,
     /// 这一轮的文件类工具在哪个目录里干活。「总是允许」记的路径按它来算。
     pub fence: Fence,
+    /// 这一轮用的共享目录。文件在别的电脑上，「总是允许」不记。
+    pub share: Option<String>,
     /// 「总是允许」的命令记在谁的名下（任务的 id）。任务里批准的命令是在任务目录里跑的，
     /// 不能让同一条命令在对话里（在人的工作目录里跑）也跟着免问，反过来也一样。
     pub rule_scope: Option<String>,
@@ -1640,7 +1693,10 @@ impl Observer for RoomObserver {
 
     async fn request_approval(&self, request: ApprovalRequest<'_>) -> bool {
         let engine = &self.shared.engine;
-        let key = rule_key(request.tool, request.input, &self.fence);
+        let key = match self.share {
+            Some(_) => None,
+            None => rule_key(request.tool, request.input, &self.fence),
+        };
         // 任务里的命令记在任务自己的名下，和对话里的命令是两本账，互相碰不到。
         let rule_tool = match &self.rule_scope {
             Some(scope) if request.tool == "shell" => format!("shell@{scope}"),

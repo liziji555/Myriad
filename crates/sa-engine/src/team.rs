@@ -165,11 +165,12 @@ impl Engine {
                 host_bot_id: host_bot_id.cloned(),
                 discussion: None,
                 rounds: None,
+                share: None,
             },
         )
     }
 
-    /// 改房间的设置：名字、入口 Bot（必须已经是成员）、没点名的话怎么接、轮流讨论转几圈。没写的不变。
+    /// 改房间的设置：名字、入口 Bot（必须已经是成员）、没点名的话怎么接、轮流讨论转几圈、用哪个共享目录。没写的不变。
     pub fn edit_room(&self, id: &RoomId, edit: &UpdateRoomRequest) -> Result<Room> {
         self.change_room(id, |room, _| {
             if let Some(name) = &edit.name {
@@ -202,6 +203,16 @@ impl Engine {
             }
             if let Some(discussion) = edit.discussion {
                 room.discussion = discussion;
+            }
+            if let Some(share) = &edit.share {
+                let share = share.trim();
+                if share.chars().count() > sa_protocol::MAX_SHARE_NAME_CHARS {
+                    return Err(EngineError::Invalid(format!(
+                        "共享目录的名字不能超过 {} 个字",
+                        sa_protocol::MAX_SHARE_NAME_CHARS
+                    )));
+                }
+                room.share = (!share.is_empty()).then(|| share.to_string());
             }
             Ok(RoomChange::Keep)
         })

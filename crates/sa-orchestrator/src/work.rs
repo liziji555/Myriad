@@ -280,6 +280,7 @@ async fn run_task(shared: &Arc<Shared>, task: Task, cancel: &CancellationToken) 
         session_id: session_id.clone(),
         message_id: draft.id.clone(),
         fence: fence.clone(),
+        share: None,
         rule_scope: Some(task.id.to_string()),
         steps: Mutex::new(vec![]),
         saving: tokio::sync::Mutex::new(()),
@@ -781,6 +782,12 @@ impl Orchestrator {
         let (engine, room_id) = (self.shared.engine.clone(), room_id.clone());
         let workspace = self.shared.settings.fence.root_display();
         let task = db(move || {
+            // 任务在服务这边的工作目录里开独立目录；用共享目录的房间开了也是改错地方。
+            if let Some(share) = engine.get_room(&room_id)?.share {
+                return Err(EngineError::Invalid(format!(
+                    "这个房间用的是共享目录「{share}」，还不能开任务"
+                )));
+            }
             engine.create_task(NewTask {
                 room_id,
                 title: request.title,

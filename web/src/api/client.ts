@@ -5,6 +5,7 @@ import type {
   ApiError,
   ApprovalDecision,
   ApprovalId,
+  Share,
   AuditPage,
   Bot,
   BotId,
@@ -181,6 +182,7 @@ export const api = {
   audit: (query: AuditQuery) => request<AuditPage>(`/api/audit${auditSearch(query)}`),
   /** 现在有哪些技能、哪些外部 MCP 服务。 */
   extensions: () => request<Extensions>("/api/extensions"),
+  listShares: () => request<Share[]>("/api/shares"),
   listLinks: () => request<Link[]>("/api/links"),
   /** 把一个 GitHub 仓库连到房间。 */
   createLink: (body: CreateLinkRequest) => postJson<Link>("/api/links", body),

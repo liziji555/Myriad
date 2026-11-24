@@ -125,6 +125,10 @@ pub struct UpdateRoomRequest {
     #[serde(default)]
     #[ts(optional)]
     pub rounds: Option<u32>,
+    /// 用哪个共享目录当工作目录。空字符串表示改回服务自己的工作目录。
+    #[serde(default)]
+    #[ts(optional)]
+    pub share: Option<String>,
 }
 
 /// 人开一个任务。
@@ -334,4 +338,33 @@ pub struct ImportReport {
     pub updated: Vec<crate::Bot>,
     /// 模板里带了房间时新建的房间。
     pub room: Option<crate::Room>,
+}
+
+/// `sa share` 来服务这里取下一件要在共享目录里做的事。来取就说明上一件已经交回了。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SharePoll {
+    pub name: String,
+    /// 这次运行的 `sa share` 的编号。换了编号就是另一次运行，接手同名的共享。
+    pub session: String,
+    /// 目录在那台电脑上的位置，给人看的。
+    pub root: String,
+    pub read_only: bool,
+}
+
+/// 交给 `sa share` 去做的一件事：在共享目录里调用一个文件工具。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ShareCall {
+    pub id: u64,
+    pub tool: String,
+    pub input: serde_json::Value,
+}
+
+/// `sa share` 交回来的结果。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShareReply {
+    pub name: String,
+    pub session: String,
+    pub id: u64,
+    pub ok: bool,
+    pub text: String,
 }

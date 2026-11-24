@@ -3690,6 +3690,8 @@ dependencies = [
  "chrono",
  "clap",
  "dirs",
+ "reqwest",
+ "rustls",
  "sa-adapters",
  "sa-engine",
  "sa-llm",
