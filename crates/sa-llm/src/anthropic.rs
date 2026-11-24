@@ -117,7 +117,7 @@ impl Provider for Anthropic {
             out: VecDeque::new(),
             calls: HashMap::new(),
             last_call: None,
-            usage: Usage::default(),
+            usage: Seen::default(),
             stop: None,
             finished: false,
         };
@@ -288,9 +288,32 @@ struct Decoder {
     calls: HashMap<usize, String>,
     /// 最近开始的那次工具调用。有的中转把参数的最后一段标错了块号，就算给它。
     last_call: Option<String>,
-    usage: Usage,
+    usage: Seen,
     stop: Option<StopReason>,
     finished: bool,
+}
+
+/// 流里报过的用量。一项都没报过时不交用量，让上层按估算记账。
+#[derive(Default)]
+struct Seen {
+    input: Option<u64>,
+    cache_read: Option<u64>,
+    cache_write: Option<u64>,
+    output: Option<u64>,
+}
+
+impl Seen {
+    fn usage(&self) -> Option<Usage> {
+        if self.input.is_none() && self.output.is_none() {
+            return None;
+        }
+        let cached = self.cache_read.unwrap_or(0);
+        Some(Usage {
+            input_tokens: self.input.unwrap_or(0) + cached + self.cache_write.unwrap_or(0),
+            output_tokens: self.output.unwrap_or(0),
+            cached_tokens: cached,
+        })
+    }
 }
 
 impl Decoder {
@@ -321,22 +344,18 @@ impl Decoder {
         self.out.push_back(Err(error));
     }
 
-    /// 用量是累计的：后来的数字盖掉前面的。
+    /// 用量是累计的：后来报的数字盖掉前面的，没报的那项留着前面的。
     fn count(&mut self, usage: WireUsage) {
-        let cached = usage.cache_read_input_tokens;
-        if let Some(input) = usage.input_tokens {
-            let total = input
-                + cached.unwrap_or(self.usage.cached_tokens)
-                + usage.cache_creation_input_tokens.unwrap_or(0);
-            if total > 0 || self.usage.input_tokens == 0 {
-                self.usage.input_tokens = total;
+        let seen = &mut self.usage;
+        for (value, slot) in [
+            (usage.input_tokens, &mut seen.input),
+            (usage.cache_read_input_tokens, &mut seen.cache_read),
+            (usage.cache_creation_input_tokens, &mut seen.cache_write),
+            (usage.output_tokens, &mut seen.output),
+        ] {
+            if let Some(value) = value {
+                *slot = Some(value);
             }
-        }
-        if let Some(cached) = cached.filter(|c| *c > 0) {
-            self.usage.cached_tokens = cached;
-        }
-        if let Some(output) = usage.output_tokens {
-            self.usage.output_tokens = output;
         }
     }
 
@@ -398,7 +417,8 @@ impl Decoder {
                     self.stop = Some(match reason.as_str() {
                         "end_turn" | "stop_sequence" => StopReason::EndTurn,
                         "tool_use" => StopReason::ToolUse,
-                        "max_tokens" => StopReason::MaxTokens,
+                        // 输出到了上限，或者上下文窗口放不下了：都是没说完就被截断。
+                        "max_tokens" | "model_context_window_exceeded" => StopReason::MaxTokens,
                         _ => StopReason::Other(reason),
                     });
                 }
@@ -408,7 +428,9 @@ impl Decoder {
             }
             "message_stop" => {
                 self.finished = true;
-                self.out.push_back(Ok(StreamEvent::Usage(self.usage)));
+                if let Some(usage) = self.usage.usage() {
+                    self.out.push_back(Ok(StreamEvent::Usage(usage)));
+                }
                 match self.stop.take() {
                     Some(stop) => self.out.push_back(Ok(StreamEvent::Done { stop })),
                     None => self.out.push_back(Err(LlmError::Protocol(
@@ -648,6 +670,36 @@ mod tests {
                 {"type": "tool_result", "tool_use_id": "toolu_1", "content": "没找到"},
             ]})
         );
+    }
+
+    #[tokio::test]
+    async fn usage_keeps_what_was_reported_and_is_left_out_when_never_reported() {
+        let (provider, _) = start("/", vec![
+            Canned::Sse(vec![
+                r#"{"type":"message_start","message":{"usage":{"input_tokens":4,"cache_creation_input_tokens":6,"output_tokens":1}}}"#,
+                r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":"好"}}"#,
+                r#"{"type":"message_delta","delta":{"stop_reason":"model_context_window_exceeded"},"usage":{"input_tokens":4,"output_tokens":9}}"#,
+                r#"{"type":"message_stop"}"#,
+            ]),
+            Canned::Sse(vec![
+                r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":"好"}}"#,
+                r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"}}"#,
+                r#"{"type":"message_stop"}"#,
+            ]),
+        ])
+        .await;
+        let acc = collect(&provider, request()).await.unwrap();
+        assert_eq!(acc.stop, Some(StopReason::MaxTokens));
+        assert_eq!(
+            acc.usage,
+            Some(Usage {
+                input_tokens: 10,
+                output_tokens: 9,
+                cached_tokens: 0
+            })
+        );
+        let acc = collect(&provider, request()).await.unwrap();
+        assert_eq!(acc.usage, None);
     }
 
     #[tokio::test]
