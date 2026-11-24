@@ -70,3 +70,13 @@ jobs:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.path }}
           if-no-files-found: error
+      - name: 装一遍安装包（Windows）
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $setup = (Get-ChildItem desktop/target/release/bundle/nsis/*.exe | Select-Object -First 1).FullName
+          $dir = Join-Path $env:RUNNER_TEMP 'Myriad'
+          $run = Start-Process -FilePath $setup -ArgumentList '/S', "/D=$dir" -Wait -PassThru
+          if ($run.ExitCode -ne 0) { throw "安装包退出码 $($run.ExitCode)" }
+          Get-ChildItem $dir | Select-Object Name, Length
+          if (-not (Test-Path (Join-Path $dir 'superagent-desktop.exe'))) { throw '装完没有主程序' }
