@@ -3846,6 +3846,7 @@ name = "sa-tools"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "eventsource-stream",
  "futures-util",
  "globset",
  "html2text",
