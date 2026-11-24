@@ -856,7 +856,8 @@ async fn turn(
                     bot,
                     others,
                     &skills.prompt,
-                ) + &crate::lead_rules(bot, others, lead.as_ref()),
+                ) + &crate::lead_rules(bot, others, lead.as_ref())
+                    + read_only_rules(shared, share.as_deref()),
                 max_steps: shared.settings.max_steps,
                 max_tokens: None,
                 thinking: model.thinking,
@@ -1006,6 +1007,16 @@ fn workspace(shared: &Shared, share: Option<&str>) -> String {
     format!(
         "共享目录「{name}」（在另一台电脑上{root}）。文件工具看到和改的都是那台电脑上的文件；那台电脑没连着时，工具会等它连上。这里还不能执行命令"
     )
+}
+
+/// 共享目录是只读的：单独接在提示词后面，自定义提示词里没写 `{workspace}` 也看得到。
+fn read_only_rules(shared: &Shared, share: Option<&str>) -> &'static str {
+    match share {
+        Some(name) if shared.shares.read_only(name) => {
+            "\n这个房间用的共享目录是只读的：只能看和搜，没有改文件、新建文件的工具；要改文件时直接说改不了，不要说已经改了。\n"
+        }
+        _ => "",
+    }
 }
 
 /// harness Bot 的一轮：在它自己的工位目录里启动它，把这一轮的话交给它。

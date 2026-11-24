@@ -123,7 +123,7 @@ impl Shares {
     }
 
     /// 最近一次知道的：这个共享是不是只读。没连上来过就当能改，到那边再说。
-    fn read_only(&self, name: &str) -> bool {
+    pub(crate) fn read_only(&self, name: &str) -> bool {
         let state = self.state.lock().unwrap();
         state.shares.get(name).is_some_and(|entry| entry.read_only)
     }
