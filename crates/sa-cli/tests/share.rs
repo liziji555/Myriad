@@ -1,5 +1,6 @@
 //! 真的启动 `sa serve` 和 `sa share`：服务那边的 Bot 看、改的是另一个目录（模拟另一台电脑）里的文件；
-//! 共享目录外面的碰不到；`sa share` 断了，要用目录的那一步等着，重新连上后接着做；只读的不给改。
+//! 共享目录外面的碰不到；`sa share` 断了，要用目录的那一步等着，重新连上后接着做；只读的不给改；
+//! 加了 `--commands` 才能执行命令，每条先批准，可以停止。
 
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -129,17 +130,15 @@ fn wait_line(child: &mut Child, marker: &str) -> String {
 struct Sharing(Child);
 
 impl Sharing {
-    fn start(dir: &Path, project: &Path, server: &Server, read_only: bool) -> Self {
+    fn start(dir: &Path, project: &Path, server: &Server, options: &[&str]) -> Self {
         let mut command = Command::new(SA);
         command
             .arg("--data-dir")
             .arg(dir.join("share-data"))
             .arg("share")
             .arg(project)
-            .args(["--name", "我的项目", "--url", &server.url]);
-        if read_only {
-            command.arg("--read-only");
-        }
+            .args(["--name", "我的项目", "--url", &server.url])
+            .args(options);
         let mut child = command
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -177,7 +176,7 @@ fn bots_read_and_change_files_in_a_shared_folder_and_wait_while_it_is_offline() 
     let room = server.room();
     assert!(server.shares().is_empty());
 
-    let sharing = Sharing::start(dir.path(), &project, &server, false);
+    let sharing = Sharing::start(dir.path(), &project, &server, &[]);
     let shares = server.shares();
     assert_eq!(shares.len(), 1, "{shares:?}");
     assert_eq!(shares[0]["name"], "我的项目");
@@ -239,7 +238,7 @@ fn bots_read_and_change_files_in_a_shared_folder_and_wait_while_it_is_offline() 
     let since = Instant::now();
     let reply = server.ask(&room, "读一下 `说明.md`", |_| {
         if sharing.is_none() && since.elapsed() > Duration::from_secs(3) {
-            sharing = Some(Sharing::start(dir.path(), &project, &server, false));
+            sharing = Some(Sharing::start(dir.path(), &project, &server, &[]));
         }
     });
     assert!(sharing.is_some(), "断开时没有等：{reply:#}");
@@ -251,7 +250,7 @@ fn bots_read_and_change_files_in_a_shared_folder_and_wait_while_it_is_offline() 
     drop(sharing);
 
     // 只读：不给 Bot 改文件的工具，文件不会被改。
-    let _sharing = Sharing::start(dir.path(), &project, &server, true);
+    let _sharing = Sharing::start(dir.path(), &project, &server, &["--read-only"]);
     assert_eq!(server.shares()[0]["read_only"], true);
     let reply = server.ask(&room, "写入 `说明.md`：被改了", |reply| {
         assert!(
@@ -264,4 +263,105 @@ fn bots_read_and_change_files_in_a_shared_folder_and_wait_while_it_is_offline() 
         std::fs::read_to_string(project.join("说明.md")).unwrap(),
         "只在你电脑上的说明\n"
     );
+}
+
+/// 每轮看一眼还没写完的回复：出了审批卡就批准一次，记在 `decided` 里。
+fn approve_once(server: &Server, reply: &Value, decided: &mut bool) {
+    let waiting = reply["steps"]
+        .as_array()
+        .and_then(|steps| steps.iter().find(|s| s["state"] == "waiting"));
+    if let (Some(step), false) = (waiting, *decided) {
+        let id = step["approval"]["id"].as_str().unwrap();
+        let path = format!("/api/approvals/{id}/decide");
+        let (status, body) = server.request("POST", &path, Some(json!({ "decision": "once" })));
+        assert!(status < 300, "{status} {body}");
+        *decided = true;
+    }
+}
+
+#[test]
+fn bots_run_approved_commands_in_a_shared_folder_and_can_stop_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("另一台电脑").join("项目");
+    std::fs::create_dir_all(&project).unwrap();
+    let server = Server::start(dir.path());
+    let room = server.room();
+    let path = format!("/api/rooms/{room}");
+    let (status, body) = server.request("PATCH", &path, Some(json!({ "share": "我的项目" })));
+    assert_eq!(status, 200, "{body}");
+
+    // 没加 --commands：不给执行命令的工具，什么也没跑。
+    let sharing = Sharing::start(dir.path(), &project, &server, &[]);
+    assert!(server.shares()[0]["shell"].is_null());
+    let reply = server.ask(&room, "运行 `echo hi > 不该有.txt`", |_| {});
+    assert!(reply["steps"].as_array().unwrap().is_empty(), "{reply:#}");
+    assert!(!project.join("不该有.txt").exists());
+    drop(sharing);
+
+    let _sharing = Sharing::start(dir.path(), &project, &server, &["--commands"]);
+    let shell = if cfg!(windows) { "PowerShell" } else { "bash" };
+    assert_eq!(server.shares()[0]["shell"], shell);
+
+    // 先批准，命令在共享目录里跑，不在服务的工作目录里。
+    let mut decided = false;
+    let reply = server.ask(&room, "运行 `echo hi > 命令写的.txt`", |reply| {
+        approve_once(&server, reply, &mut decided)
+    });
+    assert!(decided, "没有出审批卡：{reply:#}");
+    assert_eq!(step(&reply)["state"], "ok", "{reply:#}");
+    assert!(project.join("命令写的.txt").exists());
+    assert!(!dir.path().join("ws/命令写的.txt").exists());
+
+    // 退出码不是 0 的照实报失败。
+    let mut decided = false;
+    let reply = server.ask(&room, "运行 `exit 3`", |reply| {
+        approve_once(&server, reply, &mut decided)
+    });
+    assert_eq!(step(&reply)["state"], "error", "{reply:#}");
+    assert!(reply.to_string().contains('3'), "{reply:#}");
+
+    // 点停止：那边的命令连同它启动的进程一起结束，后面那半条不会再跑。
+    let mut decided = false;
+    let mut approved_at = None;
+    let mut stopped = false;
+    let reply = server.ask(
+        &room,
+        "运行 `sleep 4; echo done > 跑完了.txt`",
+        |reply| {
+            approve_once(&server, reply, &mut decided);
+            if !decided || stopped {
+                return;
+            }
+            if approved_at.get_or_insert_with(Instant::now).elapsed() > Duration::from_millis(1500)
+            {
+                let (status, body) =
+                    server.request("POST", &format!("/api/rooms/{room}/stop"), None);
+                assert!(status < 300, "{status} {body}");
+                stopped = true;
+            }
+        },
+    );
+    assert!(stopped, "没来得及点停止：{reply:#}");
+    assert_eq!(reply["state"], "cancelled", "{reply:#}");
+    std::thread::sleep(Duration::from_secs(5));
+    assert!(!project.join("跑完了.txt").exists());
+}
+
+#[test]
+fn read_only_shares_never_run_commands() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("项目");
+    std::fs::create_dir_all(&project).unwrap();
+    let server = Server::start(dir.path());
+    // --commands 和 --read-only 不能一起用。
+    let output = Command::new(SA)
+        .arg("--data-dir")
+        .arg(dir.path().join("share-data"))
+        .arg("share")
+        .arg(&project)
+        .args(["--url", &server.url, "--read-only", "--commands"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(server.shares().is_empty());
 }

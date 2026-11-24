@@ -997,15 +997,21 @@ fn workspace(shared: &Shared, share: Option<&str>) -> String {
     let Some(name) = share else {
         return shared.settings.fence.root_display();
     };
-    let root = shared
+    let known = shared
         .shares
         .list()
         .into_iter()
-        .find(|known| known.name == name)
+        .find(|known| known.name == name);
+    let root = known
+        .as_ref()
         .map(|known| format!("，在那边是 {}", known.root))
         .unwrap_or_default();
+    let commands = match known.and_then(|known| known.shell) {
+        Some(shell) => format!("命令也在那台电脑的这个目录里用 {shell} 执行，每条都要人批准"),
+        None => "这里不能执行命令".into(),
+    };
     format!(
-        "共享目录「{name}」（在另一台电脑上{root}）。文件工具看到和改的都是那台电脑上的文件；那台电脑没连着时，工具会等它连上。这里还不能执行命令"
+        "共享目录「{name}」（在另一台电脑上{root}）。文件工具看到和改的都是那台电脑上的文件；那台电脑没连着时，工具会等它连上。{commands}，也不能开任务"
     )
 }
 

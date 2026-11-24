@@ -156,6 +156,10 @@ pub struct Share {
     pub read_only: bool,
     /// 那台电脑现在连着。
     pub online: bool,
+    /// 那台电脑允许执行命令时用哪种命令行（`bash`、`PowerShell`）。
+    #[serde(default)]
+    #[ts(optional)]
+    pub shell: Option<String>,
 }
 
 /// 房间里没点名的话怎么接。点了名的总是只给被点到的。

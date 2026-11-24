@@ -1,7 +1,8 @@
 //! 别的电脑用 `sa share` 共享过来的目录。
 //!
-//! 那台电脑上的 `sa share` 经隧道来这里取活（长轮询），在它自己那边执行文件工具，再把结果交回来。
-//! 它一次只做一件：来取下一件，就说明手上那件已经交回了，没交回的就是丢了。
+//! 那台电脑上的 `sa share` 经隧道来这里取活（长轮询），在它自己那边执行文件工具和命令，再把结果交回来。
+//! 它每次来取活都说一声手上还在做哪几件；交出去了、不在里面、又没交回的，就是丢了。
+//! 人点了停止、活已经交出去了的话，下一次取活时交给它一件「停下」。
 //! 电脑没连着时，要用这个目录的那一步就等着，连上之后接着做；人点了停止就不等了。
 
 use async_trait::async_trait;
@@ -14,8 +15,10 @@ use std::time::{Duration, Instant};
 use tokio::sync::{oneshot, Notify};
 use tokio_util::sync::CancellationToken;
 
-/// 在共享目录里执行的工具。命令（shell）还不行。
-const SHARED_TOOLS: [&str; 6] = ["read", "list_dir", "glob", "grep", "write", "edit"];
+/// 在共享目录那台电脑上执行的工具。
+const SHARED_TOOLS: [&str; 7] = ["read", "list_dir", "glob", "grep", "write", "edit", "shell"];
+/// 交给 `sa share` 的「停下」：`id` 是要停的那件活。
+pub const STOP: &str = "_stop";
 /// 只读的共享里能用的工具。
 pub const READ_ONLY_TOOLS: [&str; 4] = ["read", "list_dir", "glob", "grep"];
 /// 这么久没来取活，就算那台电脑断开了。
@@ -41,6 +44,10 @@ struct Entry {
     session: String,
     root: String,
     read_only: bool,
+    /// 那边允许执行命令时用的命令行。
+    shell: Option<String>,
+    /// 已经交出去、人又点了停止的活，等着告诉那边停下。
+    stops: VecDeque<u64>,
     /// 正挂着等活的请求有几个。
     polling: usize,
     last_seen: Option<Instant>,
@@ -56,12 +63,12 @@ impl Entry {
         self.polling > 0 || self.last_seen.is_some_and(|at| at.elapsed() < ONLINE_GRACE)
     }
 
-    /// 交出去了却没交回：只读的重新排到最前面再做一次；改文件的不知道做没做，照实告诉 Bot。
-    fn requeue_lost(&mut self) {
+    /// 交出去了、那边说不在做、又没交回：只读的重新排到最前面再做一次；改文件的不知道做没做，照实告诉 Bot。
+    fn requeue_lost(&mut self, running: &[u64]) {
         let mut lost: Vec<u64> = self
             .calls
             .iter()
-            .filter(|(_, call)| call.sent)
+            .filter(|(id, call)| call.sent && !running.contains(id))
             .map(|(id, _)| *id)
             .collect();
         lost.sort_unstable();
@@ -69,10 +76,12 @@ impl Entry {
             let call = self.calls.get_mut(&id).expect("刚找到的");
             if call.writes {
                 let call = self.calls.remove(&id).expect("刚找到的");
-                let _ = call.reply.send(Err(
+                let _ = call.reply.send(Err(if call.tool == "shell" {
+                    "和共享目录那台电脑的连接断了，不知道这条命令跑完没有。请先看一下结果再决定要不要重跑。"
+                } else {
                     "和共享目录那台电脑的连接断了，不知道这次改动做完没有。请先看一下文件再决定要不要重做。"
-                        .into(),
-                ));
+                }
+                .into()));
             } else {
                 call.sent = false;
                 self.queue.push_front(id);
@@ -116,6 +125,7 @@ impl Shares {
                 root: entry.root.clone(),
                 read_only: entry.read_only,
                 online: entry.online(),
+                shell: entry.shell.clone(),
             })
             .collect();
         shares.sort_by(|a, b| a.name.cmp(&b.name));
@@ -126,6 +136,12 @@ impl Shares {
     pub(crate) fn read_only(&self, name: &str) -> bool {
         let state = self.state.lock().unwrap();
         state.shares.get(name).is_some_and(|entry| entry.read_only)
+    }
+
+    /// 那边允许执行命令时用的命令行。
+    pub(crate) fn shell(&self, name: &str) -> Option<String> {
+        let state = self.state.lock().unwrap();
+        state.shares.get(name).and_then(|entry| entry.shell.clone())
     }
 
     /// `sa share` 来取活：有就马上给，没有就最多等 `wait`，还没有就给 `None`。
@@ -153,6 +169,7 @@ impl Shares {
                     entry.retired.insert(old);
                 }
                 entry.polling = 0;
+                entry.stops.clear();
                 if !entry.root.is_empty() && entry.root != hello.root {
                     // 同一个名字换成了另一个目录：之前要做的（尤其批准过的改动）是冲着原来那个目录的。
                     entry.queue.clear();
@@ -167,23 +184,31 @@ impl Shares {
             }
             entry.root = hello.root;
             entry.read_only = hello.read_only;
+            entry.shell = hello.shell.filter(|_| !hello.read_only);
             entry.last_seen = Some(Instant::now());
-            entry.requeue_lost();
-            if entry.read_only {
-                // 共享改成只读了：还在排队的改动不再交出去。
-                let writes: Vec<u64> = entry
-                    .calls
-                    .iter()
-                    .filter(|(_, call)| call.writes)
-                    .map(|(id, _)| *id)
-                    .collect();
-                for id in writes {
-                    entry.queue.retain(|queued| *queued != id);
-                    if let Some(call) = entry.calls.remove(&id) {
-                        let _ = call
-                            .reply
-                            .send(Err("这个共享目录是只读的，不能改。".into()));
+            entry.requeue_lost(&hello.running);
+            // 共享改成只读、或者不让执行命令了：还在排队的那些不再交出去。
+            let refused: Vec<(u64, &str)> = entry
+                .calls
+                .iter()
+                .filter(|(_, call)| !call.sent)
+                .filter_map(|(id, call)| {
+                    if call.writes && entry.read_only {
+                        Some((*id, "这个共享目录是只读的，不能改。"))
+                    } else if call.tool == "shell" && entry.shell.is_none() {
+                        Some((
+                            *id,
+                            "共享目录那台电脑不让执行命令（sa share 没加 --commands）。",
+                        ))
+                    } else {
+                        None
                     }
+                })
+                .collect();
+            for (id, reason) in refused {
+                entry.queue.retain(|queued| *queued != id);
+                if let Some(call) = entry.calls.remove(&id) {
+                    let _ = call.reply.send(Err(reason.into()));
                 }
             }
             entry.polling += 1;
@@ -207,6 +232,13 @@ impl Shares {
                 };
                 if entry.session != hello.session {
                     return Err(TAKEN.into());
+                }
+                if let Some(id) = entry.stops.pop_front() {
+                    return Ok(Some(ShareCall {
+                        id,
+                        tool: STOP.into(),
+                        input: Value::Null,
+                    }));
                 }
                 while let Some(id) = entry.queue.pop_front() {
                     if let Some(call) = entry.calls.get_mut(&id) {
@@ -290,6 +322,7 @@ impl Shares {
                 if pending.withdraw() {
                     return Err(ToolError::new("已停止，没有执行。"));
                 }
+                pending.stop();
                 if !writes {
                     return Err(ToolError::new("已停止。"));
                 }
@@ -336,10 +369,26 @@ impl Pending<'_> {
         entry.queue.retain(|queued| *queued != self.id);
         true
     }
+
+    /// 已经交出去了：叫那边停下（命令会连同它启动的进程一起结束）。
+    fn stop(&self) {
+        let mut state = self.shares.state.lock().unwrap();
+        if let Some(entry) = state.shares.get_mut(self.name) {
+            if entry.calls.get(&self.id).is_some_and(|call| call.sent)
+                && !entry.stops.contains(&self.id)
+            {
+                entry.stops.push_back(self.id);
+            }
+        }
+        drop(state);
+        self.shares.wake.notify_waiters();
+    }
 }
 
 impl Drop for Pending<'_> {
+    /// 停止时调用方可能直接丢下这次调用：交出去了还没交回的，叫那边停下。
     fn drop(&mut self) {
+        self.stop();
         let mut state = self.shares.state.lock().unwrap();
         if let Some(entry) = state.shares.get_mut(self.name) {
             entry.queue.retain(|queued| *queued != self.id);
@@ -367,13 +416,14 @@ impl Drop for Polling<'_> {
     }
 }
 
-/// 用共享目录 `name` 当工作目录时的工具：文件工具换成交给那台电脑去做的，命令先不给，别的照旧。
+/// 用共享目录 `name` 当工作目录时的工具：文件工具和命令换成交给那台电脑去做的（那边不让执行命令就不给），别的照旧。
 pub(crate) fn tools(shares: &Arc<Shares>, name: &str, base: &ToolRegistry) -> ToolRegistry {
     let read_only = shares.read_only(name);
+    let shell = shares.shell(name);
     let mut tools = ToolRegistry::new();
     for tool in base.iter() {
         let tool_name = tool.name();
-        if tool_name == "shell" {
+        if tool_name == "shell" && shell.is_none() {
             continue;
         }
         if !SHARED_TOOLS.contains(&tool_name) {
@@ -387,16 +437,25 @@ pub(crate) fn tools(shares: &Arc<Shares>, name: &str, base: &ToolRegistry) -> To
             inner: tool.clone(),
             shares: shares.clone(),
             name: name.to_string(),
+            shell: shell.clone(),
         });
     }
     tools
 }
 
-/// 交给共享目录那台电脑去做的文件工具。说明、参数和标题照搬本机的同名工具。
+/// 交给共享目录那台电脑去做的工具。参数和标题照搬本机的同名工具。
 struct Remote {
     inner: Arc<dyn Tool>,
     shares: Arc<Shares>,
     name: String,
+    /// 那台电脑上的命令行：命令的说明按它写。
+    shell: Option<String>,
+}
+
+impl Remote {
+    fn runs_commands(&self) -> bool {
+        self.inner.name() == "shell"
+    }
 }
 
 #[async_trait]
@@ -406,7 +465,10 @@ impl Tool for Remote {
     }
 
     fn description(&self) -> String {
-        self.inner.description()
+        match &self.shell {
+            Some(shell) if self.runs_commands() => sa_tools::shell_description(shell),
+            _ => self.inner.description(),
+        }
     }
 
     fn input_schema(&self) -> Value {
@@ -426,7 +488,13 @@ impl Tool for Remote {
     }
 
     async fn check_permission(&self, input: &Value, _ctx: &ToolCtx) -> Permission {
-        if self.is_read_only(input) {
+        if self.runs_commands() {
+            Permission::Ask(format!(
+                "要在共享目录「{}」那台电脑上执行命令：{}",
+                self.name,
+                input["command"].as_str().unwrap_or_default()
+            ))
+        } else if self.is_read_only(input) {
             Permission::Allow
         } else {
             Permission::Ask(format!(
@@ -463,6 +531,8 @@ mod tests {
             session: session.into(),
             root: "D:\\项目".into(),
             read_only,
+            shell: None,
+            running: Vec::new(),
         }
     }
 
@@ -568,6 +638,76 @@ mod tests {
         for name in ["write", "edit", "shell"] {
             assert!(!names.contains(&name), "{names:?}");
         }
+    }
+
+    #[tokio::test]
+    async fn stopping_a_sent_call_tells_the_computer_to_stop_it() {
+        let shares = Arc::new(Shares::default());
+        let cancel = CancellationToken::new();
+        let calling = {
+            let (shares, cancel) = (shares.clone(), cancel.clone());
+            tokio::spawn(async move {
+                shares
+                    .call(
+                        "项目",
+                        "shell",
+                        json!({"command": "sleep 9"}),
+                        true,
+                        &cancel,
+                    )
+                    .await
+            })
+        };
+        tokio::time::sleep(NOW).await;
+        let mut busy = hello("s1", false);
+        busy.shell = Some("bash".into());
+        let call = shares
+            .poll(busy.clone(), NOW)
+            .await
+            .unwrap()
+            .expect("应该有活");
+        assert_eq!(call.tool, "shell");
+        // 那边说还在做：不当它丢了，不重交。
+        busy.running = vec![call.id];
+        assert_eq!(shares.poll(busy.clone(), NOW).await.unwrap(), None);
+        // 调用方直接丢下了这次调用（点了停止）：下一次取活拿到的是「停下」。
+        calling.abort();
+        let _ = calling.await;
+        let stop = shares.poll(busy, NOW).await.unwrap().expect("应该叫停");
+        assert_eq!((stop.tool.as_str(), stop.id), (STOP, call.id));
+    }
+
+    #[tokio::test]
+    async fn shells_are_only_offered_when_the_computer_allows_them() {
+        let shares = Arc::new(Shares::default());
+        let cancel = CancellationToken::new();
+        let shell = {
+            let (shares, cancel) = (shares.clone(), cancel.clone());
+            tokio::spawn(
+                async move { shares.call("项目", "shell", json!({}), true, &cancel).await },
+            )
+        };
+        tokio::time::sleep(NOW).await;
+        // 没开 --commands：排着的命令不交出去，也不给执行命令的工具。
+        assert_eq!(shares.poll(hello("s1", false), NOW).await.unwrap(), None);
+        assert!(shell.await.unwrap().unwrap_err().0.contains("--commands"));
+        let names = |shares: &Arc<Shares>| -> Vec<String> {
+            tools(shares, "项目", &ToolRegistry::standard())
+                .iter()
+                .map(|tool| tool.name().to_string())
+                .collect()
+        };
+        assert!(!names(&shares).contains(&"shell".to_string()));
+        let mut commands = hello("s2", false);
+        commands.shell = Some("bash".into());
+        assert_eq!(shares.poll(commands.clone(), NOW).await.unwrap(), None);
+        assert!(names(&shares).contains(&"shell".to_string()));
+        assert_eq!(shares.list()[0].shell.as_deref(), Some("bash"));
+        // 只读的就算说了能执行命令也不给。
+        let mut read_only = hello("s3", true);
+        read_only.shell = Some("bash".into());
+        assert_eq!(shares.poll(read_only, NOW).await.unwrap(), None);
+        assert!(!names(&shares).contains(&"shell".to_string()));
     }
 
     #[tokio::test]

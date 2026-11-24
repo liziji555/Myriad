@@ -24,7 +24,9 @@ pub use glob::GlobTool;
 pub use grep::GrepTool;
 pub use list_dir::ListDirTool;
 pub use read::ReadTool;
-pub use shell::{hidden_env, hide_env_from_commands, ShellTool};
+pub use shell::{
+    description as shell_description, hidden_env, hide_env_from_commands, local_shell, ShellTool,
+};
 pub use skills::{Skill, SkillSet, SkillTool, MAX_SKILLS};
 pub use todo::TodoTool;
 pub use web_fetch::WebFetchTool;

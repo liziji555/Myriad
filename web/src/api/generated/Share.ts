@@ -15,4 +15,8 @@ read_only: boolean,
 /**
  * 那台电脑现在连着。
  */
-online: boolean, };
+online: boolean, 
+/**
+ * 那台电脑允许执行命令时用哪种命令行（`bash`、`PowerShell`）。
+ */
+shell?: string, };
