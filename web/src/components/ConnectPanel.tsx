@@ -45,6 +45,18 @@ export function ConnectPanel({ state, invoke, onClose }: Props) {
     return made;
   };
 
+  // 面板关了就看不到测试结果：还在测的那一次停掉，不留着 ssh 在后台跑。
+  const testing = useRef(false);
+  testing.current = busy === "test";
+  const stopTest = useRef(() => {});
+  stopTest.current = () => void invoke("cancel_connect").catch(() => undefined);
+  useEffect(
+    () => () => {
+      if (testing.current) stopTest.current();
+    },
+    [],
+  );
+
   // 从菜单打开时焦点还在面板外面：Esc 挂在窗口上才关得掉。
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -274,9 +286,9 @@ export function ConnectPanel({ state, invoke, onClose }: Props) {
               <button type="submit" className="sa-button" disabled={busy !== null || connecting}>
                 {connecting ? "正在连…" : state.pinned === "server" ? "重新连接" : "保存并连接"}
               </button>
-              {connecting && (
+              {(connecting || busy === "test") && (
                 <button type="button" className="sa-link" onClick={cancel}>
-                  不连了
+                  {connecting ? "不连了" : "不测了"}
                 </button>
               )}
             </div>

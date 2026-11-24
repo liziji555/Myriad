@@ -166,18 +166,44 @@ impl SshTarget {
         command
     }
 
-    /// 在服务器上跑 `sa url`，拿到服务在服务器上的地址和令牌。
-    pub fn remote_service(&self) -> Result<RemoteService> {
-        let output = self
+    /// 在服务器上跑 `sa url`，拿到服务在服务器上的地址和令牌。途中 `stop.close()` 了就放弃。
+    pub fn remote_service(&self, stop: &TunnelStop) -> Result<RemoteService> {
+        let mut child = self
             .command()
             .args(["--", &self.host, &format!("{REMOTE_PATH} sa url")])
             .stdin(Stdio::null())
-            .output()
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
             .map_err(ssh_missing)?;
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if !output.status.success() {
-            return Err(ssh_failure(output.status.code(), stderr.trim()));
+        let stdout = read_all(child.stdout.take());
+        let stderr = read_all(child.stderr.take());
+        *stop.child.lock().unwrap() = Some(child);
+        let status = loop {
+            {
+                let mut slot = stop.child.lock().unwrap();
+                if stop.stopped() {
+                    // 刚放进去就被喊停的话，`close` 可能没赶上它。
+                    if let Some(mut child) = slot.take() {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                    }
+                    bail!("已取消连接");
+                }
+                let Some(child) = slot.as_mut() else {
+                    bail!("已取消连接");
+                };
+                if let Some(status) = child.try_wait()? {
+                    slot.take();
+                    break status;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        let stdout = stdout.join().unwrap_or_default();
+        let stderr = stderr.join().unwrap_or_default();
+        if !status.success() {
+            return Err(ssh_failure(status.code(), stderr.trim()));
         }
         RemoteService::parse(&stdout)
             .with_context(|| format!("服务器上的 sa url 输出看不懂：{}", stdout.trim()))
@@ -616,7 +642,7 @@ impl Tunnel {
     /// 连上 `target` 上的 Myriad，等到服务能应答才返回。`local_port` 不给就挑一个空着的。
     /// 连的途中 `stop.close()` 了就放弃。
     pub fn open(target: &SshTarget, local_port: Option<u16>, stop: &TunnelStop) -> Result<Self> {
-        let remote = target.remote_service()?;
+        let remote = target.remote_service(stop)?;
         let local_port = match local_port {
             Some(port) => port,
             None => free_port()?,
@@ -708,6 +734,17 @@ fn forward_command(
             .args(["--", &target.host]);
         command
     }
+}
+
+/// 在另一个线程里把管道读到头：不读的话输出多了 ssh 会卡住。
+fn read_all(pipe: Option<impl Read + Send + 'static>) -> JoinHandle<String> {
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        if let Some(mut pipe) = pipe {
+            let _ = pipe.read_to_end(&mut bytes);
+        }
+        String::from_utf8_lossy(&bytes).into_owned()
+    })
 }
 
 fn bracket(ip: IpAddr) -> String {

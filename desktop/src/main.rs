@@ -105,6 +105,8 @@ struct Link {
     /// 主窗口现在看的是这台服务器。没有就是本机。
     target: Option<SshTarget>,
     attempt: Option<Attempt>,
+    /// 正在「测试连接」的那一次。
+    probe: Option<(u64, TunnelStop)>,
     attempts: u64,
     failed: Option<Failure>,
 }
@@ -127,6 +129,9 @@ impl Shell {
     fn stop_server(&self) {
         let (attempt, tunnel) = {
             let mut link = self.link.lock().unwrap();
+            if let Some((_, probe)) = link.probe.take() {
+                probe.close();
+            }
             (link.attempt.take(), link.tunnel.take())
         };
         if let Some(attempt) = attempt {
@@ -617,7 +622,25 @@ async fn test_server(
     let handle = window.app_handle().clone();
     let target = handle.state::<Shell>().target(&host, port, key)?;
     tauri::async_runtime::spawn_blocking(move || {
-        let opened = Tunnel::open(&target, None, &TunnelStop::default());
+        let shell = handle.state::<Shell>();
+        let stop = TunnelStop::default();
+        let (id, replaced) = {
+            let mut link = shell.link.lock().unwrap();
+            link.attempts += 1;
+            let id = link.attempts;
+            (id, link.probe.replace((id, stop.clone())))
+        };
+        if let Some((_, replaced)) = replaced {
+            replaced.close();
+        }
+        let opened = Tunnel::open(&target, None, &stop);
+        let mut link = shell.link.lock().unwrap();
+        if link.probe.as_ref().map(|(probe, _)| *probe) != Some(id) {
+            return Err(
+                json!({ "server": target.to_string(), "reason": "已取消测试", "cancelled": true }),
+            );
+        }
+        link.probe = None;
         let failure = match opened {
             Ok(tunnel) => {
                 tunnel.close();
@@ -625,7 +648,8 @@ async fn test_server(
             }
             Err(error) => Some(Failure::of(&target, &error)),
         };
-        handle.state::<Shell>().link.lock().unwrap().failed = failure.clone();
+        link.failed = failure.clone();
+        drop(link);
         notify(&handle);
         failure.map_or(Ok(()), |failure| Err(failure.json()))
     })
@@ -666,14 +690,22 @@ async fn install_key(window: WebviewWindow, server: String, password: String) ->
     .map_err(|error| error.to_string())?
 }
 
-/// 不连了：还在连的那一次作废。
+/// 不连了、不测了：还在连、还在测的那一次作废。
 #[tauri::command]
 fn cancel_connect(window: WebviewWindow) -> Result<(), String> {
     from_local(&window)?;
-    let attempt = window.state::<Shell>().link.lock().unwrap().attempt.take();
-    if let Some(attempt) = attempt {
+    let shell = window.state::<Shell>();
+    let stops: Vec<TunnelStop> = {
+        let mut link = shell.link.lock().unwrap();
+        let attempt = link.attempt.take().map(|attempt| attempt.stop);
+        attempt
+            .into_iter()
+            .chain(link.probe.take().map(|(_, stop)| stop))
+            .collect()
+    };
+    if !stops.is_empty() {
         // 杀 ssh 要等它退出，别占着调命令的线程。
-        std::thread::spawn(move || attempt.stop.close());
+        std::thread::spawn(move || stops.iter().for_each(TunnelStop::close));
     }
     notify(window.app_handle());
     Ok(())
