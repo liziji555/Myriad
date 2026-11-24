@@ -270,9 +270,11 @@ impl SshTarget {
 }
 
 /// 在服务器上从标准输入读一行公钥，没有就加进 authorized_keys。用 `sh -c`，登录 shell 是 fish 之类的也能跑。
-const INSTALL_KEY: &str = "sh -c 'umask 077; read -r key || exit 1; \
+/// 有没有只看类型和公钥本身：同一把钥匙备注不一样（或者没带备注）不再加一遍。
+const INSTALL_KEY: &str = "sh -c 'umask 077; read -r kind blob note || exit 1; \
+[ -n \"$blob\" ] || exit 1; key=\"$kind $blob${note:+ $note}\"; \
 mkdir -p ~/.ssh && touch ~/.ssh/authorized_keys || exit 1; \
-grep -qxF \"$key\" ~/.ssh/authorized_keys && exit 0; \
+grep -qF \"$kind $blob\" ~/.ssh/authorized_keys && exit 0; \
 if [ -s ~/.ssh/authorized_keys ] && [ -n \"$(tail -c 1 ~/.ssh/authorized_keys)\" ]; then echo >> ~/.ssh/authorized_keys; fi; \
 printf \"%s\\n\" \"$key\" >> ~/.ssh/authorized_keys'";
 
@@ -943,6 +945,17 @@ mod tests {
             std::fs::read_to_string(&keys).unwrap(),
             "ssh-rsa BBBB old\nssh-ed25519 AAAA one\n"
         );
+        // 同一把钥匙，备注没带或者不一样：不再加一遍。
+        install("ssh-ed25519 AAAA");
+        install("ssh-ed25519 AAAA it's \"mine\"");
+        assert_eq!(
+            std::fs::read_to_string(&keys).unwrap(),
+            "ssh-rsa BBBB old\nssh-ed25519 AAAA one\n"
+        );
+        install("ssh-ed25519 CCCC");
+        assert!(std::fs::read_to_string(&keys)
+            .unwrap()
+            .ends_with("one\nssh-ed25519 CCCC\n"));
     }
 
     #[test]
