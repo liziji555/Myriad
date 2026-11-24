@@ -50,7 +50,8 @@ function useShares(): Share[] {
 /** 选择框里一个共享目录的样子。 */
 export function shareLabel(share: Share): string {
   const state = share.online ? "在线" : "没连着";
-  return `${share.name}（${state}${share.read_only ? "，只读" : ""}）`;
+  const mode = share.read_only ? "，只读" : share.shell ? "，能执行命令" : "";
+  return `${share.name}（${state}${mode}）`;
 }
 
 /** 没点名的话怎么接。点了名的总是只给被点到的。 */
@@ -244,7 +245,9 @@ export function MembersPanel({ room, members, bots, team }: Props) {
       </div>
       <p className="sa-panel-note">
         {room.share
-          ? `Bot 看、搜、改的是共享目录「${room.share}」里的文件，在那台电脑上执行；那台电脑没连着时会等它连上。这里还不能执行命令、开任务，也不能用 harness。`
+          ? shares.find((share) => share.name === room.share)?.shell
+            ? `Bot 看、搜、改的是共享目录「${room.share}」里的文件，执行命令也在那台电脑上，每条都要你批准；那台电脑没连着时会等它连上。这里还不能开任务，也不能用 harness。`
+            : `Bot 看、搜、改的是共享目录「${room.share}」里的文件，在那台电脑上执行；那台电脑没连着时会等它连上。那边运行 sa share 时加了 --commands 才能执行命令；这里还不能开任务，也不能用 harness。`
           : "在别的电脑上运行 sa share 目录 --server 这台服务器，就能把那边的目录共享过来，在这里选它。"}
       </p>
 

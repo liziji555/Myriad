@@ -340,7 +340,7 @@ pub struct ImportReport {
     pub room: Option<crate::Room>,
 }
 
-/// `sa share` 来服务这里取下一件要在共享目录里做的事。来取就说明上一件已经交回了。
+/// `sa share` 来服务这里取下一件要在共享目录里做的事。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SharePoll {
     pub name: String,
@@ -349,9 +349,15 @@ pub struct SharePoll {
     /// 目录在那台电脑上的位置，给人看的。
     pub root: String,
     pub read_only: bool,
+    /// 这边允许执行命令时用哪种命令行（`bash`、`PowerShell`）。没有就是不让执行命令。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell: Option<String>,
+    /// 交出去了、这边还在做的活。不在这里面又没交回的，就是丢了。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub running: Vec<u64>,
 }
 
-/// 交给 `sa share` 去做的一件事：在共享目录里调用一个文件工具。
+/// 交给 `sa share` 去做的一件事：在共享目录里调用一个工具，或者停下还在做的那件。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ShareCall {
     pub id: u64,

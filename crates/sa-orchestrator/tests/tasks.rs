@@ -596,6 +596,7 @@ async fn allowing_all_commands_covers_that_task_only_and_not_pushing() {
     let first = rig.next_card(MessageKind::Run, &[]).await;
     assert!(first.reason.contains("echo one"), "{}", first.reason);
     assert!(first.can_allow_task);
+    assert!(first.can_allow_always);
     assert!(rig.orchestrator.decide(&first.id, ApprovalDecision::Task));
 
     // 第二条不问了；往外推送的那条不在「都允许」里面，照样问，卡上也不再有这个选项。

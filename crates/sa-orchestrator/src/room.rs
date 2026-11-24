@@ -857,7 +857,7 @@ async fn turn(
                     others,
                     &skills.prompt,
                 ) + &crate::lead_rules(bot, others, lead.as_ref())
-                    + read_only_rules(shared, share.as_deref()),
+                    + &share_rules(shared, share.as_deref()),
                 max_steps: shared.settings.max_steps,
                 max_tokens: None,
                 thinking: model.thinking,
@@ -997,26 +997,37 @@ fn workspace(shared: &Shared, share: Option<&str>) -> String {
     let Some(name) = share else {
         return shared.settings.fence.root_display();
     };
-    let root = shared
+    let known = shared
         .shares
         .list()
         .into_iter()
-        .find(|known| known.name == name)
+        .find(|known| known.name == name);
+    let root = known
+        .as_ref()
         .map(|known| format!("，在那边是 {}", known.root))
         .unwrap_or_default();
+    let commands = match known.and_then(|known| known.shell) {
+        Some(shell) => format!("命令也在那台电脑的这个目录里用 {shell} 执行，每条都要人批准"),
+        None => "这里不能执行命令".into(),
+    };
     format!(
-        "共享目录「{name}」（在另一台电脑上{root}）。文件工具看到和改的都是那台电脑上的文件；那台电脑没连着时，工具会等它连上。这里还不能执行命令"
+        "共享目录「{name}」（在另一台电脑上{root}）。文件工具看到和改的都是那台电脑上的文件；那台电脑没连着时，工具会等它连上。{commands}，也不能开任务"
     )
 }
 
-/// 共享目录是只读的：单独接在提示词后面，自定义提示词里没写 `{workspace}` 也看得到。
-fn read_only_rules(shared: &Shared, share: Option<&str>) -> &'static str {
-    match share {
-        Some(name) if shared.shares.read_only(name) => {
-            "\n这个房间用的共享目录是只读的：只能看和搜，没有改文件、新建文件的工具；要改文件时直接说改不了，不要说已经改了。\n"
-        }
-        _ => "",
+/// 共享目录只读、不能执行命令时的说明：单独接在提示词后面，自定义提示词里没写 `{workspace}` 也看得到。
+fn share_rules(shared: &Shared, share: Option<&str>) -> String {
+    let Some(name) = share else {
+        return String::new();
+    };
+    let mut rules = String::new();
+    if shared.shares.read_only(name) {
+        rules.push_str("\n这个房间用的共享目录是只读的：只能看和搜，没有改文件、新建文件的工具；要改文件时直接说改不了，不要说已经改了。\n");
     }
+    if shared.shares.shell(name).is_none() {
+        rules.push_str("\n这个房间用的共享目录不能执行命令：没有执行命令的工具；要执行命令时直接说执行不了，不要假装执行过，也不要编造输出。\n");
+    }
+    rules
 }
 
 /// harness Bot 的一轮：在它自己的工位目录里启动它，把这一轮的话交给它。
@@ -1756,6 +1767,7 @@ impl Observer for RoomObserver {
             reason: request.reason.to_string(),
             expires_at: sa_engine::now_ms() + timeout.as_millis() as i64,
             can_allow_task,
+            can_allow_always: key.is_some(),
         };
         self.update_step(request.call_id, |step| {
             step.state = StepState::Waiting;
@@ -1783,7 +1795,9 @@ impl Observer for RoomObserver {
         let (decision, verdict) = tokio::select! {
             answer = answer => match answer {
                 Ok(ApprovalDecision::Once) => (ApprovalDecision::Once, ("approval.allowed", "允许一次")),
-                Ok(ApprovalDecision::Always) => (ApprovalDecision::Always, ("approval.allowed_always", "总是允许")),
+                Ok(ApprovalDecision::Always) if key.is_some() => (ApprovalDecision::Always, ("approval.allowed_always", "总是允许")),
+                // 记不成许可的操作（比如共享目录里的）：只算允许这一次。
+                Ok(ApprovalDecision::Always) => (ApprovalDecision::Once, ("approval.allowed", "允许一次")),
                 // 这张卡上没有这个选项（不是任务里的命令，或者已经选过）：只算允许这一次。
                 Ok(ApprovalDecision::Task) if can_allow_task => (ApprovalDecision::Task, ("approval.allowed_task", "这个任务里的命令都允许")),
                 Ok(ApprovalDecision::Task) => (ApprovalDecision::Once, ("approval.allowed", "允许一次")),

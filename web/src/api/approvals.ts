@@ -17,11 +17,10 @@ const CHOICES: ApprovalChoice[] = [
   { decision: "deny", label: "拒绝", hint: "不执行，Bot 会被告知" },
 ];
 
-/** 这张审批卡上有哪几个按钮。只有命令和写文件能记住「总是允许」；「这个任务里的命令都允许」由服务端说了算。 */
-export function approvalChoices(tool: string, approval: StepApproval): ApprovalChoice[] {
-  const canRemember = ["shell", "write", "edit"].includes(tool);
+/** 这张审批卡上有哪几个按钮。「总是允许」和「这个任务里的命令都允许」由服务端说了算。 */
+export function approvalChoices(approval: StepApproval): ApprovalChoice[] {
   return CHOICES.filter(({ decision }) => {
-    if (decision === "always") return canRemember;
+    if (decision === "always") return approval.can_allow_always;
     if (decision === "task") return approval.can_allow_task;
     return true;
   });

@@ -263,7 +263,7 @@ pub(crate) async fn wait<F: Future<Output = ()>>(
                     "  需要你批准：{}",
                     crate::chat::printable(&approval.reason)
                 )?;
-                write!(out, "{}", decision_prompt(approval.can_allow_task))?;
+                write!(out, "{}", decision_prompt(approval))?;
                 out.flush()?;
                 let left = (approval.expires_at - sa_engine::now_ms()).max(0) as u64;
                 let decision = tokio::select! {
@@ -272,7 +272,7 @@ pub(crate) async fn wait<F: Future<Output = ()>>(
                         if answer.is_none() {
                             writeln!(out)?;
                         }
-                        parse_decision(answer.as_deref(), approval.can_allow_task)
+                        parse_decision(answer.as_deref(), approval)
                     }
                     _ = &mut interrupt => {
                         interrupted = true;

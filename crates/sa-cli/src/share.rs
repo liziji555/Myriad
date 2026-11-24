@@ -1,19 +1,22 @@
 //! `sa share`：把这台电脑上的一个目录共享给 Myriad 服务（比如云端服务器）。
 //!
 //! 服务那边的 Bot 要看、要搜、要改这个目录里的文件时，这边来取活、在本机执行、把结果交回去。
-//! 文件不会整个上传，传的只有每次要看的内容和要写的改动。只开放这一个目录，目录外面的碰不到。
+//! 文件不会整个上传，传的只有每次要看的内容和要写的改动。文件工具只开放这一个目录，目录外面的碰不到。
+//! 加了 `--commands` 的话，Bot 还能在这个目录里执行命令（每条都要在房间里批准），点停止会连同它启动的进程一起结束。
 //! 连服务器走 SSH 隧道（和 `sa connect` 一样），断了自动重连；那边要用这个目录的步骤会等这边连回来。
 
 use crate::paths::DataDir;
 use crate::remote::{self, RemoteService, SshTarget, Tunnel, TunnelStop, RETRY_FIRST, RETRY_MAX};
 use anyhow::{bail, Context, Result};
 use reqwest::StatusCode;
-use sa_orchestrator::shares::{share_name, READ_ONLY_TOOLS};
+use sa_orchestrator::shares::{share_name, READ_ONLY_TOOLS, STOP};
 use sa_protocol::{ShareCall, SharePoll, ShareReply};
-use sa_tools::{Fence, ToolCtx, ToolRegistry};
+use sa_tools::{local_shell, Fence, ToolCtx, ToolRegistry};
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 
 /// 一次取活最多等这么久（服务那边 25 秒没活就回空）。
 const POLL_TIMEOUT: Duration = Duration::from_secs(40);
@@ -31,6 +34,10 @@ pub struct ShareArgs {
     /// 只能看和搜，不能改
     #[arg(long)]
     read_only: bool,
+    /// 也让 Bot 在这个目录里执行命令（编译、测试这类），每条都要在房间里批准。
+    /// 命令和你在终端里跑的一样，不只碰得到这个目录
+    #[arg(long, conflicts_with = "read_only")]
+    commands: bool,
     /// 共享给哪台服务器：SSH 地址（`用户@主机` 或 ~/.ssh/config 里的 Host 名）。不写就共享给这台电脑上的服务
     /// 给了它就不看 --url / SA_SHARE_URL
     #[arg(long)]
@@ -87,7 +94,15 @@ pub fn run(data_dir: &DataDir, args: ShareArgs) -> Result<()> {
         }
     };
 
-    let sharer = Sharer::new(fence, name, args.read_only, service)?;
+    // 链接里有服务的令牌：批准执行的命令拿不到它。
+    sa_tools::hide_env_from_commands(["SA_SHARE_URL".to_string()]);
+    let sharer = Arc::new(Sharer::new(
+        fence,
+        name,
+        args.read_only,
+        args.commands,
+        service,
+    )?);
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
@@ -107,21 +122,32 @@ struct Sharer {
     fence: Fence,
     name: String,
     read_only: bool,
+    commands: bool,
     session: String,
     tools: ToolRegistry,
+    /// 正在做的活，人点了停止时用它叫停。
+    running: Mutex<HashMap<u64, CancellationToken>>,
     http: reqwest::Client,
     base: String,
     token: String,
 }
 
 impl Sharer {
-    fn new(fence: Fence, name: String, read_only: bool, service: RemoteService) -> Result<Self> {
+    fn new(
+        fence: Fence,
+        name: String,
+        read_only: bool,
+        commands: bool,
+        service: RemoteService,
+    ) -> Result<Self> {
+        let commands = commands && !read_only;
         let standard = ToolRegistry::standard();
         let mut tools = ToolRegistry::new();
         for tool in standard.iter() {
             let tool_name = tool.name();
             let allowed = READ_ONLY_TOOLS.contains(&tool_name)
-                || (!read_only && matches!(tool_name, "write" | "edit"));
+                || (!read_only && matches!(tool_name, "write" | "edit"))
+                || (commands && tool_name == "shell");
             if allowed {
                 tools.register_shared(tool.clone());
             }
@@ -133,8 +159,10 @@ impl Sharer {
             fence,
             name,
             read_only,
+            commands,
             session: uuid::Uuid::new_v4().simple().to_string(),
             tools,
+            running: Mutex::default(),
             http,
             base: format!("http://{}/api/shares", service.addr),
             token: service.token,
@@ -142,12 +170,29 @@ impl Sharer {
     }
 
     /// 一直取活、做活、交回，直到出了没法继续的错。
-    async fn serve(&self, place: &str) -> Result<()> {
+    async fn serve(self: &Arc<Self>, place: &str) -> Result<()> {
         let mode = if self.read_only {
             "只读"
+        } else if self.commands {
+            "可以改、可以执行命令"
         } else {
             "可以改"
         };
+        // 文件操作按交来的顺序一件件做（两次改同一个文件不能倒过来）；命令另外跑。
+        let (files, mut queued) = tokio::sync::mpsc::unbounded_channel::<(
+            ShareCall,
+            CancellationToken,
+            tokio::sync::oneshot::Sender<()>,
+        )>();
+        let worker = Arc::clone(self);
+        tokio::spawn(async move {
+            while let Some((call, cancel, done)) = queued.recv().await {
+                let id = call.id;
+                worker.handle(call, cancel).await;
+                worker.running.lock().unwrap().remove(&id);
+                let _ = done.send(());
+            }
+        });
         let mut connected = false;
         let mut retry = RETRY_FIRST;
         loop {
@@ -162,8 +207,24 @@ impl Sharer {
                         connected = true;
                     }
                     retry = RETRY_FIRST;
-                    if let Some(call) = call {
-                        self.handle(call).await?;
+                    // 命令可能跑很久，边跑边接着取活（好收到「停下」）；有命令在跑时文件操作也不等，免得耽误叫停。
+                    // 没命令在跑时文件操作做完再取下一件：旧的服务不看 `running`，边做边取会被它当成丢了。
+                    match call {
+                        Some(call) if call.tool == STOP || call.tool == "shell" => self.start(call),
+                        Some(call) => {
+                            let (busy, cancel) = {
+                                let mut running = self.running.lock().unwrap();
+                                let busy = !running.is_empty();
+                                let cancel = CancellationToken::new();
+                                running.insert(call.id, cancel.clone());
+                                (busy, cancel)
+                            };
+                            let (done, finished) = tokio::sync::oneshot::channel();
+                            if files.send((call, cancel, done)).is_ok() && !busy {
+                                let _ = finished.await;
+                            }
+                        }
+                        None => {}
                     }
                 }
                 Err(Poll::Taken(reason)) => bail!("{reason}"),
@@ -187,6 +248,8 @@ impl Sharer {
             session: self.session.clone(),
             root: self.fence.root_display(),
             read_only: self.read_only,
+            shell: self.commands.then(|| local_shell().to_string()),
+            running: self.running.lock().unwrap().keys().copied().collect(),
         };
         let response = self
             .http
@@ -213,9 +276,27 @@ impl Sharer {
         }
     }
 
+    /// 开始执行一条命令（不等它跑完，接着去取下一件），或者叫停正在跑的那条。
+    fn start(self: &Arc<Self>, call: ShareCall) {
+        if call.tool == STOP {
+            if let Some(cancel) = self.running.lock().unwrap().get(&call.id) {
+                cancel.cancel();
+            }
+            return;
+        }
+        let cancel = CancellationToken::new();
+        self.running.lock().unwrap().insert(call.id, cancel.clone());
+        let this = Arc::clone(self);
+        tokio::spawn(async move {
+            let id = call.id;
+            this.handle(call, cancel).await;
+            this.running.lock().unwrap().remove(&id);
+        });
+    }
+
     /// 做一件活，把结果交回去。交不回去就重试几次；还不行就算了，服务那边会当它丢了。
-    async fn handle(&self, call: ShareCall) -> Result<()> {
-        let (ok, text) = match self.run_tool(&call).await {
+    async fn handle(&self, call: ShareCall, cancel: CancellationToken) {
+        let (ok, text) = match self.run_tool(&call, cancel).await {
             Ok(text) => (true, text),
             Err(text) => (false, text),
         };
@@ -237,11 +318,11 @@ impl Sharer {
                 .send()
                 .await;
             match sent {
-                Ok(response) if response.status().is_success() => return Ok(()),
+                Ok(response) if response.status().is_success() => return,
                 Ok(response) if response.status() == StatusCode::CONFLICT => {
                     // 交晚了（被别的顶替了）：结果没人要了。还能不能接着共享看下一次取活。
                     eprintln!("结果没交上：{}", error_text(response).await);
-                    return Ok(());
+                    return;
                 }
                 Ok(response) => eprintln!("交结果时服务回了 {}，重试……", response.status()),
                 Err(error) => eprintln!("交结果失败（{error}），重试……"),
@@ -249,10 +330,17 @@ impl Sharer {
             tokio::time::sleep(retry).await;
             retry = (retry * 2).min(RETRY_MAX);
         }
-        Ok(())
     }
 
-    async fn run_tool(&self, call: &ShareCall) -> Result<String, String> {
+    async fn run_tool(
+        &self,
+        call: &ShareCall,
+        cancel: CancellationToken,
+    ) -> Result<String, String> {
+        // 排着队时就被叫停了：不做了。
+        if cancel.is_cancelled() {
+            return Err("已停止，没有执行。".into());
+        }
         let Some(tool) = self.tools.get(&call.tool) else {
             return Err(if self.read_only {
                 format!("这个共享目录是只读的，不能用 {}。", call.tool)
@@ -264,7 +352,8 @@ impl Sharer {
         let input = call.input.clone();
         let title = tool.title(&input);
         // 本机的工具在目录外面会先问人再写；这边没人可问，目录外面的一律不写。
-        if !tool.is_read_only(&input) {
+        // 命令在服务那边已经一条条问过人了，在这个目录里执行。
+        if tool.name() != "shell" && !tool.is_read_only(&input) {
             let path = input["path"].as_str().unwrap_or_default();
             match self.fence.resolve_for_write(path) {
                 Ok((_, true)) => {}
@@ -275,9 +364,9 @@ impl Sharer {
             }
         }
         println!("{title}");
-        tool.call(input, &ToolCtx::new(self.fence.clone()))
-            .await
-            .map_err(|error| error.0)
+        let mut ctx = ToolCtx::new(self.fence.clone());
+        ctx.cancel = cancel;
+        tool.call(input, &ctx).await.map_err(|error| error.0)
     }
 }
 

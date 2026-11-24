@@ -32,6 +32,24 @@ pub fn hidden_env() -> Vec<String> {
     HIDDEN_ENV.read().unwrap().clone()
 }
 
+/// 这台电脑上执行命令用的命令行。
+pub fn local_shell() -> &'static str {
+    if cfg!(windows) {
+        "PowerShell"
+    } else {
+        "bash"
+    }
+}
+
+/// 执行命令工具的说明。`shell` 是执行命令的那台电脑上的命令行。
+pub fn description(shell: &str) -> String {
+    format!(
+        "在工作目录里用 {shell} 执行一条命令，返回退出码和输出（标准输出和错误输出合在一起），退出码不是 0 时按失败返回。\
+         默认最多跑 {DEFAULT_TIMEOUT_SECS} 秒，可以用 timeout_secs 调整，上限 {MAX_TIMEOUT_SECS} 秒。\
+         每条命令都要用户批准后才执行。不要用它读文件或搜索，那些有专门的工具。"
+    )
+}
+
 #[derive(Deserialize)]
 struct Input {
     command: String,
@@ -45,12 +63,7 @@ impl Tool for ShellTool {
     }
 
     fn description(&self) -> String {
-        let shell = if cfg!(windows) { "PowerShell" } else { "bash" };
-        format!(
-            "在工作目录里用 {shell} 执行一条命令，返回退出码和输出（标准输出和错误输出合在一起），退出码不是 0 时按失败返回。\
-             默认最多跑 {DEFAULT_TIMEOUT_SECS} 秒，可以用 timeout_secs 调整，上限 {MAX_TIMEOUT_SECS} 秒。\
-             每条命令都要用户批准后才执行。不要用它读文件或搜索，那些有专门的工具。"
-        )
+        description(local_shell())
     }
 
     fn input_schema(&self) -> Value {
