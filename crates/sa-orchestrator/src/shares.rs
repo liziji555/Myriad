@@ -24,6 +24,12 @@ pub const READ_ONLY_TOOLS: [&str; 4] = ["read", "list_dir", "glob", "grep"];
 /// 这么久没来取活，就算那台电脑断开了。
 const ONLINE_GRACE: Duration = Duration::from_secs(40);
 const TAKEN: &str = "这个共享已经被另一个 sa share 接手了";
+/// 交出去的「停下」过了这么久那边还说在跑，就再交一次（上一次可能半路丢了）。
+const STOP_RESEND: Duration = if cfg!(test) {
+    Duration::from_millis(200)
+} else {
+    Duration::from_secs(5)
+};
 
 #[derive(Default)]
 pub struct Shares {
@@ -48,6 +54,8 @@ struct Entry {
     shell: Option<String>,
     /// 已经交出去、人又点了停止的活，等着告诉那边停下。
     stops: VecDeque<u64>,
+    /// 已经叫过停、那边还说在跑的活：上次叫停是什么时候。
+    stopping: HashMap<u64, Instant>,
     /// 正挂着等活的请求有几个。
     polling: usize,
     last_seen: Option<Instant>,
@@ -59,6 +67,27 @@ struct Entry {
 }
 
 impl Entry {
+    /// 叫那边停下一件交出去了的活。
+    fn stop(&mut self, id: u64) {
+        if !self.stops.contains(&id) {
+            self.stops.push_back(id);
+        }
+    }
+
+    /// 叫过停的活那边不跑了就不管了；还在跑、又过了一阵的，再叫一次。
+    fn resend_stops(&mut self, running: &[u64]) {
+        self.stopping.retain(|id, _| running.contains(id));
+        let due: Vec<u64> = self
+            .stopping
+            .iter()
+            .filter(|(_, at)| at.elapsed() >= STOP_RESEND)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in due {
+            self.stop(id);
+        }
+    }
+
     fn online(&self) -> bool {
         self.polling > 0 || self.last_seen.is_some_and(|at| at.elapsed() < ONLINE_GRACE)
     }
@@ -170,6 +199,7 @@ impl Shares {
                 }
                 entry.polling = 0;
                 entry.stops.clear();
+                entry.stopping.clear();
                 if !entry.root.is_empty() && entry.root != hello.root {
                     // 同一个名字换成了另一个目录：之前要做的（尤其批准过的改动）是冲着原来那个目录的。
                     entry.queue.clear();
@@ -187,6 +217,7 @@ impl Shares {
             entry.shell = hello.shell.filter(|_| !hello.read_only);
             entry.last_seen = Some(Instant::now());
             entry.requeue_lost(&hello.running);
+            entry.resend_stops(&hello.running);
             // 共享改成只读、或者不让执行命令了：还在排队的那些不再交出去。
             let refused: Vec<(u64, &str)> = entry
                 .calls
@@ -234,6 +265,7 @@ impl Shares {
                     return Err(TAKEN.into());
                 }
                 if let Some(id) = entry.stops.pop_front() {
+                    entry.stopping.insert(id, Instant::now());
                     return Ok(Some(ShareCall {
                         id,
                         tool: STOP.into(),
@@ -292,6 +324,9 @@ impl Shares {
         let (reply, answer) = oneshot::channel();
         let id = {
             let mut state = self.state.lock().unwrap();
+            if state.next_id == 0 {
+                state.next_id = first_id();
+            }
             state.next_id += 1;
             let id = state.next_id;
             let entry = state.shares.entry(name.to_string()).or_default();
@@ -345,6 +380,14 @@ impl Shares {
     }
 }
 
+/// 服务重启后从这里开始编号：那边可能还在跑重启前交出去的命令，编号不能撞上。
+fn first_id() -> u64 {
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_millis() as u64);
+    ms << 10
+}
+
 /// 停止后还交出去了的改动，等它多久的结果。
 const STOPPED_WRITE_WAIT: Duration = Duration::from_secs(10);
 
@@ -374,10 +417,8 @@ impl Pending<'_> {
     fn stop(&self) {
         let mut state = self.shares.state.lock().unwrap();
         if let Some(entry) = state.shares.get_mut(self.name) {
-            if entry.calls.get(&self.id).is_some_and(|call| call.sent)
-                && !entry.stops.contains(&self.id)
-            {
-                entry.stops.push_back(self.id);
+            if entry.calls.get(&self.id).is_some_and(|call| call.sent) {
+                entry.stop(self.id);
             }
         }
         drop(state);
@@ -386,14 +427,18 @@ impl Pending<'_> {
 }
 
 impl Drop for Pending<'_> {
-    /// 停止时调用方可能直接丢下这次调用：交出去了还没交回的，叫那边停下。
+    /// 停止时调用方可能直接丢下这次调用：没交出去的撤回，交出去了还没交回的叫那边停下。
+    /// 两件事在同一把锁里做：中间不能被取活的拿走。
     fn drop(&mut self) {
-        self.stop();
         let mut state = self.shares.state.lock().unwrap();
         if let Some(entry) = state.shares.get_mut(self.name) {
             entry.queue.retain(|queued| *queued != self.id);
-            entry.calls.remove(&self.id);
+            if entry.calls.remove(&self.id).is_some_and(|call| call.sent) {
+                entry.stop(self.id);
+            }
         }
+        drop(state);
+        self.shares.wake.notify_waiters();
     }
 }
 
@@ -673,8 +718,30 @@ mod tests {
         // 调用方直接丢下了这次调用（点了停止）：下一次取活拿到的是「停下」。
         calling.abort();
         let _ = calling.await;
-        let stop = shares.poll(busy, NOW).await.unwrap().expect("应该叫停");
+        let stop = shares
+            .poll(busy.clone(), NOW)
+            .await
+            .unwrap()
+            .expect("应该叫停");
         assert_eq!((stop.tool.as_str(), stop.id), (STOP, call.id));
+        // 「停下」半路丢了，那边还说在跑：过一阵再叫一次，不会每次都叫。
+        assert_eq!(shares.poll(busy.clone(), NOW).await.unwrap(), None);
+        tokio::time::sleep(STOP_RESEND).await;
+        let again = shares
+            .poll(busy.clone(), NOW)
+            .await
+            .unwrap()
+            .expect("再叫停");
+        assert_eq!((again.tool.as_str(), again.id), (STOP, call.id));
+        // 那边不跑了：不再叫。
+        busy.running.clear();
+        tokio::time::sleep(STOP_RESEND).await;
+        assert_eq!(shares.poll(busy, NOW).await.unwrap(), None);
+    }
+
+    #[test]
+    fn call_ids_do_not_restart_from_one_after_a_restart() {
+        assert!(first_id() > 1 << 40);
     }
 
     #[tokio::test]
