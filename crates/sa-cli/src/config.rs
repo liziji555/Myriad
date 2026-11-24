@@ -320,22 +320,14 @@ impl Config {
                 bail!("[mcp.{name}] 的 url 要是一个 http(s) 地址");
             }
             // 没加密的线路上，令牌谁都看得到：只有本机的服务可以这样连。
-            let local_host = |rest: &str| {
-                let host = rest.split(['/', '?', '#']).next().unwrap_or("");
-                let host = host.rsplit('@').next().unwrap_or("");
-                ["localhost", "127.0.0.1", "[::1]"].iter().any(|own| {
-                    host == *own
-                        || host
-                            .strip_prefix(own)
-                            .is_some_and(|port| port.starts_with(':'))
-                })
+            let local_host = || {
+                let url = reqwest::Url::parse(url).ok()?;
+                let host = url.host_str()?.trim_matches(['[', ']']);
+                let ip = host.parse::<std::net::IpAddr>();
+                Some(host.eq_ignore_ascii_case("localhost") || ip.is_ok_and(|ip| ip.is_loopback()))
             };
             let secret = !server.headers.is_empty() || server.token_env.is_some();
-            if secret
-                && url
-                    .strip_prefix("http://")
-                    .is_some_and(|rest| !local_host(rest))
-            {
+            if secret && url.starts_with("http://") && local_host() != Some(true) {
                 bail!("[mcp.{name}] 带着 headers 或 token_env 时 url 要用 https（本机的服务除外）");
             }
         }
