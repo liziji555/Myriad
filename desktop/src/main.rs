@@ -698,7 +698,10 @@ fn cancel_connect(window: WebviewWindow) -> Result<(), String> {
     let stops: Vec<TunnelStop> = {
         let mut link = shell.link.lock().unwrap();
         let attempt = link.attempt.take().map(|attempt| attempt.stop);
-        attempt.into_iter().chain(link.probe.take().map(|(_, stop)| stop)).collect()
+        attempt
+            .into_iter()
+            .chain(link.probe.take().map(|(_, stop)| stop))
+            .collect()
     };
     if !stops.is_empty() {
         // 杀 ssh 要等它退出，别占着调命令的线程。
