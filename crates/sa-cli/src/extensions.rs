@@ -78,11 +78,14 @@ pub fn mcp(data_dir: &DataDir, command: McpCommand) -> Result<ExitCode> {
             }
             for (name, server) in &config.mcp {
                 let state = if server.enabled { "启用" } else { "停用" };
-                let command = [server.command.clone()]
-                    .into_iter()
-                    .chain(server.args.iter().cloned())
-                    .collect::<Vec<_>>()
-                    .join(" ");
+                let command = match &server.url {
+                    Some(url) => url.clone(),
+                    None => [server.command.clone()]
+                        .into_iter()
+                        .chain(server.args.iter().cloned())
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                };
                 writeln!(out, "[{state}]  {name}  {command}")?;
             }
             Ok(ExitCode::SUCCESS)
@@ -106,7 +109,7 @@ pub fn mcp(data_dir: &DataDir, command: McpCommand) -> Result<ExitCode> {
             let mut failed = false;
             for spec in specs {
                 let name = spec.name.clone();
-                let server = McpServer::spawned(spec);
+                let server = McpServer::new(spec);
                 match runtime.block_on(server.connect()) {
                     Ok(tools) => {
                         writeln!(out, "✓ {name}：连上了，{} 个工具", tools.len())?;

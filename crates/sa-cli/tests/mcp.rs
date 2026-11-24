@@ -13,14 +13,13 @@ fn demo(env: Vec<(String, String)>) -> McpSpec {
         command: SA.into(),
         args: vec!["mcp".into(), "demo-server".into()],
         env,
-        cwd: None,
-        auto_approve: vec![],
+        ..McpSpec::default()
     }
 }
 
 #[tokio::test]
 async fn a_spawned_server_is_listed_called_and_started_again_after_it_exits() {
-    let server = McpServer::spawned(demo(vec![]));
+    let server = McpServer::new(demo(vec![]));
     let tools = server.connect().await.unwrap();
     let names: Vec<&str> = tools.iter().map(|tool| tool.name.as_str()).collect();
     assert_eq!(names, ["echo", "add", "fail", "wait", "quit"]);

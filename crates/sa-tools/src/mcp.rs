@@ -1,10 +1,13 @@
 //! MCP 客户端：把外部 MCP 服务提供的工具接进来。
 //!
-//! 只支持通过标准输入输出连接本机启动的服务：一行一条 JSON-RPC 消息。
+//! 两种连法：本机启动一个进程，通过标准输入输出说话（一行一条 JSON-RPC 消息）；
+//! 或者通过网址连一个远程的服务（见 [`http`]）。
 //! 只用到「工具」这一部分（`tools/list`、`tools/call`）；服务提供的资源、提示词模板不管。
 //!
-//! 用法：[`McpServer::spawned`] 建一个服务，[`McpServer::connect`] 连上并拿到工具清单，
+//! 用法：[`McpServer::new`] 建一个服务，[`McpServer::connect`] 连上并拿到工具清单，
 //! [`McpServer::tools`] 把清单变成可以注册的 [`McpTool`]。连接断了，下一次调用时自动重连一次。
+
+mod http;
 
 use crate::process::Tree;
 use crate::{Permission, Tool, ToolCtx, ToolError, ToolResult};
@@ -41,11 +44,15 @@ const MAX_TOOL_NAME_CHARS: usize = 64;
 /// 服务出错时，把它最后打到标准错误的这么多字带给人看。
 const STDERR_TAIL_BYTES: usize = 2000;
 
-/// 怎么启动一个 MCP 服务。
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// 怎么连一个 MCP 服务：写了 `url` 的通过网址连，没写的在本机启动 `command`。
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct McpSpec {
     /// 服务的名字，工具名里用：`mcp__<名字>__<工具>`。
     pub name: String,
+    /// 远程服务的网址。
+    pub url: Option<String>,
+    /// 连远程服务时每个请求带的请求头（令牌在这里）。
+    pub headers: Vec<(String, String)>,
     pub command: String,
     pub args: Vec<String>,
     /// 给它的环境变量。除了这些和几个基本的（PATH、HOME 之类），别的不传给它。
@@ -450,12 +457,17 @@ pub struct McpServer {
 }
 
 impl McpServer {
-    /// 一个要启动进程的服务。这里还不启动，[`McpServer::connect`] 时才启动。
-    pub fn spawned(spec: McpSpec) -> Self {
+    /// 配置里写的一个服务。这里还不启动、不连，[`McpServer::connect`] 时才动。
+    pub fn new(spec: McpSpec) -> Self {
         let (name, auto_approve) = (spec.name.clone(), spec.auto_approve.clone());
         let dialer: Dialer = Box::new(move || {
             let spec = spec.clone();
-            Box::pin(async move { spawn_pipe(&spec) })
+            Box::pin(async move {
+                match &spec.url {
+                    Some(url) => http::dial(&spec, url),
+                    None => spawn_pipe(&spec),
+                }
+            })
         });
         Self::with_dialer(&name, auto_approve, dialer)
     }
@@ -1135,12 +1147,9 @@ mod tests {
         let spec = McpSpec {
             name: "nope".into(),
             command: "sa-no-such-mcp-server".into(),
-            args: vec![],
-            env: vec![],
-            cwd: None,
-            auto_approve: vec![],
+            ..McpSpec::default()
         };
-        let error = McpServer::spawned(spec).connect().await.unwrap_err();
+        let error = McpServer::new(spec).connect().await.unwrap_err();
         assert!(
             error.0.contains("找不到命令「sa-no-such-mcp-server」"),
             "{error}"
