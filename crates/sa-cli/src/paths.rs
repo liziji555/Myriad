@@ -19,6 +19,12 @@ impl DataDir {
         Ok(Self { root })
     }
 
+    /// 没指定数据目录时，`sa url` 先看这个文件：里面是正在跑的 `sa serve` 用的数据目录。
+    /// 它总在默认的数据目录里，这样不知道服务用了哪个目录也找得到。
+    pub fn serving_note() -> Result<PathBuf> {
+        Ok(Self::resolve(None)?.root.join("serving"))
+    }
+
     pub fn root(&self) -> &Path {
         &self.root
     }

@@ -59,6 +59,96 @@ pub fn url(data_dir: &DataDir, _args: UrlArgs) -> Result<()> {
     Ok(())
 }
 
+/// `sa serve` 起来之后留的一张条子：服务用的不是默认数据目录时，记下是哪个，
+/// 这样服务器上不带 `--data-dir` 的 `sa url`（`sa connect`、桌面版调的就是它）也找得到。
+/// 服务停了、或者换回默认数据目录起来，条子就拿掉。
+pub(crate) struct ServingNote {
+    /// 条子放在哪。找不到默认数据目录就不留。
+    path: Option<PathBuf>,
+    /// 要记下的数据目录。用的就是默认的那个时不用记。
+    root: Option<PathBuf>,
+}
+
+impl ServingNote {
+    /// 用 `--port` 临时换了端口的服务不留：`sa url` 按 config.toml 里的端口找，找不到它。
+    pub(crate) fn of(data_dir: &DataDir, port: Option<u16>) -> Self {
+        let path = match port {
+            None => DataDir::serving_note().ok(),
+            Some(_) => None,
+        };
+        Self::at(path, data_dir)
+    }
+
+    fn at(path: Option<PathBuf>, data_dir: &DataDir) -> Self {
+        let real = |dir: &Path| dir.canonicalize().unwrap_or(dir.to_path_buf());
+        let root = real(data_dir.root());
+        let default = path.as_deref().and_then(Path::parent).map(real);
+        Self {
+            root: (default.as_ref() != Some(&root)).then_some(root),
+            path,
+        }
+    }
+
+    /// 服务开始听了才调：没起来的服务不留条子。
+    pub(crate) fn write(&self) {
+        let Some(path) = &self.path else { return };
+        let done = match &self.root {
+            Some(root) => note_down(path, root),
+            None => match std::fs::remove_file(path) {
+                Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error.into()),
+                _ => Ok(()),
+            },
+        };
+        if let Err(error) = done {
+            tracing::warn!(
+                "没能更新 {}：sa connect 和桌面版会找不到这个服务（{error:#}）",
+                path.display()
+            );
+        }
+    }
+}
+
+impl Drop for ServingNote {
+    /// 服务停了：条子上写的还是自己才拿掉，别动后来起来的那个服务留的。
+    fn drop(&mut self) {
+        let (Some(path), Some(root)) = (&self.path, &self.root) else {
+            return;
+        };
+        if read_note(path).as_deref() == Some(root.as_path()) {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+fn note_down(path: &Path, root: &Path) -> Result<()> {
+    if let Some(dir) = path.parent() {
+        DataDir::resolve(Some(dir.to_path_buf()))?.create()?;
+    }
+    let root = root.to_str().context("数据目录的路径不是 UTF-8")?;
+    Ok(std::fs::write(path, root)?)
+}
+
+fn read_note(path: &Path) -> Option<PathBuf> {
+    let noted = std::fs::read_to_string(path).ok()?;
+    let noted = noted.trim();
+    (!noted.is_empty()).then(|| PathBuf::from(noted))
+}
+
+/// 没指定数据目录时 `sa url` 该看哪个：条子上记着的那个服务还在听就用它，否则用默认的。
+pub(crate) fn served_data_dir() -> Option<PathBuf> {
+    let noted = read_note(&DataDir::serving_note().ok()?)?;
+    let config =
+        Config::load_or_default(&DataDir::resolve(Some(noted.clone())).ok()?.config()).ok()?;
+    let host = match config.server.host {
+        host if host.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST),
+        host => host,
+    };
+    let addr = SocketAddr::new(host, config.server.port);
+    TcpStream::connect_timeout(&addr, Duration::from_secs(1))
+        .is_ok()
+        .then_some(noted)
+}
+
 /// 这台机器上 Myriad 服务的地址和令牌。
 pub(crate) fn local_service(data_dir: &DataDir) -> Result<RemoteService> {
     data_dir
@@ -754,7 +844,7 @@ fn wait_ready(stop: &TunnelStop, local: SocketAddr, token: &str) -> Result<()> {
         match probe(local, token) {
             Probe::Ok => return Ok(()),
             Probe::Unauthorized => bail!(
-                "连上了，但服务器上 Myriad 的令牌和 sa url 给的不一样：服务可能用的是另一个数据目录"
+                "连上了，但服务器上 Myriad 的令牌和 sa url 给的不一样：服务器上可能有两个 Myriad 用着同一个端口，或者服务是旧版、用了别的数据目录（升级后重启它）"
             ),
             Probe::NotYet => {}
         }
@@ -867,6 +957,43 @@ fn hide_console(command: &mut Command) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_service_on_another_data_dir_leaves_a_note_and_takes_it_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let default = dir.path().join("default");
+        let note = default.join("serving");
+        let data = |name: &str| {
+            let root = dir.path().join(name);
+            std::fs::create_dir_all(&root).unwrap();
+            DataDir::resolve(Some(root)).unwrap()
+        };
+
+        // 别的数据目录：默认的那个还没有也建出来，记下是哪个；停了拿掉。
+        let other = ServingNote::at(Some(note.clone()), &data("other"));
+        assert_eq!(read_note(&note), None);
+        other.write();
+        let noted = read_note(&note).unwrap();
+        assert_eq!(noted, dir.path().join("other").canonicalize().unwrap());
+        drop(other);
+        assert!(!note.exists());
+
+        // 后来起来的服务留的条子，先起来的那个停的时候不动。
+        let first = ServingNote::at(Some(note.clone()), &data("first"));
+        first.write();
+        let second = ServingNote::at(Some(note.clone()), &data("second"));
+        second.write();
+        drop(first);
+        assert!(read_note(&note).unwrap().ends_with("second"));
+
+        // 默认数据目录的服务起来：别人留的条子拿掉，自己不留。
+        let own = ServingNote::at(Some(note.clone()), &data("default"));
+        own.write();
+        assert!(!note.exists());
+        drop(second);
+        drop(own);
+        assert!(!note.exists());
+    }
 
     #[test]
     fn targets_that_ssh_would_read_as_options_are_refused() {

@@ -99,7 +99,13 @@ enum Command {
 pub fn run() -> ExitCode {
     answer_askpass();
     let cli = Cli::parse();
-    let result = paths::DataDir::resolve(cli.data_dir).and_then(|data_dir| match cli.command {
+    // 没指定数据目录的 `sa url`：服务用的是别的数据目录时，跟着服务走。
+    let served = match (&cli.data_dir, &cli.command) {
+        (None, Command::Url(_)) => remote::served_data_dir(),
+        _ => None,
+    };
+    let data_dir = cli.data_dir.or(served);
+    let result = paths::DataDir::resolve(data_dir).and_then(|data_dir| match cli.command {
         Command::Serve(args) => serve::run(&data_dir, args).map(|()| ExitCode::SUCCESS),
         Command::Url(args) => remote::url(&data_dir, args).map(|()| ExitCode::SUCCESS),
         Command::Connect(args) => remote::connect(args).map(|()| ExitCode::SUCCESS),

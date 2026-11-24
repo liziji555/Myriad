@@ -24,11 +24,14 @@ pub struct ServeArgs {
 pub fn run(data_dir: &DataDir, args: ServeArgs) -> Result<()> {
     init_logging(tracing::Level::INFO);
     let open = args.open;
+    let note = crate::remote::ServingNote::of(data_dir, args.port);
+    let noted = &note;
     serve_until(
         data_dir,
         &args.run,
         args.port,
         move |url| {
+            noted.write();
             println!("在浏览器里打开：{url}");
             println!("按 Ctrl+C 停止。");
             if open {
