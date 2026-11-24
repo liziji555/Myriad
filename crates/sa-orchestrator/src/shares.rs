@@ -145,6 +145,15 @@ impl Shares {
             if fresh {
                 entry.session = hello.session.clone();
                 entry.polling = 0;
+                if !entry.root.is_empty() && entry.root != hello.root {
+                    // 同一个名字换成了另一个目录：之前要做的（尤其批准过的改动）是冲着原来那个目录的。
+                    entry.queue.clear();
+                    for (_, call) in entry.calls.drain() {
+                        let _ = call.reply.send(Err(format!(
+                            "共享目录「{name}」换成了另一个目录，这一步没有执行。"
+                        )));
+                    }
+                }
             }
             entry.root = hello.root;
             entry.read_only = hello.read_only;
