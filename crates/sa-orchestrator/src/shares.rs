@@ -219,8 +219,9 @@ impl Shares {
     pub fn reply(&self, reply: ShareReply) -> Result<(), String> {
         let name = share_name(&reply.name)?;
         let mut state = self.state.lock().unwrap();
+        // 服务重启过就不认识这个共享了：交回的结果没人等，收下就是。
         let Some(entry) = state.shares.get_mut(&name) else {
-            return Err(TAKEN.into());
+            return Ok(());
         };
         if entry.session != reply.session {
             return Err(TAKEN.into());
@@ -266,24 +267,66 @@ impl Shares {
             id
         };
         self.wake.notify_waiters();
-        tokio::select! {
-            answer = answer => match answer {
-                Ok(result) => result.map_err(ToolError),
-                Err(_) => Err(ToolError::new("共享目录那边没有交回结果。")),
-            },
+        // 停止时调用方可能直接丢下这次调用：不管怎么结束，没交出去的都撤回。
+        let pending = Pending {
+            shares: self,
+            name,
+            id,
+        };
+        tokio::pin!(answer);
+        let answer = tokio::select! {
+            answer = &mut answer => answer,
             _ = cancel.cancelled() => {
-                let mut state = self.state.lock().unwrap();
-                let entry = state.shares.get_mut(name);
-                let sent = entry.and_then(|entry| {
-                    entry.queue.retain(|queued| *queued != id);
-                    entry.calls.remove(&id)
-                }).is_some_and(|call| call.sent);
-                Err(ToolError::new(if sent && writes {
-                    "已停止。这一步已经交给共享目录那台电脑了，可能已经改了，请看一下文件。"
-                } else {
-                    "已停止，没有执行。"
-                }))
+                if !(writes && pending.sent()) {
+                    return Err(ToolError::new("已停止，没有执行。"));
+                }
+                // 改动已经交出去了：等一会儿那边的结果，照实报。
+                match tokio::time::timeout(STOPPED_WRITE_WAIT, &mut answer).await {
+                    Ok(answer) => answer,
+                    Err(_) => {
+                        return Ok(
+                            "已停止。这一步已经交给共享目录那台电脑了，可能已经改了，请看一下文件。"
+                                .into(),
+                        )
+                    }
+                }
             }
+        };
+        match answer {
+            Ok(result) => result.map_err(ToolError),
+            Err(_) => Err(ToolError::new("共享目录那边没有交回结果。")),
+        }
+    }
+}
+
+/// 停止后还交出去了的改动，等它多久的结果。
+const STOPPED_WRITE_WAIT: Duration = Duration::from_secs(10);
+
+/// 一次调用还在等着。丢下时把它从队列里撤掉。
+struct Pending<'a> {
+    shares: &'a Shares,
+    name: &'a str,
+    id: u64,
+}
+
+impl Pending<'_> {
+    /// 已经交给那台电脑了吗。
+    fn sent(&self) -> bool {
+        let state = self.shares.state.lock().unwrap();
+        state
+            .shares
+            .get(self.name)
+            .and_then(|entry| entry.calls.get(&self.id))
+            .is_some_and(|call| call.sent)
+    }
+}
+
+impl Drop for Pending<'_> {
+    fn drop(&mut self) {
+        let mut state = self.shares.state.lock().unwrap();
+        if let Some(entry) = state.shares.get_mut(self.name) {
+            entry.queue.retain(|queued| *queued != self.id);
+            entry.calls.remove(&self.id);
         }
     }
 }
@@ -521,7 +564,77 @@ mod tests {
         tokio::time::sleep(NOW).await;
         cancel.cancel();
         assert_eq!(read.await.unwrap().unwrap_err().0, "已停止，没有执行。");
+        // 调用方直接丢下调用（停止时读文件就是这样）也一样撤回。
+        let dropped = {
+            let shares = shares.clone();
+            tokio::spawn(async move {
+                shares
+                    .call("项目", "read", json!({}), false, &CancellationToken::new())
+                    .await
+            })
+        };
+        tokio::time::sleep(NOW).await;
+        dropped.abort();
+        let _ = dropped.await;
         let _ = shares.poll(hello("s1", false), NOW).await;
         assert_eq!(shares.poll(hello("s1", false), NOW).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn a_stopped_write_reports_what_the_computer_did() {
+        let shares = Arc::new(Shares::default());
+        let cancel = CancellationToken::new();
+        let write = {
+            let (shares, cancel) = (shares.clone(), cancel.clone());
+            tokio::spawn(
+                async move { shares.call("项目", "write", json!({}), true, &cancel).await },
+            )
+        };
+        tokio::time::sleep(NOW).await;
+        let call = next(&shares, "s1").await;
+        cancel.cancel();
+        tokio::time::sleep(NOW).await;
+        let reply = ShareReply {
+            name: "项目".into(),
+            session: "s1".into(),
+            id: call.id,
+            ok: true,
+            text: "写好了".into(),
+        };
+        shares.reply(reply).unwrap();
+        assert_eq!(write.await.unwrap().unwrap(), "写好了");
+    }
+
+    #[tokio::test]
+    async fn pending_calls_are_dropped_when_the_name_moves_to_another_folder() {
+        let shares = Arc::new(Shares::default());
+        let _ = shares.poll(hello("s1", false), NOW).await;
+        let write = {
+            let shares = shares.clone();
+            tokio::spawn(async move {
+                shares
+                    .call("项目", "write", json!({}), true, &CancellationToken::new())
+                    .await
+            })
+        };
+        tokio::time::sleep(NOW).await;
+        let mut moved = hello("s2", false);
+        moved.root = "E:\\别的".into();
+        assert_eq!(shares.poll(moved, NOW).await.unwrap(), None);
+        assert!(write
+            .await
+            .unwrap()
+            .unwrap_err()
+            .0
+            .contains("换成了另一个目录"));
+        // 服务重启后不认识的共享交回来的结果收下就是。
+        let late = ShareReply {
+            name: "别的名字".into(),
+            session: "s9".into(),
+            id: 1,
+            ok: true,
+            text: String::new(),
+        };
+        assert!(shares.reply(late).is_ok());
     }
 }
