@@ -321,13 +321,11 @@ fn local_public_key(identities: &[PathBuf]) -> Result<String> {
     let mut locked = None;
     for private in identities {
         let public = public_path(private);
-        if !private.is_file() || !public.is_file() {
-            continue;
-        }
+        // 私钥只在 agent 里、本机只有 .pub 的也算。
         let Ok(key) = read_public_key(&public) else {
             continue;
         };
-        if unlocked(private) || key_in(&agent, &key) {
+        if key_in(&agent, &key) || private.is_file() && unlocked(private) {
             return Ok(key);
         }
         locked.get_or_insert(private.clone());
@@ -337,7 +335,7 @@ fn local_public_key(identities: &[PathBuf]) -> Result<String> {
         .iter()
         .find(|path| path.file_name().is_some_and(|name| name == "id_ed25519"))
         .or(identities.first())
-        .filter(|path| !path.exists())
+        .filter(|path| !path.exists() && !public_path(path).exists())
         .cloned();
     let Some(private) = private else {
         return Err(match locked {
@@ -918,6 +916,14 @@ mod tests {
         assert_eq!(local_public_key(&[rsa.clone(), ed]).unwrap(), made);
         let error = local_public_key(&[rsa]).unwrap_err().to_string();
         assert!(error.contains("ssh-add"), "{error}");
+        // 只剩 .pub（私钥在 agent 里）的位置不新建，免得把它的公钥盖掉。
+        let agent_only = dir.path().join("agent_only");
+        std::fs::write(public_path(&agent_only), &made).unwrap();
+        assert!(local_public_key(std::slice::from_ref(&agent_only)).is_err());
+        assert_eq!(
+            std::fs::read_to_string(public_path(&agent_only)).unwrap(),
+            made
+        );
         assert!(key_in("ssh-ed25519 AAAA other\n", "ssh-ed25519 AAAA me"));
         assert!(!key_in("ssh-ed25519 BBBB me\n", "ssh-ed25519 AAAA me"));
     }
