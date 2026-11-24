@@ -1,4 +1,4 @@
-import { useState, type FormEvent, type ReactNode } from "react";
+import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { toFailure, toForm, toTarget, type ConnectFailure, type DesktopState, type ServerForm } from "../api/desktop";
 import { Icon } from "./Icon";
 
@@ -42,6 +42,15 @@ export function ConnectPanel({ state, invoke, onClose }: Props) {
     }
     return made;
   };
+
+  // 从菜单打开时焦点还在面板外面：Esc 挂在窗口上才关得掉。
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !event.isComposing) onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
 
   const run = async (kind: Exclude<Busy, null>, command: string, extra: Record<string, unknown> = {}) => {
     const args = target();
@@ -94,7 +103,6 @@ export function ConnectPanel({ state, invoke, onClose }: Props) {
         role="dialog"
         aria-modal="true"
         aria-label="连接"
-        onKeyDown={(event) => event.key === "Escape" && !event.nativeEvent.isComposing && onClose()}
       >
         <header className="sa-connect-head">
           <h2>连接</h2>
