@@ -99,7 +99,13 @@ impl App {
                     config.github.token_env.clone(),
                     config.github.webhook_secret_env.clone(),
                     config.telegram.token_env.clone(),
-                ]),
+                ])
+                .chain(
+                    config
+                        .mcp
+                        .values()
+                        .filter_map(|server| server.token_env.clone()),
+                ),
         );
         let models = models(&config);
         let mut settings = Settings {
