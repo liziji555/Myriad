@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent, type ReactNode } from "react";
+import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { toFailure, toForm, toTarget, type ConnectFailure, type DesktopState, type ServerForm } from "../api/desktop";
 import { Icon } from "./Icon";
 
@@ -23,6 +23,8 @@ export function ConnectPanel({ state, invoke, onClose }: Props) {
   const [failure, setFailure] = useState<ConnectFailure | null>(null);
   const [password, setPassword] = useState("");
   const [note, setNote] = useState<string | null>(null);
+  // 点了「不连了」之后，还没回来的那一次不再算数。
+  const round = useRef(0);
 
   // 这里刚试出来的结果优先；没有就是打开应用时后台自动连的那一次。
   const failed = failure ?? (busy || tested ? null : state.failed);
@@ -55,19 +57,26 @@ export function ConnectPanel({ state, invoke, onClose }: Props) {
   const run = async (kind: Exclude<Busy, null>, command: string, extra: Record<string, unknown> = {}) => {
     const args = target();
     if (!args) return false;
+    const mine = ++round.current;
     setBusy(kind);
     setFailure(null);
     setTested(false);
     try {
       await invoke(command, { ...args, ...extra });
-      return true;
+      return mine === round.current;
     } catch (error) {
       const failure = toFailure(error, args.host);
-      if (!failure.cancelled) setFailure(failure);
+      if (mine === round.current && !failure.cancelled) setFailure(failure);
       return false;
     } finally {
-      setBusy(null);
+      if (mine === round.current) setBusy(null);
     }
+  };
+  // 外壳停 ssh 要等一会儿：面板不等它，马上恢复。
+  const cancel = () => {
+    round.current += 1;
+    setBusy(null);
+    void act("cancel_connect");
   };
 
   const connect = (event: FormEvent) => {
@@ -266,7 +275,7 @@ export function ConnectPanel({ state, invoke, onClose }: Props) {
                 {connecting ? "正在连…" : state.pinned === "server" ? "重新连接" : "保存并连接"}
               </button>
               {connecting && (
-                <button type="button" className="sa-link" onClick={() => void act("cancel_connect")}>
+                <button type="button" className="sa-link" onClick={cancel}>
                   不连了
                 </button>
               )}
