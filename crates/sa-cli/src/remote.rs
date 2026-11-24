@@ -20,8 +20,8 @@ use std::time::{Duration, Instant};
 /// 隧道开好以后最多等服务应答这么久。
 const READY_WAIT: Duration = Duration::from_secs(20);
 /// 断了之后隔多久重连，第一次和最多。
-const RETRY_FIRST: Duration = Duration::from_secs(2);
-const RETRY_MAX: Duration = Duration::from_secs(30);
+pub(crate) const RETRY_FIRST: Duration = Duration::from_secs(2);
+pub(crate) const RETRY_MAX: Duration = Duration::from_secs(30);
 
 /// 在服务器上找 `sa` 时额外看的目录：用 SSH 直接执行命令时，很多系统不读登录脚本，
 /// `cargo install` 装到的 `~/.cargo/bin` 就不在 PATH 里。
@@ -47,6 +47,16 @@ pub struct ConnectArgs {
 
 /// `sa url`：打印这台机器上 Myriad 的连接地址（带令牌）。不占数据目录，服务开着也能用。
 pub fn url(data_dir: &DataDir, _args: UrlArgs) -> Result<()> {
+    let RemoteService { addr, token } = local_service(data_dir)?;
+    println!("http://{addr}/auth?token={token}");
+    if TcpStream::connect_timeout(&addr, Duration::from_secs(1)).is_err() {
+        eprintln!("提示：{addr} 上没有服务在听，先运行 sa serve（或 sa service install）。");
+    }
+    Ok(())
+}
+
+/// 这台机器上 Myriad 服务的地址和令牌。
+pub(crate) fn local_service(data_dir: &DataDir) -> Result<RemoteService> {
     data_dir
         .create()
         .with_context(|| format!("无法创建数据目录 {}", data_dir.root().display()))?;
@@ -56,12 +66,10 @@ pub fn url(data_dir: &DataDir, _args: UrlArgs) -> Result<()> {
         host if host.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST),
         host => host,
     };
-    let addr = SocketAddr::new(host, config.server.port);
-    println!("http://{addr}/auth?token={token}");
-    if TcpStream::connect_timeout(&addr, Duration::from_secs(1)).is_err() {
-        eprintln!("提示：{addr} 上没有服务在听，先运行 sa serve（或 sa service install）。");
-    }
-    Ok(())
+    Ok(RemoteService {
+        addr: SocketAddr::new(host, config.server.port),
+        token,
+    })
 }
 
 /// `sa connect`：开隧道，打印本机地址，一直到 Ctrl+C。
@@ -202,7 +210,7 @@ pub struct RemoteService {
 
 impl RemoteService {
     /// 取输出里最后一个 `http://地址/auth?token=令牌`。
-    fn parse(output: &str) -> Option<Self> {
+    pub(crate) fn parse(output: &str) -> Option<Self> {
         let line = output
             .lines()
             .rev()

@@ -20,6 +20,7 @@ mod room;
 mod router;
 mod routines;
 mod serial;
+pub mod shares;
 mod telegram;
 mod watchdog;
 mod work;
@@ -156,6 +157,8 @@ pub(crate) struct Shared {
     pub routine_rooms: Mutex<std::collections::HashSet<RoomId>>,
     /// 这个进程什么时候起来的。比它早的定时任务消息是上次没做完的，由调度器重做，房间不再答。
     pub started_at: i64,
+    /// 别的电脑用 `sa share` 共享过来的目录。
+    pub shares: Arc<shares::Shares>,
 }
 
 struct RoomHandle {
@@ -255,6 +258,7 @@ impl Orchestrator {
                 telegram_username: Mutex::default(),
                 routine_rooms: Mutex::default(),
                 started_at: sa_engine::now_ms(),
+                shares: Arc::default(),
             }),
             rooms: Mutex::new(HashMap::new()),
         }
@@ -325,6 +329,11 @@ impl Orchestrator {
     }
 
     /// 机器人在 Telegram 上的用户名。还没连上时是 `None`。
+    /// 别的电脑用 `sa share` 共享过来的目录。
+    pub fn shares(&self) -> Arc<shares::Shares> {
+        self.shared.shares.clone()
+    }
+
     pub fn telegram_username(&self) -> Option<String> {
         self.shared.telegram_username.lock().unwrap().clone()
     }
@@ -498,6 +507,7 @@ pub(crate) fn lead_rules(bot: &Bot, others: &[Bot], lead: Option<&BotId>) -> Str
 }
 
 pub(crate) fn render_prompt(
+    workspace: &str,
     settings: &Settings,
     bot: &Bot,
     others: &[Bot],
@@ -533,7 +543,7 @@ pub(crate) fn render_prompt(
     };
     let mut prompt = template
         .replace("{bot_name}", &bot.name)
-        .replace("{workspace}", &settings.fence.root_display())
+        .replace("{workspace}", workspace)
         .replace("{persona}", &persona)
         .replace("{team}", &team)
         .replace("{skills}", skills);

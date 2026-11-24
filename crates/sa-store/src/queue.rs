@@ -122,6 +122,7 @@ mod tests {
             member_bot_ids: vec![],
             discussion: Default::default(),
             rounds: sa_protocol::DEFAULT_ROUNDS,
+            share: None,
             created_at: 1,
             updated_at: 1,
         };

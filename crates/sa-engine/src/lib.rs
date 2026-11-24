@@ -215,6 +215,7 @@ fn new_room(name: String, host: Option<BotId>, now: Millis) -> Room {
     Room {
         discussion: Default::default(),
         rounds: sa_protocol::DEFAULT_ROUNDS,
+        share: None,
         id: RoomId::new(),
         name,
         member_bot_ids: host.iter().cloned().collect(),

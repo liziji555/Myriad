@@ -268,6 +268,7 @@ mod tests {
         let room = Room {
             discussion: Default::default(),
             rounds: sa_protocol::DEFAULT_ROUNDS,
+            share: None,
             id: RoomId::new(),
             name: "房间".into(),
             host_bot_id: None,

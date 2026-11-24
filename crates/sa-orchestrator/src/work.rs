@@ -280,6 +280,7 @@ async fn run_task(shared: &Arc<Shared>, task: Task, cancel: &CancellationToken) 
         session_id: session_id.clone(),
         message_id: draft.id.clone(),
         fence: fence.clone(),
+        share: None,
         rule_scope: Some(task.id.to_string()),
         steps: Mutex::new(vec![]),
         saving: tokio::sync::Mutex::new(()),

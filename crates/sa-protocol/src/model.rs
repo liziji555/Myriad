@@ -135,10 +135,27 @@ pub struct Room {
     /// 轮流讨论时一句话转几圈。
     #[serde(default = "default_rounds")]
     pub rounds: u32,
+    /// 房间用哪个共享目录当工作目录（别的电脑用 `sa share` 共享过来的）。没有就用服务自己的工作目录。
+    #[serde(default)]
+    #[ts(optional)]
+    pub share: Option<String>,
     #[ts(type = "number")]
     pub created_at: Millis,
     #[ts(type = "number")]
     pub updated_at: Millis,
+}
+
+/// 别的电脑用 `sa share` 共享过来的目录。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct Share {
+    pub name: String,
+    /// 目录在那台电脑上的位置，给人看的。
+    pub root: String,
+    /// 只能看，不能改。
+    pub read_only: bool,
+    /// 那台电脑现在连着。
+    pub online: bool,
 }
 
 /// 房间里没点名的话怎么接。点了名的总是只给被点到的。
@@ -169,6 +186,8 @@ str_enum!(Discussion {
 
 /// 轮流讨论默认转两圈。
 pub const DEFAULT_ROUNDS: u32 = 2;
+/// 共享目录的名字最多这么多字。
+pub const MAX_SHARE_NAME_CHARS: usize = 40;
 /// 轮流讨论最多转这么多圈。
 pub const MAX_ROUNDS: u32 = 3;
 

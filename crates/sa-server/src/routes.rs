@@ -11,7 +11,8 @@ use sa_protocol::{
     CreateRoutineRequest, CreateTaskRequest, DecideApprovalRequest, EditQueuedRequest, Extensions,
     HarnessDesk, Health, ImportReport, ImportTemplateRequest, Link, LinkId, Message, MessagePage,
     ModelTier, Notice, NoticeId, Pairing, PermissionRule, PostMessageRequest, QueuedId, Room,
-    RoomId, RoomQueue, Routine, RoutineId, RuleId, StopResponse, Task, TaskActionRequest,
+    RoomId, RoomQueue, Routine, RoutineId, RuleId, Share, ShareCall, SharePoll, ShareReply,
+    StopResponse, Task, TaskActionRequest,
     TaskDetail, TaskId, TeamTemplate, TemplateFile, UpdateBotRequest, UpdateRoomRequest,
     UpdateRoutineRequest, UsageSummary,
 };
@@ -605,6 +606,48 @@ pub async fn extensions(State(state): State<AppState>) -> Result<Json<Extensions
         .await
         .map_err(AppError::internal)?;
     Ok(Json(found))
+}
+
+pub async fn list_shares(State(state): State<AppState>) -> Json<Vec<Share>> {
+    Json(state.orchestrator.shares().list())
+}
+
+/// `sa share` 来取活最多等这么久，没有活就回 204，它再来。
+const SHARE_POLL_WAIT: std::time::Duration = std::time::Duration::from_secs(25);
+
+/// `sa share` 来取下一件要在共享目录里做的事。
+pub async fn poll_share(
+    State(state): State<AppState>,
+    body: Result<Json<SharePoll>, JsonRejection>,
+) -> Result<axum::response::Response, AppError> {
+    use axum::response::IntoResponse;
+    let Json(body) = body.map_err(|e| AppError::bad_request(e.body_text()))?;
+    let shares = state.orchestrator.shares();
+    let mut closing = state.closing.subscribe();
+    let call: Option<ShareCall> = tokio::select! {
+        polled = shares.poll(body, SHARE_POLL_WAIT) => {
+            polled.map_err(|e| AppError::new(StatusCode::CONFLICT, "share_taken", e))?
+        }
+        _ = closing.wait_for(|closing| *closing) => None,
+    };
+    Ok(match call {
+        Some(call) => Json(call).into_response(),
+        None => StatusCode::NO_CONTENT.into_response(),
+    })
+}
+
+/// `sa share` 交回一件事的结果。
+pub async fn reply_share(
+    State(state): State<AppState>,
+    body: Result<Json<ShareReply>, JsonRejection>,
+) -> Result<StatusCode, AppError> {
+    let Json(body) = body.map_err(|e| AppError::bad_request(e.body_text()))?;
+    state
+        .orchestrator
+        .shares()
+        .reply(body)
+        .map_err(|e| AppError::new(StatusCode::CONFLICT, "share_taken", e))?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 pub async fn api_not_found() -> AppError {

@@ -13,6 +13,7 @@ mod remote;
 mod routine;
 mod serve;
 mod service;
+mod share;
 mod task;
 mod team;
 mod usage;
@@ -45,6 +46,8 @@ enum Command {
     Url(remote::UrlArgs),
     /// 通过 SSH 连另一台机器上的 Myriad：开一条隧道，在本机浏览器里打开
     Connect(remote::ConnectArgs),
+    /// 把这台电脑上的一个目录共享给 Myriad 服务（比如云端服务器）：那边的 Bot 能看、能搜、能改里面的文件
+    Share(share::ShareArgs),
     /// 在 Linux 服务器上让 sa serve 常驻（systemd 用户服务）：开机自启，退出登录也不停
     Service {
         #[command(subcommand)]
@@ -99,6 +102,7 @@ pub fn run() -> ExitCode {
         Command::Serve(args) => serve::run(&data_dir, args).map(|()| ExitCode::SUCCESS),
         Command::Url(args) => remote::url(&data_dir, args).map(|()| ExitCode::SUCCESS),
         Command::Connect(args) => remote::connect(args).map(|()| ExitCode::SUCCESS),
+        Command::Share(args) => share::run(&data_dir, args).map(|()| ExitCode::SUCCESS),
         Command::Service { command } => {
             service::run(&data_dir, command).map(|()| ExitCode::SUCCESS)
         }
