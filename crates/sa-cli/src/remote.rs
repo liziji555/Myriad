@@ -43,6 +43,9 @@ pub struct ConnectArgs {
     /// 连上后自动打开浏览器
     #[arg(long)]
     open: bool,
+    /// 先用密码登录一次，把这台电脑的 SSH 公钥装到服务器上（之后都用密钥连）
+    #[arg(long)]
+    install_key: bool,
 }
 
 /// `sa url`：打印这台机器上 Myriad 的连接地址（带令牌）。不占数据目录，服务开着也能用。
@@ -76,6 +79,11 @@ pub(crate) fn local_service(data_dir: &DataDir) -> Result<RemoteService> {
 pub fn connect(args: ConnectArgs) -> Result<()> {
     crate::app::init_logging(tracing::Level::WARN);
     let target = SshTarget::parse(&args.target, args.ssh_port)?;
+    if args.install_key {
+        println!("用密码登录 {target}，把这台电脑的公钥装上去……");
+        target.install_key(None)?;
+        println!("公钥装好了，以后不用再输密码。");
+    }
     println!("正在连接 {target}……");
     let tunnel = Tunnel::open(&target, args.local_port, &TunnelStop::default())?;
     println!("已连上 {target}，用浏览器打开：");
@@ -126,10 +134,14 @@ impl SshTarget {
     /// 所有 ssh 调用共用的参数：不问密码、不卡住，第一次连的主机自动记下它的指纹，
     /// 指纹变了照样拒绝。
     fn command(&self) -> Command {
+        let mut command = self.base_command();
+        command.args(["-o", "BatchMode=yes"]);
+        command
+    }
+
+    fn base_command(&self) -> Command {
         let mut command = Command::new("ssh");
         command.args([
-            "-o",
-            "BatchMode=yes",
             "-o",
             "ConnectTimeout=10",
             "-o",
@@ -149,22 +161,173 @@ impl SshTarget {
             .args(["--", &self.host, &format!("{REMOTE_PATH} sa url")])
             .stdin(Stdio::null())
             .output()
-            .map_err(|error| match error.kind() {
-                std::io::ErrorKind::NotFound => {
-                    anyhow::anyhow!("没找到 ssh 命令：先装 OpenSSH 客户端")
-                }
-                _ => anyhow::Error::new(error).context("ssh 启动失败"),
-            })?;
+            .map_err(ssh_missing)?;
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
         if !output.status.success() {
-            bail!(
-                "{}",
-                explain_ssh_failure(output.status.code(), stderr.trim())
-            );
+            return Err(ssh_failure(output.status.code(), stderr.trim()));
         }
         RemoteService::parse(&stdout)
             .with_context(|| format!("服务器上的 sa url 输出看不懂：{}", stdout.trim()))
+    }
+
+    /// 登录一次，把这台电脑的公钥加进服务器的 `~/.ssh/authorized_keys`（已经有了就不加）。
+    /// 给了 `password` 就由 ssh 来问我们要（桌面版没有终端）；不给就由 ssh 在终端里问人。
+    /// 密码只交给这一个 ssh，不写到哪里。
+    pub fn install_key(&self, password: Option<&str>) -> Result<()> {
+        let key = local_public_key()?;
+        let mut command = self.base_command();
+        command.args([
+            "-o",
+            "PreferredAuthentications=keyboard-interactive,password",
+            "-o",
+            "NumberOfPasswordPrompts=1",
+            "-o",
+            "ControlMaster=no",
+            "-o",
+            "ControlPath=none",
+            "--",
+            &self.host,
+            INSTALL_KEY,
+        ]);
+        if let Some(password) = password {
+            let exe = std::env::current_exe().context("找不到自己的可执行文件")?;
+            command
+                .env("SSH_ASKPASS", exe)
+                .env("SSH_ASKPASS_REQUIRE", "force")
+                .env(ASKPASS_ENV, password);
+            // 老版本的 ssh 没有 SSH_ASKPASS_REQUIRE，要有 DISPLAY 才肯用 SSH_ASKPASS。
+            if std::env::var_os("DISPLAY").is_none() {
+                command.env("DISPLAY", ":0");
+            }
+        }
+        let mut child = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(ssh_missing)?;
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = writeln!(stdin, "{key}");
+        }
+        let output = child.wait_with_output().context("ssh 没能执行")?;
+        if output.status.success() {
+            return Ok(());
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = stderr.trim();
+        if stderr.contains("Permission denied") {
+            let hint = if stderr.contains("password") || stderr.contains("keyboard-interactive") {
+                "密码不对，或者这个用户不能用密码登录"
+            } else {
+                "服务器不允许用密码登录：请在服务器上手动把公钥加进 ~/.ssh/authorized_keys"
+            };
+            bail!("{hint}。\n\nssh 的原话：{stderr}");
+        }
+        Err(ssh_failure(output.status.code(), stderr))
+    }
+}
+
+/// 在服务器上从标准输入读一行公钥，没有就加进 authorized_keys。用 `sh -c`，登录 shell 是 fish 之类的也能跑。
+const INSTALL_KEY: &str = "sh -c 'umask 077; read -r key || exit 1; \
+mkdir -p ~/.ssh && touch ~/.ssh/authorized_keys || exit 1; \
+grep -qxF \"$key\" ~/.ssh/authorized_keys && exit 0; \
+if [ -s ~/.ssh/authorized_keys ] && [ -n \"$(tail -c 1 ~/.ssh/authorized_keys)\" ]; then echo >> ~/.ssh/authorized_keys; fi; \
+printf \"%s\\n\" \"$key\" >> ~/.ssh/authorized_keys'";
+
+/// ssh 问密码时，把密码交给它的环境变量。
+const ASKPASS_ENV: &str = "SA_ASKPASS_PASSWORD";
+
+/// ssh 把我们自己当成 SSH_ASKPASS 来调时，在这里答完就退出。`sa` 和桌面版启动时最先调它。
+/// 只回答问密码的提示，别的（比如确认指纹）一律不答。
+pub fn answer_askpass() {
+    let Some(password) = std::env::var_os(ASKPASS_ENV) else {
+        return;
+    };
+    let prompt = std::env::args().nth(1).unwrap_or_default();
+    if !prompt.to_lowercase().contains("password") {
+        std::process::exit(1);
+    }
+    println!("{}", password.to_string_lossy());
+    std::process::exit(0);
+}
+
+/// 这台电脑上 ssh 默认会用的公钥。一个都没有就新建一对 ed25519（不设口令），和 ssh-copy-id 前要做的一样。
+fn local_public_key() -> Result<String> {
+    let home = dirs::home_dir().context("找不到主目录")?;
+    let ssh = home.join(".ssh");
+    for name in ["id_ed25519", "id_ecdsa", "id_rsa"] {
+        let public = ssh.join(format!("{name}.pub"));
+        if ssh.join(name).is_file() && public.is_file() {
+            return read_public_key(&public);
+        }
+    }
+    let private = ssh.join("id_ed25519");
+    if private.exists() {
+        bail!(
+            "{} 有私钥但没有公钥：在终端里运行 ssh-keygen -y -f {} 把公钥补上",
+            private.display(),
+            private.display()
+        );
+    }
+    std::fs::create_dir_all(&ssh).with_context(|| format!("建不了 {}", ssh.display()))?;
+    let mut keygen = Command::new("ssh-keygen");
+    keygen
+        .args(["-q", "-t", "ed25519", "-N", "", "-C", "myriad", "-f"])
+        .arg(&private)
+        .stdin(Stdio::null());
+    hide_console(&mut keygen);
+    let output = keygen.output().map_err(|error| match error.kind() {
+        std::io::ErrorKind::NotFound => {
+            anyhow::anyhow!("没找到 ssh-keygen 命令：先装 OpenSSH 客户端")
+        }
+        _ => anyhow::Error::new(error).context("ssh-keygen 启动失败"),
+    })?;
+    if !output.status.success() {
+        bail!(
+            "没能新建 SSH 密钥：{}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    read_public_key(&private.with_extension("pub"))
+}
+
+fn read_public_key(path: &std::path::Path) -> Result<String> {
+    let text =
+        std::fs::read_to_string(path).with_context(|| format!("读不了公钥 {}", path.display()))?;
+    let key = text.lines().next().unwrap_or_default().trim();
+    // 一行里只能是公钥本身：带了单引号、换行之类的，服务器上那段脚本就不对了。
+    if !key.starts_with("ssh-") && !key.starts_with("ecdsa-") || key.contains(['\'', '"', '\\']) {
+        bail!("{} 不像一个 SSH 公钥", path.display());
+    }
+    Ok(key.to_string())
+}
+
+fn ssh_missing(error: std::io::Error) -> anyhow::Error {
+    match error.kind() {
+        std::io::ErrorKind::NotFound => anyhow::anyhow!("没找到 ssh 命令：先装 OpenSSH 客户端"),
+        _ => anyhow::Error::new(error).context("ssh 启动失败"),
+    }
+}
+
+/// 服务器不认这台电脑的密钥。桌面版据此给出密码框。
+#[derive(Debug)]
+pub struct LoginDenied(String);
+
+impl std::fmt::Display for LoginDenied {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for LoginDenied {}
+
+fn ssh_failure(code: Option<i32>, stderr: &str) -> anyhow::Error {
+    let explained = explain_ssh_failure(code, stderr);
+    if stderr.contains("Permission denied") {
+        LoginDenied(explained).into()
+    } else {
+        anyhow::anyhow!(explained)
     }
 }
 
@@ -180,7 +343,7 @@ impl std::fmt::Display for SshTarget {
 /// 把 ssh 的报错翻译成人能照着做的话。
 fn explain_ssh_failure(code: Option<i32>, stderr: &str) -> String {
     let hint = if stderr.contains("Permission denied") {
-        "SSH 登录被拒绝。Myriad 只用密钥登录：先在终端里 ssh-copy-id 一次，或者把公钥加进服务器的 ~/.ssh/authorized_keys"
+        "SSH 登录被拒绝：这台电脑的密钥还没装到服务器上。在桌面版里填一次密码装好，或者运行 sa connect --install-key 用户@主机"
     } else if stderr.contains("Host key verification failed")
         || stderr.contains("REMOTE HOST IDENTIFICATION HAS CHANGED")
     {
@@ -393,7 +556,7 @@ fn wait_ready(stop: &TunnelStop, local: SocketAddr, token: &str) -> Result<()> {
             if let Some(mut pipe) = pipe {
                 let _ = pipe.read_to_string(&mut stderr);
             }
-            bail!("{}", explain_ssh_failure(status.code(), stderr.trim()));
+            return Err(ssh_failure(status.code(), stderr.trim()));
         }
         match probe(local, token) {
             Probe::Ok => return Ok(()),
@@ -560,6 +723,57 @@ mod tests {
         assert_eq!(tail, ["-L", "127.0.0.1:5000:[::1]:4517", "--", "me@vps"]);
         assert!(args.windows(2).any(|w| w == ["-p", "2222"]));
         assert!(args.iter().any(|a| a == "BatchMode=yes"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_key_is_added_once_on_its_own_line() {
+        let home = tempfile::tempdir().unwrap();
+        let keys = home.path().join(".ssh/authorized_keys");
+        let install = |key: &str| {
+            let mut child = Command::new("sh")
+                .args(["-c", INSTALL_KEY])
+                .env("HOME", home.path())
+                .stdin(Stdio::piped())
+                .spawn()
+                .unwrap();
+            writeln!(child.stdin.take().unwrap(), "{key}").unwrap();
+            assert!(child.wait().unwrap().success());
+        };
+        install("ssh-ed25519 AAAA one");
+        install("ssh-ed25519 AAAA one");
+        assert_eq!(
+            std::fs::read_to_string(&keys).unwrap(),
+            "ssh-ed25519 AAAA one\n"
+        );
+        std::fs::write(&keys, "ssh-rsa BBBB old").unwrap();
+        install("ssh-ed25519 AAAA one");
+        assert_eq!(
+            std::fs::read_to_string(&keys).unwrap(),
+            "ssh-rsa BBBB old\nssh-ed25519 AAAA one\n"
+        );
+    }
+
+    #[test]
+    fn only_public_keys_are_sent() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("id.pub");
+        std::fs::write(&file, "ssh-ed25519 AAAA me@pc\n").unwrap();
+        assert_eq!(read_public_key(&file).unwrap(), "ssh-ed25519 AAAA me@pc");
+        std::fs::write(&file, "ssh-ed25519 AAAA'; rm -rf ~ #").unwrap();
+        assert!(read_public_key(&file).is_err());
+        std::fs::write(&file, "-----BEGIN OPENSSH PRIVATE KEY-----").unwrap();
+        assert!(read_public_key(&file).is_err());
+    }
+
+    #[test]
+    fn a_refused_key_is_told_apart() {
+        assert!(ssh_failure(Some(255), "Permission denied (publickey).")
+            .downcast_ref::<LoginDenied>()
+            .is_some());
+        assert!(ssh_failure(Some(255), "Connection refused")
+            .downcast_ref::<LoginDenied>()
+            .is_none());
     }
 
     #[test]

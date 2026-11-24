@@ -23,7 +23,7 @@
           </div>
           <form id="server-form" class="choice">
             <h2>通过 SSH 连服务器 <span class="badge" id="server-badge" hidden>正在用</span></h2>
-            <p>连你自己的云服务器或 VPS 上常驻的 Myriad，关掉电脑任务也不断。要先能用 SSH 密钥登录。</p>
+            <p>连你自己的云服务器或 VPS 上常驻的 Myriad，关掉电脑任务也不断。第一次连时还没配密钥的话，可以填一次密码把密钥装上。</p>
             <label>SSH 地址<input id="host" placeholder="ubuntu@1.2.3.4" autocomplete="off" spellcheck="false" required /></label>
             <label>SSH 端口<input id="port" type="number" min="1" max="65535" placeholder="22" /></label>
             <button type="submit">连接</button>
@@ -43,6 +43,12 @@
       <section id="failed" hidden>
         <h1 id="failed-title">Myriad 没能启动</h1>
         <pre id="reason"></pre>
+        <form id="password-form" class="choice" hidden>
+          <h2>用密码登录一次</h2>
+          <p>把这台电脑的 SSH 公钥装到 <span class="server"></span> 上，以后都用密钥连，不用再输密码。密码只用这一次，不会保存。</p>
+          <label>服务器密码<input id="password" type="password" autocomplete="off" required /></label>
+          <button id="install-key" type="submit">装好密钥再连</button>
+        </form>
         <div class="actions">
           <button id="retry" type="button">重试</button>
           <button id="failed-local" type="button" class="secondary">改用本机</button>
@@ -56,7 +62,7 @@
           <li>选的工作目录打不开：点「连别的服务器」，在本机那一栏「换文件夹」。</li>
         </ul>
         <ul id="server-hints">
-          <li>先在终端里 <code>ssh <span class="server"></span></code> 试试，要能不输密码就登录（用密钥）。</li>
+          <li>先在终端里 <code>ssh <span class="server"></span></code> 试试。还没配密钥的话，用上面的密码框装一次，或者运行 <code>sa connect --install-key 用户@主机</code>。</li>
           <li>服务器上要有 <code>sa</code>，并且在 PATH 里（比如 <code>~/.local/bin</code>）。</li>
           <li>服务器上的 Myriad 要开着：在服务器上运行 <code>sa service install --workdir 项目目录</code>，它就会常驻。</li>
         </ul>

@@ -30,6 +30,9 @@ window.saShow = (state) => {
     $(id).hidden = Boolean(state.pinned);
   }
   $("failed-local").hidden ||= !remote;
+  $("password-form").hidden = !(state.view === "failed" && state.password);
+  $("password").value = "";
+  $("install-key").disabled = false;
   $("data-dir").textContent = state.dataDir ?? "";
   for (const id of ["connect-error", "failed-error"]) $(id).hidden = true;
 };
@@ -52,6 +55,20 @@ $("server-form").addEventListener("submit", (event) => {
     host: $("host").value,
     port: port === "" ? null : Number(port),
   }).catch(showError);
+});
+$("password-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  $("install-key").disabled = true;
+  $("install-key").textContent = "正在装…";
+  invoke("install_key", { password: $("password").value })
+    .catch((error) => {
+      $("password").value = "";
+      showError(error);
+    })
+    .finally(() => {
+      $("install-key").disabled = false;
+      $("install-key").textContent = "装好密钥再连";
+    });
 });
 $("retry").addEventListener("click", () => invoke("retry").catch(showError));
 $("switch").addEventListener("click", () => window.saShow({ ...shown, view: "connect" }));

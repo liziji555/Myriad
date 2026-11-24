@@ -20,7 +20,7 @@ mod usage;
 
 pub use app::{init_logging, RunArgs};
 pub use paths::DataDir;
-pub use remote::{SshTarget, Tunnel, TunnelStop};
+pub use remote::{answer_askpass, LoginDenied, SshTarget, Tunnel, TunnelStop};
 pub use serve::serve_until;
 
 use clap::{Parser, Subcommand};
@@ -97,6 +97,7 @@ enum Command {
 
 /// `sa` 的入口：解析命令行，做完返回退出码。
 pub fn run() -> ExitCode {
+    answer_askpass();
     let cli = Cli::parse();
     let result = paths::DataDir::resolve(cli.data_dir).and_then(|data_dir| match cli.command {
         Command::Serve(args) => serve::run(&data_dir, args).map(|()| ExitCode::SUCCESS),

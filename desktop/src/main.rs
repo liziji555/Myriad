@@ -17,7 +17,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use clap::Parser;
-use sa_cli::{DataDir, RunArgs, SshTarget, Tunnel, TunnelStop};
+use sa_cli::{DataDir, LoginDenied, RunArgs, SshTarget, Tunnel, TunnelStop};
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Mutex};
 use std::time::Duration;
@@ -143,6 +143,7 @@ impl Shell {
 }
 
 fn main() {
+    sa_cli::answer_askpass();
     let args = Args::parse();
     sa_cli::init_logging(tracing::Level::INFO);
     let data_dir = match DataDir::resolve(args.data_dir.clone()) {
@@ -167,7 +168,12 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .manage(shell)
-        .invoke_handler(tauri::generate_handler![choose_local, choose_server, retry])
+        .invoke_handler(tauri::generate_handler![
+            choose_local,
+            choose_server,
+            retry,
+            install_key
+        ])
         .setup(|app| {
             set_menu(app.handle())?;
             // 连服务器、等服务起来都要等，不能占着主线程。
@@ -261,7 +267,16 @@ fn start_server(handle: &AppHandle, shell: &Shell, target: &SshTarget) -> tauri:
             }
             Ok(())
         }
-        Err(error) => open_failed(handle, shell, &format!("{error:#}"), Some(&server)),
+        Err(error) => {
+            let details = serde_json::json!({
+                "view": "failed",
+                "reason": format!("{error:#}"),
+                "server": server,
+                "password": error.downcast_ref::<LoginDenied>().is_some(),
+                "dataDir": shell.data_dir.root().to_string_lossy(),
+            });
+            open_start(handle, shell, details)
+        }
     }
 }
 
@@ -415,6 +430,22 @@ fn choose_server(window: WebviewWindow, host: String, port: Option<u16>) -> Resu
 fn retry(window: WebviewWindow) -> Result<(), String> {
     from_start_page(&window)?;
     relaunch(window.app_handle());
+    Ok(())
+}
+
+/// 启动页上填了服务器密码：登录一次装好这台电脑的公钥，再重新连。密码用完就丢。
+#[tauri::command]
+async fn install_key(window: WebviewWindow, password: String) -> Result<(), String> {
+    from_start_page(&window)?;
+    let handle = window.app_handle().clone();
+    let Launch::Server(target) = handle.state::<Shell>().launch.clone() else {
+        return Err("现在没在连服务器".into());
+    };
+    tauri::async_runtime::spawn_blocking(move || target.install_key(Some(&password)))
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| format!("{error:#}"))?;
+    relaunch(&handle);
     Ok(())
 }
 
