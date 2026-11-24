@@ -7,7 +7,8 @@ import { STATE_LABEL } from "./api/tasks";
 import { api } from "./api/client";
 import type { RoomId, TaskId } from "./api/types";
 import { useWorkspace } from "./api/useWorkspace";
-import { desktopInfo, openConnect } from "./api/desktop";
+import { DESKTOP_CHANGED, DESKTOP_OPEN, desktopInvoke, type DesktopState } from "./api/desktop";
+import { ConnectPanel } from "./components/ConnectPanel";
 import { noticesFor } from "./api/workspace";
 import { CommandPalette, type PaletteEntry } from "./components/CommandPalette";
 import { Composer } from "./components/Composer";
@@ -57,7 +58,26 @@ function Shell() {
   const [tab, setTab] = useState<PanelTab>("execution");
   const [roomsOpen, setRoomsOpen] = useState(false);
   const docked = useMedia(DOCKED);
-  const [desktop] = useState(() => desktopInfo());
+  const [invokeDesktop] = useState(() => desktopInvoke());
+  const [desktop, setDesktop] = useState<DesktopState | null>(null);
+  const [connectOpen, setConnectOpen] = useState(false);
+  useEffect(() => {
+    if (!invokeDesktop) return;
+    const refresh = () =>
+      void invokeDesktop("desktop_state").then(
+        (state) => setDesktop(state as DesktopState),
+        () => setDesktop(null),
+      );
+    const open = () => setConnectOpen(true);
+    refresh();
+    window.addEventListener(DESKTOP_CHANGED, refresh);
+    window.addEventListener(DESKTOP_OPEN, open);
+    return () => {
+      window.removeEventListener(DESKTOP_CHANGED, refresh);
+      window.removeEventListener(DESKTOP_OPEN, open);
+    };
+  }, [invokeDesktop]);
+  const openConnect = () => setConnectOpen(true);
   const [prefill, setPrefill] = useState<string | null>(null);
   const [layout, setLayout] = useState(loadLayout);
   const panelOpen = layout.panelOpen;
@@ -383,7 +403,7 @@ function Shell() {
           },
         ]
       : []),
-    ...(desktop && !desktop.pinned
+    ...(desktop && desktop.pinned !== "workdir"
       ? [
           {
             id: "action:connect",
@@ -433,6 +453,9 @@ function Shell() {
       }
       style={{ "--sa-panel-width": `${layout.panelWidth}px` } as CSSProperties}
     >
+      {connectOpen && desktop && invokeDesktop && (
+        <ConnectPanel state={desktop} invoke={invokeDesktop} onClose={() => setConnectOpen(false)} />
+      )}
       {paletteOpen && (
         <CommandPalette
           entries={paletteEntries}
@@ -491,6 +514,7 @@ function Shell() {
             }}
             createSignal={createSignal}
             desktop={desktop}
+            onConnect={openConnect}
           />
         </>
       )}

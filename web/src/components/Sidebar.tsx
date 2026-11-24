@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent } from "react";
-import { connectionLabel, openConnect, type DesktopInfo } from "../api/desktop";
+import { connectionLabel, type DesktopState } from "../api/desktop";
 import type { Presence, PresenceState } from "../api/presence";
 import type { Bot, Room, RoomId } from "../api/types";
 import { BotAvatar } from "./BotAvatar";
@@ -57,7 +57,8 @@ interface Props {
   /** 每加一就打开「新建房间」的输入框（命令面板里点的）。 */
   createSignal: number;
   /** 在桌面版里时：连的是本机还是哪台服务器。 */
-  desktop: DesktopInfo | null;
+  desktop: DesktopState | null;
+  onConnect(): void;
 }
 
 export function Sidebar({
@@ -78,6 +79,7 @@ export function Sidebar({
   onCreateRoom,
   createSignal,
   desktop,
+  onConnect,
 }: Props) {
   const [creating, setCreating] = useState(false);
   useEffect(() => {
@@ -245,12 +247,13 @@ export function Sidebar({
           <button
             type="button"
             className="sa-connect"
-            disabled={desktop.pinned}
-            title={desktop.pinned ? "启动时用 --workdir 或 --server 定死了，换不了" : "连接本机或服务器"}
+            disabled={desktop.pinned === "workdir"}
+            data-state={desktop.connecting ? "connecting" : desktop.failed ? "failed" : undefined}
+            title={desktop.pinned === "workdir" ? "启动时用 --workdir 定死了用本机，换不了" : "连接本机或服务器"}
             aria-label={`连接：${connectionLabel(desktop)}`}
-            onClick={openConnect}
+            onClick={onConnect}
           >
-            <Icon name={desktop.current?.mode === "server" ? "server" : "plug"} />
+            <Icon name={desktop.current.mode === "server" ? "server" : "plug"} />
             <span className="sa-nav-label sa-connect-label">{connectionLabel(desktop)}</span>
           </button>
         )}

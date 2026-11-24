@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "start",
+  "description": "启动页（内置的页面）：重试、换工作目录。",
+  "windows": ["start"],
+  "permissions": ["allow-retry", "allow-pick-workdir"]
+}

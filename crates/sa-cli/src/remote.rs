@@ -110,6 +110,8 @@ pub struct SshTarget {
     pub host: String,
     /// 不给就用 SSH 自己的默认值。
     pub port: Option<u16>,
+    /// 指定用哪把私钥。不给就由 SSH 自己挑（ssh-agent、~/.ssh/config、默认的那几把）。
+    pub identity: Option<PathBuf>,
 }
 
 impl SshTarget {
@@ -129,7 +131,13 @@ impl SshTarget {
         Ok(Self {
             host: host.to_string(),
             port,
+            identity: None,
         })
+    }
+
+    pub fn with_identity(mut self, identity: Option<PathBuf>) -> Self {
+        self.identity = identity;
+        self
     }
 
     /// 所有 ssh 调用共用的参数：不问密码、不卡住，第一次连的主机自动记下它的指纹，
@@ -151,6 +159,9 @@ impl SshTarget {
         ]);
         if let Some(port) = self.port {
             command.arg("-p").arg(port.to_string());
+        }
+        if let Some(identity) = &self.identity {
+            command.arg("-i").arg(identity);
         }
         command
     }
