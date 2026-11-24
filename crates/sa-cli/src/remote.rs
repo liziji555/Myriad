@@ -203,7 +203,7 @@ impl SshTarget {
                 "{self} 要经跳板机连，这里没法替你填密码：在终端里运行 sa connect --install-key {self}，按提示分别输密码"
             );
         }
-        let key = local_public_key(&config.identities)?;
+        let key = local_public_key(&config.identities, &agent_keys(&config.agent))?;
         let mut command = self.base_command();
         command.args([
             "-o",
@@ -289,6 +289,18 @@ struct SshConfig {
     identities: Vec<PathBuf>,
     /// 经跳板机（ProxyJump / ProxyCommand）连。
     proxied: bool,
+    /// 这台服务器用哪个 ssh-agent（IdentityAgent）。
+    agent: Agent,
+}
+
+#[derive(Debug, Default, PartialEq)]
+enum Agent {
+    /// 环境变量 SSH_AUTH_SOCK 指的那个。
+    #[default]
+    Default,
+    /// IdentityAgent none：不用 agent。
+    Off,
+    Socket(PathBuf),
 }
 
 impl SshConfig {
@@ -307,6 +319,13 @@ impl SshConfig {
                         _ => PathBuf::from(value),
                     }),
                 "proxyjump" | "proxycommand" if value != "none" => config.proxied = true,
+                "identityagent" => {
+                    config.agent = match value {
+                        "none" => Agent::Off,
+                        "SSH_AUTH_SOCK" | "$SSH_AUTH_SOCK" => Agent::Default,
+                        _ => Agent::Socket(PathBuf::from(value)),
+                    }
+                }
                 _ => {}
             }
         }
@@ -316,8 +335,7 @@ impl SshConfig {
 
 /// ssh 连这台服务器时会试的公钥里，第一把不用输口令就能用的（没设口令，或者已经交给了 ssh-agent）。
 /// 一把都没有就新建一对 ed25519（不设口令），放在 ssh 会去找的位置，和 ssh-copy-id 前要做的一样。
-fn local_public_key(identities: &[PathBuf]) -> Result<String> {
-    let agent = agent_keys();
+fn local_public_key(identities: &[PathBuf], agent: &str) -> Result<String> {
     let mut locked = None;
     for private in identities {
         let public = public_path(private);
@@ -325,7 +343,7 @@ fn local_public_key(identities: &[PathBuf]) -> Result<String> {
         let Ok(key) = read_public_key(&public) else {
             continue;
         };
-        if key_in(&agent, &key) || private.is_file() && unlocked(private) {
+        if key_in(agent, &key) || private.is_file() && unlocked(private) {
             return Ok(key);
         }
         locked.get_or_insert(private.clone());
@@ -397,9 +415,16 @@ fn unlocked(private: &Path) -> bool {
     keygen.status().is_ok_and(|status| status.success())
 }
 
-/// ssh-agent 里有的公钥（`ssh-add -L`），没有 agent 就是空的。
-fn agent_keys() -> String {
+/// 这台服务器用的 ssh-agent 里有的公钥（`ssh-add -L`），没有 agent 就是空的。
+fn agent_keys(agent: &Agent) -> String {
     let mut add = Command::new("ssh-add");
+    match agent {
+        Agent::Off => return String::new(),
+        Agent::Socket(socket) => {
+            add.env("SSH_AUTH_SOCK", socket);
+        }
+        Agent::Default => {}
+    }
     add.arg("-L").stdin(Stdio::null()).stderr(Stdio::null());
     hide_console(&mut add);
     add.output()
@@ -888,7 +913,16 @@ mod tests {
             SshConfig {
                 identities: vec!["/home/me/.ssh/id_rsa".into(), "/keys/work".into()],
                 proxied: false,
+                agent: Agent::Default,
             }
+        );
+        assert_eq!(
+            SshConfig::parse("identityagent none\n", None).agent,
+            Agent::Off
+        );
+        assert_eq!(
+            SshConfig::parse("identityagent /run/a.sock\n", None).agent,
+            Agent::Socket("/run/a.sock".into())
         );
         assert!(SshConfig::parse("proxyjump jump@bastion\n", None).proxied);
         assert!(SshConfig::parse("proxycommand nc %h %p\n", None).proxied);
@@ -899,13 +933,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (rsa, ed) = (dir.path().join("id_rsa"), dir.path().join("id_ed25519"));
         // 都还没有：建在 id_ed25519，而不是排第一的 id_rsa。
-        let made = local_public_key(&[rsa.clone(), ed.clone()]).unwrap();
+        let made = local_public_key(&[rsa.clone(), ed.clone()], "").unwrap();
         assert!(made.starts_with("ssh-ed25519 ") && ed.is_file());
         // 配置里只写了自己的 IdentityFile：用它，没有就建在那里。
         let work = dir.path().join("work");
-        let mine = local_public_key(std::slice::from_ref(&work)).unwrap();
+        let mine = local_public_key(std::slice::from_ref(&work), "").unwrap();
         assert!(work.is_file() && mine != made);
-        assert_eq!(local_public_key(&[work.clone(), ed.clone()]).unwrap(), mine);
+        assert_eq!(
+            local_public_key(&[work.clone(), ed.clone()], "").unwrap(),
+            mine
+        );
         // 设了口令、agent 里也没有的跳过。
         let status = Command::new("ssh-keygen")
             .args(["-q", "-t", "ed25519", "-N", "secret", "-f"])
@@ -913,13 +950,17 @@ mod tests {
             .status()
             .unwrap();
         assert!(status.success());
-        assert_eq!(local_public_key(&[rsa.clone(), ed]).unwrap(), made);
-        let error = local_public_key(&[rsa]).unwrap_err().to_string();
+        assert_eq!(local_public_key(&[rsa.clone(), ed], "").unwrap(), made);
+        let error = local_public_key(&[rsa], "").unwrap_err().to_string();
         assert!(error.contains("ssh-add"), "{error}");
         // 只剩 .pub（私钥在 agent 里）的位置不新建，免得把它的公钥盖掉。
         let agent_only = dir.path().join("agent_only");
         std::fs::write(public_path(&agent_only), &made).unwrap();
-        assert!(local_public_key(std::slice::from_ref(&agent_only)).is_err());
+        assert!(local_public_key(std::slice::from_ref(&agent_only), "").is_err());
+        assert_eq!(
+            local_public_key(std::slice::from_ref(&agent_only), &made).unwrap(),
+            made
+        );
         assert_eq!(
             std::fs::read_to_string(public_path(&agent_only)).unwrap(),
             made
