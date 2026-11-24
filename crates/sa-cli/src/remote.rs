@@ -270,11 +270,11 @@ impl SshTarget {
 }
 
 /// 在服务器上从标准输入读一行公钥，没有就加进 authorized_keys。用 `sh -c`，登录 shell 是 fish 之类的也能跑。
-/// 有没有只看类型和公钥本身：同一把钥匙备注不一样（或者没带备注）不再加一遍。
+/// 有没有只看类型和公钥本身：同一把钥匙备注不一样（或者没带备注）不再加一遍；注释掉的行不算。
 const INSTALL_KEY: &str = "sh -c 'umask 077; read -r kind blob note || exit 1; \
 [ -n \"$blob\" ] || exit 1; key=\"$kind $blob${note:+ $note}\"; \
 mkdir -p ~/.ssh && touch ~/.ssh/authorized_keys || exit 1; \
-grep -qF \"$kind $blob\" ~/.ssh/authorized_keys && exit 0; \
+awk -v k=\"$kind\" -v b=\"$blob\" \"\\$1 !~ /^#/ { for (i = 1; i < NF; i++) if (\\$i == k && \\$(i + 1) == b) found = 1 } END { exit !found }\" ~/.ssh/authorized_keys && exit 0; \
 if [ -s ~/.ssh/authorized_keys ] && [ -n \"$(tail -c 1 ~/.ssh/authorized_keys)\" ]; then echo >> ~/.ssh/authorized_keys; fi; \
 printf \"%s\\n\" \"$key\" >> ~/.ssh/authorized_keys'";
 
@@ -952,10 +952,12 @@ mod tests {
             std::fs::read_to_string(&keys).unwrap(),
             "ssh-rsa BBBB old\nssh-ed25519 AAAA one\n"
         );
+        // 注释掉的、只是开头一样的都不算已经有了。
+        std::fs::write(&keys, "# ssh-ed25519 CCCC off\nssh-ed25519 CCCCDD other\n").unwrap();
         install("ssh-ed25519 CCCC");
         assert!(std::fs::read_to_string(&keys)
             .unwrap()
-            .ends_with("one\nssh-ed25519 CCCC\n"));
+            .ends_with("other\nssh-ed25519 CCCC\n"));
     }
 
     #[test]
