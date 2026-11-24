@@ -32,18 +32,23 @@ pub struct ShareArgs {
     #[arg(long)]
     read_only: bool,
     /// 共享给哪台服务器：SSH 地址（`用户@主机` 或 ~/.ssh/config 里的 Host 名）。不写就共享给这台电脑上的服务
-    #[arg(long, conflicts_with = "url")]
+    /// 给了它就不看 --url / SA_SHARE_URL
+    #[arg(long)]
     server: Option<String>,
     /// 服务器的 SSH 端口
     #[arg(short = 'p', long, requires = "server")]
     ssh_port: Option<u16>,
-    /// 直接给服务的地址（sa url 打印的那一行），已经自己开好隧道时用
-    #[arg(long)]
+    /// 直接给服务的地址（sa url 打印的那一行），已经自己开好隧道时用。
+    /// 链接里有令牌，放在环境变量 SA_SHARE_URL 里就不会出现在进程列表里
+    #[arg(long, env = "SA_SHARE_URL", hide_env_values = true)]
     url: Option<String>,
 }
 
 pub fn run(data_dir: &DataDir, args: ShareArgs) -> Result<()> {
     crate::app::init_logging(tracing::Level::WARN);
+    // 数据目录不存在的话围栏认不出它：先建好，以后放进去的令牌、数据库才挡得住。
+    std::fs::create_dir_all(data_dir.root())
+        .with_context(|| format!("建不了数据目录 {}", data_dir.root().display()))?;
     let fence = Fence::new(&args.dir, &[data_dir.root().to_path_buf()])
         .with_context(|| format!("目录 {} 打不开", args.dir.display()))?;
     let name = match &args.name {
@@ -68,6 +73,10 @@ pub fn run(data_dir: &DataDir, args: ShareArgs) -> Result<()> {
         (None, Some(url)) => {
             let service = RemoteService::parse(url)
                 .context("地址不对，要的是 sa url 打印的那一行：http://地址/auth?token=令牌")?;
+            // 令牌和文件内容走明文 HTTP：只连本机这头（自己开好的隧道），别的机器用 --server。
+            if !service.addr.ip().is_loopback() {
+                bail!("--url 只能是本机地址（127.0.0.1）；连别的机器请用 --server 走 SSH");
+            }
             let place = service.addr.to_string();
             (service, None, place)
         }
@@ -229,7 +238,9 @@ impl Sharer {
             match sent {
                 Ok(response) if response.status().is_success() => return Ok(()),
                 Ok(response) if response.status() == StatusCode::CONFLICT => {
-                    bail!("{}", error_text(response).await)
+                    // 交晚了（被别的顶替了）：结果没人要了。还能不能接着共享看下一次取活。
+                    eprintln!("结果没交上：{}", error_text(response).await);
+                    return Ok(());
                 }
                 Ok(response) => eprintln!("交结果时服务回了 {}，重试……", response.status()),
                 Err(error) => eprintln!("交结果失败（{error}），重试……"),
