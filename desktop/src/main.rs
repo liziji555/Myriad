@@ -67,6 +67,31 @@ struct Server {
 }
 
 /// 一次还没连完的连接。
+/// 上次没连上（或者「测试连接」没通过）的那一台。
+#[derive(Clone)]
+struct Failure {
+    target: Option<SshTarget>,
+    server: String,
+    reason: String,
+    /// 服务器不认密钥：面板里给密码框，密码就是交给 `target` 的。
+    password: bool,
+}
+
+impl Failure {
+    fn of(target: &SshTarget, error: &anyhow::Error) -> Self {
+        Self {
+            target: Some(target.clone()),
+            server: target.to_string(),
+            reason: format!("{error:#}"),
+            password: error.downcast_ref::<LoginDenied>().is_some(),
+        }
+    }
+
+    fn json(&self) -> Value {
+        json!({ "server": self.server, "reason": self.reason, "password": self.password })
+    }
+}
+
 struct Attempt {
     id: u64,
     target: SshTarget,
@@ -81,8 +106,7 @@ struct Link {
     target: Option<SshTarget>,
     attempt: Option<Attempt>,
     attempts: u64,
-    /// 上次没连上：`{ server, reason, password }`。
-    failed: Option<Value>,
+    failed: Option<Failure>,
 }
 
 struct Shell {
@@ -263,8 +287,12 @@ fn start(handle: &AppHandle) {
         Some(Ok(target)) => drop(connect(handle, target)),
         Some(Err(reason)) => {
             let server = shell.args.server.clone().unwrap_or_default();
-            shell.link.lock().unwrap().failed =
-                Some(json!({ "server": server, "reason": reason, "password": false }));
+            shell.link.lock().unwrap().failed = Some(Failure {
+                target: None,
+                server,
+                reason,
+                password: false,
+            });
             notify(handle);
         }
         None => {}
@@ -356,19 +384,15 @@ fn connect(handle: &AppHandle, target: SshTarget) -> Result<(), Value> {
             drop(old);
             return Ok(());
         }
-        Err(error) => json!({
-            "server": target.to_string(),
-            "reason": format!("{error:#}"),
-            "password": error.downcast_ref::<LoginDenied>().is_some(),
-        }),
+        Err(error) => Failure::of(&target, &error),
     };
     link.failed = Some(failure.clone());
     drop(link);
     notify(handle);
-    Err(failure)
+    Err(failure.json())
 }
 
-/// 主窗口换到 `url`。
+/// 主窗口换到 `url`。要读 Cookie，别在主线程上调（Windows 上会卡死）。
 fn show(handle: &AppHandle, shell: &Shell, url: Url, title: &str) {
     let Some(window) = handle.get_webview_window(MAIN) else {
         return;
@@ -377,6 +401,13 @@ fn show(handle: &AppHandle, shell: &Shell, url: Url, title: &str) {
         let mut homes = shell.homes.lock().unwrap();
         let local = shell.local_url.lock().unwrap().as_ref().map(origin);
         *homes = local.into_iter().chain([origin(&url)]).collect();
+    }
+    // Cookie 不分端口：本机服务和隧道这头都是 127.0.0.1，不清掉的话这一头的登录令牌会被带给另一头。
+    // 两个地址自己都带着令牌，换过去会重新登录。
+    for cookie in window.cookies().unwrap_or_default() {
+        if let Err(error) = window.delete_cookie(cookie) {
+            tracing::warn!("没清掉上一个页面的登录：{error}");
+        }
     }
     if let Err(error) = window.navigate(url).and_then(|()| window.set_title(title)) {
         tracing::warn!("主窗口换不了页面：{error}");
@@ -499,6 +530,18 @@ fn from_main(window: &WebviewWindow) -> Result<(), String> {
     }
 }
 
+/// 连谁、往哪台服务器交密码，只有本机服务的页面能定：服务器发来的页面不能替你换服务器、收密码。
+fn from_local(window: &WebviewWindow) -> Result<(), String> {
+    let shell = window.state::<Shell>();
+    let local = shell.local_url.lock().unwrap().as_ref().map(origin);
+    let here = window.url().ok().map(|url| origin(&url));
+    if window.label() == MAIN && local.is_some() && local == here {
+        Ok(())
+    } else {
+        Err("先换回本机，再连别的服务器".into())
+    }
+}
+
 /// 现在用的是本机还是哪台服务器、正在连谁、上次为什么没连上，以及面板里先填上的那些。
 #[tauri::command]
 fn desktop_state(window: WebviewWindow) -> Result<Value, String> {
@@ -511,6 +554,20 @@ fn desktop_state(window: WebviewWindow) -> Result<Value, String> {
         .as_ref()
         .map(|dir| dir.to_string_lossy().into_owned());
     let link = shell.link.lock().unwrap();
+    if from_local(&window).is_err() {
+        // 服务器的页面只用知道自己是谁，好显示「换回本机」。
+        return Ok(json!({
+            "current": match &link.target {
+                Some(target) => json!({ "mode": "server", "server": target.to_string() }),
+                None => json!({ "mode": "local" }),
+            },
+            "workdir": null,
+            "pinned": shell.pinned(),
+            "saved": null,
+            "connecting": null,
+            "failed": null,
+        }));
+    }
     let saved = match shell.wanted_server() {
         Some(Ok(target)) if shell.pinned().is_some() => Some(target),
         _ => read_remembered(&shell.remembered()).server,
@@ -528,7 +585,7 @@ fn desktop_state(window: WebviewWindow) -> Result<Value, String> {
             "key": target.identity.map(|key| key.to_string_lossy().into_owned()),
         })),
         "connecting": link.attempt.as_ref().map(|attempt| attempt.target.to_string()),
-        "failed": link.failed,
+        "failed": link.failed.as_ref().map(Failure::json),
     }))
 }
 
@@ -540,7 +597,7 @@ async fn connect_server(
     port: Option<u16>,
     key: Option<String>,
 ) -> Result<(), Value> {
-    from_main(&window)?;
+    from_local(&window)?;
     let handle = window.app_handle().clone();
     let target = handle.state::<Shell>().target(&host, port, key)?;
     tauri::async_runtime::spawn_blocking(move || connect(&handle, target))
@@ -548,7 +605,7 @@ async fn connect_server(
         .map_err(|error| error.to_string())?
 }
 
-/// 「测试连接」：登录上去问一下那边的 Myriad 开着没有，不换页面、不记下来。
+/// 「测试连接」：真的开一次隧道，那边的 Myriad 答应了才算通，然后就断开。不换页面、不记成要连的服务器。
 #[tauri::command]
 async fn test_server(
     window: WebviewWindow,
@@ -556,42 +613,58 @@ async fn test_server(
     port: Option<u16>,
     key: Option<String>,
 ) -> Result<(), Value> {
-    from_main(&window)?;
-    let target = window.state::<Shell>().target(&host, port, key)?;
+    from_local(&window)?;
+    let handle = window.app_handle().clone();
+    let target = handle.state::<Shell>().target(&host, port, key)?;
     tauri::async_runtime::spawn_blocking(move || {
-        target.remote_service().map(drop).map_err(|error| {
-            json!({
-                "server": target.to_string(),
-                "reason": format!("{error:#}"),
-                "password": error.downcast_ref::<LoginDenied>().is_some(),
-            })
-        })
+        let opened = Tunnel::open(&target, None, &TunnelStop::default());
+        let failure = match opened {
+            Ok(tunnel) => {
+                tunnel.close();
+                None
+            }
+            Err(error) => Some(Failure::of(&target, &error)),
+        };
+        handle.state::<Shell>().link.lock().unwrap().failed = failure.clone();
+        notify(&handle);
+        failure.map_or(Ok(()), |failure| Err(failure.json()))
     })
     .await
     .map_err(|error| error.to_string())?
 }
 
-/// 面板里填了服务器密码：登录一次装好这台电脑的公钥。密码用完就丢。
+/// 面板里填了服务器密码：登录一次装好这台电脑的公钥，接着就连。密码用完就丢。
+/// 密码只交给刚才不认密钥的那一台（[`Link::failed`]），不看面板里现在填的是谁。
 #[tauri::command]
-async fn install_key(
-    window: WebviewWindow,
-    host: String,
-    port: Option<u16>,
-    key: Option<String>,
-    password: String,
-) -> Result<(), String> {
-    from_main(&window)?;
-    let target = window.state::<Shell>().target(&host, port, key)?;
-    tauri::async_runtime::spawn_blocking(move || target.install_key(Some(&password)))
-        .await
-        .map_err(|error| error.to_string())?
-        .map_err(|error| format!("{error:#}"))
+async fn install_key(window: WebviewWindow, password: String) -> Result<(), Value> {
+    from_local(&window)?;
+    let handle = window.app_handle().clone();
+    let denied = handle.state::<Shell>().link.lock().unwrap().failed.clone();
+    let Some(Failure {
+        target: Some(target),
+        server,
+        password: true,
+        ..
+    }) = denied
+    else {
+        return Err("先连一次：服务器不认密钥时才用得上密码".into());
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        // 没装上（多半是密码不对）：密码框留着，可以再填。
+        target.install_key(Some(&password)).map_err(
+            |error| json!({ "server": server, "reason": format!("{error:#}"), "password": true }),
+        )?;
+        drop(password);
+        connect(&handle, target)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 /// 不连了：还在连的那一次作废。
 #[tauri::command]
 fn cancel_connect(window: WebviewWindow) -> Result<(), String> {
-    from_main(&window)?;
+    from_local(&window)?;
     let attempt = window.state::<Shell>().link.lock().unwrap().attempt.take();
     if let Some(attempt) = attempt {
         // 杀 ssh 要等它退出，别占着调命令的线程。
@@ -622,11 +695,12 @@ fn back_to_local(handle: &AppHandle) -> Result<(), String> {
     };
     remember(&shell, |remembered| remembered.use_server = false);
     let local = shell.local_url.lock().unwrap().clone();
-    match (local, tunnel.is_some()) {
-        (Some(url), true) => show(handle, &shell, url, "Myriad"),
-        _ => notify(handle),
-    }
+    let handle = handle.clone();
     std::thread::spawn(move || {
+        match (local, tunnel.is_some()) {
+            (Some(url), true) => show(&handle, &handle.state::<Shell>(), url, "Myriad"),
+            _ => notify(&handle),
+        }
         if let Some(attempt) = attempt {
             attempt.stop.close();
         }
@@ -638,7 +712,7 @@ fn back_to_local(handle: &AppHandle) -> Result<(), String> {
 /// 选一把私钥，把路径交回页面。没选就是 `None`。
 #[tauri::command]
 async fn pick_key(window: WebviewWindow) -> Result<Option<String>, String> {
-    from_main(&window)?;
+    from_local(&window)?;
     let handle = window.app_handle().clone();
     let picked = tauri::async_runtime::spawn_blocking(move || {
         let mut dialog = handle.dialog().file().set_title("选择 SSH 私钥");
@@ -658,7 +732,7 @@ async fn pick_key(window: WebviewWindow) -> Result<Option<String>, String> {
 #[tauri::command]
 async fn pick_workdir(window: WebviewWindow) -> Result<(), String> {
     if window.label() != START {
-        from_main(&window)?;
+        from_local(&window)?;
     }
     let handle = window.app_handle().clone();
     if handle.state::<Shell>().args.workdir.is_some() {

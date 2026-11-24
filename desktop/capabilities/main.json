@@ -3,7 +3,7 @@
   "identifier": "main",
   "description": "主窗口里开的是本机上的页面（本机服务的，或者 SSH 隧道这头的）：只给「连接」面板要用的命令。到底是不是这两个来源，命令自己还会再查一遍。",
   "windows": ["main"],
-  "remote": { "urls": ["http://127.0.0.1:*", "http://localhost:*"] },
+  "remote": { "urls": ["http://127.0.0.1:*", "http://localhost:*", "http://[\\:\\:1]:*"] },
   "permissions": [
     "allow-desktop-state",
     "allow-connect-server",

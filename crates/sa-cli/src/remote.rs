@@ -352,6 +352,14 @@ fn local_public_key(identities: &[PathBuf], agent: &str) -> Result<String> {
         let public = public_path(private);
         // 私钥只在 agent 里、本机只有 .pub 的也算。
         let Ok(key) = read_public_key(&public) else {
+            // 只有私钥、没有 .pub（云厂商下载的 .pem 常这样）：没设口令就能算出公钥。
+            match derive_public_key(private) {
+                Some(key) => return Ok(key),
+                None if private.is_file() && !public.exists() => {
+                    locked.get_or_insert(private.clone());
+                }
+                None => {}
+            }
             continue;
         };
         if key_in(agent, &key) || private.is_file() && unlocked(private) {
@@ -424,6 +432,26 @@ fn unlocked(private: &Path) -> bool {
         .stderr(Stdio::null());
     hide_console(&mut keygen);
     keygen.status().is_ok_and(|status| status.success())
+}
+
+/// 从没设口令的私钥算出公钥（`ssh-keygen -y`）。
+fn derive_public_key(private: &Path) -> Option<String> {
+    let mut keygen = Command::new("ssh-keygen");
+    keygen
+        .args(["-y", "-P", "", "-f"])
+        .arg(private)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null());
+    hide_console(&mut keygen);
+    let output = keygen
+        .output()
+        .ok()
+        .filter(|output| output.status.success())?;
+    let text = String::from_utf8(output.stdout).ok()?;
+    let key = text.lines().next()?.trim();
+    let plain =
+        (key.starts_with("ssh-") || key.starts_with("ecdsa-")) && !key.contains(['\'', '"', '\\']);
+    plain.then(|| key.to_string())
 }
 
 /// 这台服务器用的 ssh-agent 里有的公钥（`ssh-add -L`），没有 agent 就是空的。
