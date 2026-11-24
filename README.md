@@ -531,6 +531,7 @@ auto_approve = ["read_file"]          # 这些工具不用问；别的每次调�
 | `sa service install [--workdir 目录] [--mock]` / `uninstall` | Linux 上装成 systemd 用户服务常驻：开机自启、崩了拉起、退出 SSH 也不停 |
 | `sa url` | 打印本机这个服务的地址和令牌（`sa connect` 在服务器上调它） |
 | `sa connect <用户@主机> [-p SSH 端口] [--local-port 端口] [--open]` | 通过 SSH 隧道连服务器上的 Myriad，打印本机链接；断了自动重连 |
+| `sa share <目录> [--name 名字] [--read-only] [--server <用户@主机> [-p SSH 端口] \| --url <链接>]` | 把本机目录共享给服务，房间选它当工作目录后 Bot 经它看、搜、改文件；断了自动重连 |
 
 所有命令都可以加 `--data-dir <目录>` 指定数据目录。`sa serve`、`sa chat`、`sa task`、`sa routine`、`sa link`、`sa usage`、`sa audit`、`sa bot`、`sa room` 用同一份数据，同一个数据目录同一时刻只能有一个在运行；
 `sa serve` 开着的时候，Bot 和房间在界面的「成员」面板里管理，定时任务在「定时」面板里管理。

@@ -133,7 +133,11 @@ impl Sharer {
 
     /// 一直取活、做活、交回，直到出了没法继续的错。
     async fn serve(&self, place: &str) -> Result<()> {
-        let mode = if self.read_only { "只读" } else { "可以改" };
+        let mode = if self.read_only {
+            "只读"
+        } else {
+            "可以改"
+        };
         let mut connected = false;
         let mut retry = RETRY_FIRST;
         loop {

@@ -50,6 +50,7 @@ export type { PostMessageRequest } from "./generated/PostMessageRequest";
 export type { Report } from "./generated/Report";
 export type { ReportStatus } from "./generated/ReportStatus";
 export type { Room } from "./generated/Room";
+export type { Share } from "./generated/Share";
 export type { RoomActivity } from "./generated/RoomActivity";
 export type { RoomId } from "./generated/RoomId";
 export type { RoomQueue } from "./generated/RoomQueue";

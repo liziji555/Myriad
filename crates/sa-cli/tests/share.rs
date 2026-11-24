@@ -193,7 +193,10 @@ fn bots_read_and_change_files_in_a_shared_folder_and_wait_while_it_is_offline() 
     let reply = server.ask(&room, "读一下 `说明.md`", |_| {});
     assert_eq!(step(&reply)["state"], "ok", "{reply:#}");
     assert!(
-        reply["content"].as_str().unwrap().contains("只在你电脑上的说明"),
+        reply["content"]
+            .as_str()
+            .unwrap()
+            .contains("只在你电脑上的说明"),
         "{reply:#}"
     );
 
@@ -217,8 +220,7 @@ fn bots_read_and_change_files_in_a_shared_folder_and_wait_while_it_is_offline() 
         if let (Some(step), false) = (waiting, decided) {
             let id = step["approval"]["id"].as_str().unwrap();
             let path = format!("/api/approvals/{id}/decide");
-            let (status, body) =
-                server.request("POST", &path, Some(json!({ "decision": "once" })));
+            let (status, body) = server.request("POST", &path, Some(json!({ "decision": "once" })));
             assert!(status < 300, "{status} {body}");
             decided = true;
         }
@@ -242,7 +244,10 @@ fn bots_read_and_change_files_in_a_shared_folder_and_wait_while_it_is_offline() 
     });
     assert!(sharing.is_some(), "断开时没有等：{reply:#}");
     assert_eq!(step(&reply)["state"], "ok", "{reply:#}");
-    assert!(reply["content"].as_str().unwrap().contains("只在你电脑上的说明"));
+    assert!(reply["content"]
+        .as_str()
+        .unwrap()
+        .contains("只在你电脑上的说明"));
     drop(sharing);
 
     // 只读：不给 Bot 改文件的工具，文件不会被改。

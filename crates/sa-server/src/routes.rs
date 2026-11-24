@@ -12,9 +12,8 @@ use sa_protocol::{
     HarnessDesk, Health, ImportReport, ImportTemplateRequest, Link, LinkId, Message, MessagePage,
     ModelTier, Notice, NoticeId, Pairing, PermissionRule, PostMessageRequest, QueuedId, Room,
     RoomId, RoomQueue, Routine, RoutineId, RuleId, Share, ShareCall, SharePoll, ShareReply,
-    StopResponse, Task, TaskActionRequest,
-    TaskDetail, TaskId, TeamTemplate, TemplateFile, UpdateBotRequest, UpdateRoomRequest,
-    UpdateRoutineRequest, UsageSummary,
+    StopResponse, Task, TaskActionRequest, TaskDetail, TaskId, TeamTemplate, TemplateFile,
+    UpdateBotRequest, UpdateRoomRequest, UpdateRoutineRequest, UsageSummary,
 };
 use serde::Deserialize;
 

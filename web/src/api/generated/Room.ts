@@ -15,4 +15,8 @@ discussion: Discussion,
 /**
  * 轮流讨论时一句话转几圈。
  */
-rounds: number, created_at: number, updated_at: number, };
+rounds: number, 
+/**
+ * 房间用哪个共享目录当工作目录（别的电脑用 `sa share` 共享过来的）。没有就用服务自己的工作目录。
+ */
+share?: string, created_at: number, updated_at: number, };

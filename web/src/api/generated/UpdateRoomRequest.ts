@@ -13,4 +13,8 @@ host_bot_id?: BotId, discussion?: Discussion,
 /**
  * 轮流讨论转几圈，1 到 3。
  */
-rounds?: number, };
+rounds?: number, 
+/**
+ * 用哪个共享目录当工作目录。空字符串表示改回服务自己的工作目录。
+ */
+share?: string, };

@@ -94,7 +94,9 @@ pub fn share_name(name: &str) -> Result<String, String> {
         return Err("共享目录要有名字".into());
     }
     if name.chars().count() > MAX_SHARE_NAME_CHARS {
-        return Err(format!("共享目录的名字不能超过 {MAX_SHARE_NAME_CHARS} 个字"));
+        return Err(format!(
+            "共享目录的名字不能超过 {MAX_SHARE_NAME_CHARS} 个字"
+        ));
     }
     Ok(name.to_string())
 }
@@ -125,7 +127,11 @@ impl Shares {
     }
 
     /// `sa share` 来取活：有就马上给，没有就最多等 `wait`，还没有就给 `None`。
-    pub async fn poll(&self, hello: SharePoll, wait: Duration) -> Result<Option<ShareCall>, String> {
+    pub async fn poll(
+        &self,
+        hello: SharePoll,
+        wait: Duration,
+    ) -> Result<Option<ShareCall>, String> {
         let name = share_name(&hello.name)?;
         if hello.session.is_empty() {
             return Err("缺少 session".into());
@@ -155,7 +161,9 @@ impl Shares {
                 for id in writes {
                     entry.queue.retain(|queued| *queued != id);
                     if let Some(call) = entry.calls.remove(&id) {
-                        let _ = call.reply.send(Err("这个共享目录是只读的，不能改。".into()));
+                        let _ = call
+                            .reply
+                            .send(Err("这个共享目录是只读的，不能改。".into()));
                     }
                 }
             }
@@ -372,5 +380,139 @@ impl Tool for Remote {
         self.shares
             .call(&self.name, self.inner.name(), input, writes, &ctx.cancel)
             .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn hello(session: &str, read_only: bool) -> SharePoll {
+        SharePoll {
+            name: "项目".into(),
+            session: session.into(),
+            root: "D:\\项目".into(),
+            read_only,
+        }
+    }
+
+    const NOW: Duration = Duration::from_millis(50);
+
+    async fn next(shares: &Shares, session: &str) -> ShareCall {
+        // 新连上来的第一次取活没活就马上回空，之后才等活。
+        if let Some(call) = shares.poll(hello(session, false), NOW).await.unwrap() {
+            return call;
+        }
+        shares
+            .poll(hello(session, false), Duration::from_secs(5))
+            .await
+            .unwrap()
+            .expect("应该有活")
+    }
+
+    #[tokio::test]
+    async fn a_call_waits_for_the_computer_and_gets_its_answer() {
+        let shares = Arc::new(Shares::default());
+        let cancel = CancellationToken::new();
+        let calling = {
+            let (shares, cancel) = (shares.clone(), cancel.clone());
+            tokio::spawn(async move {
+                shares
+                    .call("项目", "read", json!({"path": "a"}), false, &cancel)
+                    .await
+            })
+        };
+        tokio::time::sleep(NOW).await;
+        assert!(shares.list().is_empty(), "还没连上来过的不列出来");
+        let call = next(&shares, "s1").await;
+        assert_eq!(
+            (call.tool.as_str(), &call.input),
+            ("read", &json!({"path": "a"}))
+        );
+        assert!(shares.list()[0].online);
+        let reply = ShareReply {
+            name: "项目".into(),
+            session: "s1".into(),
+            id: call.id,
+            ok: true,
+            text: "内容".into(),
+        };
+        shares.reply(reply).unwrap();
+        assert_eq!(calling.await.unwrap().unwrap(), "内容");
+    }
+
+    #[tokio::test]
+    async fn lost_reads_are_sent_again_and_lost_writes_are_reported() {
+        let shares = Arc::new(Shares::default());
+        let cancel = CancellationToken::new();
+        let spawn = |tool: &'static str, writes: bool| {
+            let (shares, cancel) = (shares.clone(), cancel.clone());
+            tokio::spawn(async move { shares.call("项目", tool, json!({}), writes, &cancel).await })
+        };
+        let write = spawn("write", true);
+        tokio::time::sleep(NOW).await;
+        let read = spawn("read", false);
+        tokio::time::sleep(NOW).await;
+        assert_eq!(next(&shares, "s1").await.tool, "write");
+        // 换了一次运行（电脑重启了 sa share）：交出去没交回的写不知道做没做。
+        let again = next(&shares, "s2").await;
+        let error = write.await.unwrap().unwrap_err();
+        assert!(error.0.contains("不知道这次改动做完没有"), "{error:?}");
+        assert_eq!(again.tool, "read");
+        // 读丢了就再交一次。
+        let again = next(&shares, "s3").await;
+        assert_eq!(again.tool, "read");
+        // 被顶替的那次运行交回来的不收。
+        let stale = ShareReply {
+            name: "项目".into(),
+            session: "s2".into(),
+            id: again.id,
+            ok: true,
+            text: "旧的".into(),
+        };
+        assert!(shares.reply(stale).is_err());
+        cancel.cancel();
+        assert!(read.await.unwrap().is_err());
+    }
+
+    #[tokio::test]
+    async fn read_only_shares_refuse_queued_writes_and_hide_write_tools() {
+        let shares = Arc::new(Shares::default());
+        let cancel = CancellationToken::new();
+        let write = {
+            let (shares, cancel) = (shares.clone(), cancel.clone());
+            tokio::spawn(
+                async move { shares.call("项目", "write", json!({}), true, &cancel).await },
+            )
+        };
+        tokio::time::sleep(NOW).await;
+        assert_eq!(shares.poll(hello("s1", true), NOW).await.unwrap(), None);
+        assert!(write.await.unwrap().unwrap_err().0.contains("只读"));
+        let tools = tools(&shares, "项目", &ToolRegistry::standard());
+        let names: Vec<&str> = tools.iter().map(|tool| tool.name()).collect();
+        for name in READ_ONLY_TOOLS {
+            assert!(names.contains(&name), "{names:?}");
+        }
+        for name in ["write", "edit", "shell"] {
+            assert!(!names.contains(&name), "{names:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn stopping_a_waiting_call_takes_it_out_of_the_queue() {
+        let shares = Arc::new(Shares::default());
+        let cancel = CancellationToken::new();
+        let read = {
+            let (shares, cancel) = (shares.clone(), cancel.clone());
+            tokio::spawn(
+                async move { shares.call("项目", "read", json!({}), false, &cancel).await },
+            )
+        };
+        tokio::time::sleep(NOW).await;
+        cancel.cancel();
+        assert_eq!(read.await.unwrap().unwrap_err().0, "已停止，没有执行。");
+        let _ = shares.poll(hello("s1", false), NOW).await;
+        assert_eq!(shares.poll(hello("s1", false), NOW).await.unwrap(), None);
     }
 }
