@@ -386,6 +386,16 @@ function Shell() {
           },
         ]
       : []),
+    ...(invokeDesktop
+      ? [
+          {
+            id: "action:data-dir",
+            group: "action" as const,
+            title: "打开数据目录",
+            run: () => void invokeDesktop("open_data_dir").catch(() => {}),
+          },
+        ]
+      : []),
     ...(room && replying
       ? [
           {

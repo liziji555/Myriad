@@ -13,15 +13,19 @@ const BUTTONS = [
 
 /**
  * 桌面版的窗口按钮：主窗口没有系统的标题栏，最小化、最大化、关闭画在顶栏最右边。浏览器里不出现。
- * 画出来了才告诉外壳把系统的标题栏收走，所以不会出现窗口关不掉的情况。
+ * 外壳答应把系统的标题栏收走了才画：老版本的外壳不认这个命令，标题栏还在，这里就什么都不画。
  */
 export function WindowControls() {
   const [invoke] = useState(() => desktopInvoke());
+  const [owned, setOwned] = useState(false);
 
   useEffect(() => {
     if (!invoke) return;
     const chrome = (action: string) => void invoke("window_chrome", { action }).catch(() => {});
-    chrome("own");
+    void invoke("window_chrome", { action: "own" }).then(
+      () => setOwned(true),
+      () => {},
+    );
     const onBar = (event: MouseEvent) => {
       const target = event.target;
       return target instanceof Element && target.closest(BAR) && !target.closest(CONTROL);
@@ -49,7 +53,7 @@ export function WindowControls() {
     };
   }, [invoke]);
 
-  if (!invoke) return null;
+  if (!invoke || !owned) return null;
   return (
     <div className="sa-window-controls">
       {BUTTONS.map(({ action, label, path }) => (
