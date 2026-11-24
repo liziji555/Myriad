@@ -47,6 +47,8 @@ struct Entry {
     /// 还没交出去的活，先来先做。
     queue: VecDeque<u64>,
     calls: HashMap<u64, Call>,
+    /// 被顶替过的运行：它们再来取活也不让回来，免得两个 `sa share` 来回抢。
+    retired: std::collections::HashSet<String>,
 }
 
 impl Entry {
@@ -141,17 +143,25 @@ impl Shares {
         {
             let mut state = self.state.lock().unwrap();
             let entry = state.shares.entry(name.clone()).or_default();
+            if entry.retired.contains(&hello.session) {
+                return Err(TAKEN.into());
+            }
             fresh = entry.session != hello.session;
             if fresh {
-                entry.session = hello.session.clone();
+                let old = std::mem::replace(&mut entry.session, hello.session.clone());
+                if !old.is_empty() {
+                    entry.retired.insert(old);
+                }
                 entry.polling = 0;
                 if !entry.root.is_empty() && entry.root != hello.root {
                     // 同一个名字换成了另一个目录：之前要做的（尤其批准过的改动）是冲着原来那个目录的。
                     entry.queue.clear();
                     for (_, call) in entry.calls.drain() {
-                        let _ = call.reply.send(Err(format!(
-                            "共享目录「{name}」换成了另一个目录，这一步没有执行。"
-                        )));
+                        let _ = call.reply.send(Err(if call.sent && call.writes {
+                            format!("共享目录「{name}」换成了另一个目录。这一步已经交给原来的目录，可能已经改了那边的文件。")
+                        } else {
+                            format!("共享目录「{name}」换成了另一个目录，这一步没有执行。")
+                        }));
                     }
                 }
             }
@@ -277,8 +287,11 @@ impl Shares {
         let answer = tokio::select! {
             answer = &mut answer => answer,
             _ = cancel.cancelled() => {
-                if !(writes && pending.sent()) {
+                if pending.withdraw() {
                     return Err(ToolError::new("已停止，没有执行。"));
+                }
+                if !writes {
+                    return Err(ToolError::new("已停止。"));
                 }
                 // 改动已经交出去了：等一会儿那边的结果，照实报。
                 match tokio::time::timeout(STOPPED_WRITE_WAIT, &mut answer).await {
@@ -310,14 +323,18 @@ struct Pending<'a> {
 }
 
 impl Pending<'_> {
-    /// 已经交给那台电脑了吗。
-    fn sent(&self) -> bool {
-        let state = self.shares.state.lock().unwrap();
-        state
-            .shares
-            .get(self.name)
-            .and_then(|entry| entry.calls.get(&self.id))
-            .is_some_and(|call| call.sent)
+    /// 还没交给那台电脑的话撤回，回 `true`；已经交出去（或已经有结果）的回 `false`。
+    fn withdraw(&self) -> bool {
+        let mut state = self.shares.state.lock().unwrap();
+        let Some(entry) = state.shares.get_mut(self.name) else {
+            return false;
+        };
+        if !entry.calls.get(&self.id).is_some_and(|call| !call.sent) {
+            return false;
+        }
+        entry.calls.remove(&self.id);
+        entry.queue.retain(|queued| *queued != self.id);
+        true
     }
 }
 
@@ -524,6 +541,8 @@ mod tests {
             text: "旧的".into(),
         };
         assert!(shares.reply(stale).is_err());
+        // 被顶替的那次运行再来取活也回不来。
+        assert!(shares.poll(hello("s2", false), NOW).await.is_err());
         cancel.cancel();
         assert!(read.await.unwrap().is_err());
     }
