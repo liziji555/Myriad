@@ -192,8 +192,12 @@ impl Sharer {
                         connected = true;
                     }
                     retry = RETRY_FIRST;
-                    if let Some(call) = call {
-                        self.start(call);
+                    // 命令可能跑很久，边跑边接着取活（好收到「停下」）；文件操作很快，做完再取下一件。
+                    // 旧的服务不看 `running`，文件操作要是也边做边取，会被它当成丢了。
+                    match call {
+                        Some(call) if call.tool == STOP || call.tool == "shell" => self.start(call),
+                        Some(call) => self.handle(call, CancellationToken::new()).await,
+                        None => {}
                     }
                 }
                 Err(Poll::Taken(reason)) => bail!("{reason}"),
@@ -245,7 +249,7 @@ impl Sharer {
         }
     }
 
-    /// 开始做一件活（不等它做完，接着去取下一件），或者叫停正在做的那件。
+    /// 开始执行一条命令（不等它跑完，接着去取下一件），或者叫停正在跑的那条。
     fn start(self: &Arc<Self>, call: ShareCall) {
         if call.tool == STOP {
             if let Some(cancel) = self.running.lock().unwrap().get(&call.id) {
