@@ -137,15 +137,20 @@ pub async fn provision(
         let git_dir = git(&target, &["rev-parse", "--absolute-git-dir"]).await?;
         // 工作目录是仓库里的一个子目录时，任务也只在对应的子目录里干活。
         let path = target.join(prefix.trim().trim_end_matches('/'));
-        return Ok(Workdir {
-            path: plain(&path).display().to_string(),
-            kind: KIND_WORKTREE.into(),
-            branch: Some(branch),
-            base_ref: head,
-            root,
-            git_dir: git_dir.trim().to_string(),
-            source,
-        });
+        if path.is_dir() {
+            return Ok(Workdir {
+                path: plain(&path).display().to_string(),
+                kind: KIND_WORKTREE.into(),
+                branch: Some(branch),
+                base_ref: head,
+                root,
+                git_dir: git_dir.trim().to_string(),
+                source,
+            });
+        }
+        // 这一层还没提交进仓库：分支里没有它，收掉 worktree，改成复制一份。
+        git(workspace, &["worktree", "remove", "--force", &root]).await?;
+        git(workspace, &["branch", "-D", &branch]).await?;
     }
 
     let git_dir = work_root.join(format!("{}.git", task_id.as_str()));
@@ -575,6 +580,26 @@ mod tests {
         std::fs::write(dir.join(".gitattributes"), "* -text\n").unwrap();
         git(dir, &["add", "-A"]).await.unwrap();
         git(dir, &["commit", "-q", "-m", "init"]).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_subdirectory_not_yet_in_the_repo_is_copied_instead() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (repo_dir, work_root) = (tmp.path().join("repo"), tmp.path().join("work"));
+        std::fs::create_dir_all(&repo_dir).unwrap();
+        repo(&repo_dir).await;
+        let workspace = repo_dir.join("新的");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(workspace.join("x.txt"), "x\n").unwrap();
+
+        let task_id = TaskId::new();
+        let workdir = provision(&workspace, &work_root, &task_id).await.unwrap();
+        assert_eq!(workdir.kind, KIND_COPY);
+        assert!(Path::new(&workdir.path).join("x.txt").exists());
+        let branches = git(&repo_dir, &["branch", "--list"]).await.unwrap();
+        assert!(!branches.contains("sa/"), "{branches}");
+        let worktrees = git(&repo_dir, &["worktree", "list"]).await.unwrap();
+        assert_eq!(worktrees.lines().count(), 1, "{worktrees}");
     }
 
     #[tokio::test]
