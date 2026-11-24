@@ -168,9 +168,8 @@ impl SshTarget {
 
     /// 在服务器上跑 `sa url`，拿到服务在服务器上的地址和令牌。途中 `stop.close()` 了就放弃。
     pub fn remote_service(&self, stop: &TunnelStop) -> Result<RemoteService> {
-        let mut command = self.command();
-        own_group(&mut command);
-        let mut child = command
+        let mut child = self
+            .command()
             .args(["--", &self.host, &format!("{REMOTE_PATH} sa url")])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -186,7 +185,8 @@ impl SshTarget {
                 if stop.stopped() {
                     // 刚放进去就被喊停的话，`close` 可能没赶上它。
                     if let Some(mut child) = slot.take() {
-                        kill_group(&mut child);
+                        let _ = child.kill();
+                        let _ = child.wait();
                     }
                     bail!("已取消连接");
                 }
@@ -621,7 +621,8 @@ impl TunnelStop {
     pub fn close(&self) {
         self.stop.store(true, Ordering::SeqCst);
         if let Some(mut child) = self.child.lock().unwrap().take() {
-            kill_group(&mut child);
+            let _ = child.kill();
+            let _ = child.wait();
         }
     }
 
@@ -751,28 +752,6 @@ fn bracket(ip: IpAddr) -> String {
         IpAddr::V6(ip) => format!("[{ip}]"),
         IpAddr::V4(ip) => ip.to_string(),
     }
-}
-
-/// 经跳板机连时 ssh 自己还会再起一个 ssh。让它们待在自己的进程组里，停的时候一起杀。
-fn own_group(command: &mut Command) {
-    #[cfg(unix)]
-    std::os::unix::process::CommandExt::process_group(command, 0);
-    #[cfg(not(unix))]
-    let _ = command;
-}
-
-/// 杀掉 ssh；它是 `own_group` 起的话，连它起的那些一起杀。
-fn kill_group(child: &mut Child) {
-    // 还没 `wait`，这个进程号不会被别人占走；不是组长的话没有这个组，什么也杀不到。
-    #[cfg(unix)]
-    let _ = Command::new("kill")
-        .args(["-KILL", "--", &format!("-{}", child.id())])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-    let _ = child.kill();
-    let _ = child.wait();
 }
 
 fn spawn(mut command: Command, capture: bool) -> Result<Child> {
@@ -974,29 +953,6 @@ mod tests {
         assert_eq!(tail, ["-L", "127.0.0.1:5000:[::1]:4517", "--", "me@vps"]);
         assert!(args.windows(2).any(|w| w == ["-p", "2222"]));
         assert!(args.iter().any(|a| a == "BatchMode=yes"));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn stopping_kills_what_ssh_started_too() {
-        // 跳板机那个 ssh 的替身：父进程死了它还拿着 stderr 不放。
-        let mut command = Command::new("sh");
-        own_group(&mut command);
-        let mut child = command
-            .args(["-c", "sleep 30 & wait"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-        let stderr = read_all(child.stderr.take());
-        std::thread::sleep(Duration::from_millis(200));
-        let stop = TunnelStop::default();
-        *stop.child.lock().unwrap() = Some(child);
-        let started = Instant::now();
-        stop.close();
-        stderr.join().unwrap();
-        assert!(started.elapsed() < Duration::from_secs(5));
     }
 
     #[cfg(unix)]
