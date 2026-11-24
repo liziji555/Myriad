@@ -206,6 +206,9 @@ export function ConnectPanel({ state, invoke, onClose }: Props) {
                 换工作目录…
               </button>
             )}
+            <button type="button" className="sa-button sa-button-quiet" onClick={() => void act("open_data_dir")}>
+              打开数据目录
+            </button>
           </div>
           <p className="sa-connect-hint">换工作目录会重新打开 Myriad。</p>
         </section>

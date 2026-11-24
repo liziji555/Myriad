@@ -10,6 +10,8 @@ fn main() {
             "use_local",
             "pick_key",
             "pick_workdir",
+            "open_data_dir",
+            "window_chrome",
             "retry",
         ]),
     ))

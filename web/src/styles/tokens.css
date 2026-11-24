@@ -47,6 +47,18 @@
   --sa-hover: color-mix(in srgb, var(--sa-fg) 6%, transparent);
   --sa-active: color-mix(in srgb, var(--sa-fg) 10%, transparent);
 
+  /* 玻璃：半透明的面、后面的东西糊开、上沿一道高光。底下铺一层很淡的彩色光斑，玻璃才透得出东西。 */
+  --sa-glass: color-mix(in srgb, var(--sa-bg-raised) 56%, transparent);
+  --sa-glass-strong: color-mix(in srgb, var(--sa-bg-raised) 76%, transparent);
+  --sa-glass-blur: blur(24px) saturate(170%);
+  --sa-glass-edge: inset 0 1px 0 color-mix(in srgb, #fff var(--sa-glass-shine), transparent);
+  --sa-glass-shine: 70%;
+  --sa-backdrop:
+    radial-gradient(55% 50% at 8% 0%, color-mix(in srgb, var(--sa-accent) 36%, transparent), transparent 72%),
+    radial-gradient(45% 45% at 100% 8%, color-mix(in srgb, #b46be0 28%, transparent), transparent 72%),
+    radial-gradient(60% 55% at 72% 100%, color-mix(in srgb, #2bb5a0 26%, transparent), transparent 72%),
+    var(--sa-bg-side);
+
   --sa-sidebar-width: 248px;
   --sa-rail-width: 56px;
   --sa-panel-width: 360px;
@@ -74,6 +86,7 @@
   --sa-danger: #ee7a6c;
   --sa-shadow: 0 1px 2px rgb(0 0 0 / 40%), 0 10px 28px rgb(0 0 0 / 36%);
   --sa-avatar-mix: 26%;
+  --sa-glass-shine: 9%;
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
@@ -88,5 +101,6 @@
     --sa-danger: #ee7a6c;
     --sa-shadow: 0 1px 2px rgb(0 0 0 / 40%), 0 10px 28px rgb(0 0 0 / 36%);
     --sa-avatar-mix: 26%;
+    --sa-glass-shine: 9%;
   }
 }

@@ -10,7 +10,7 @@ body,
 }
 body {
   margin: 0;
-  background: var(--sa-bg);
+  background: var(--sa-backdrop) fixed;
   color: var(--sa-fg);
   font: var(--sa-text-base) / 1.5 var(--sa-font);
   -webkit-font-smoothing: antialiased;
@@ -1531,20 +1531,6 @@ button.sa-row:hover {
   padding: var(--sa-space-6) var(--sa-space-2);
   text-align: center;
   color: var(--sa-fg-muted);
-}
-.sa-nodes {
-  display: grid;
-  gap: var(--sa-space-2);
-}
-.sa-node {
-  position: relative;
-  display: flex;
-  align-items: center;
-  gap: var(--sa-space-2);
-  min-height: 40px;
-  padding: 0 var(--sa-space-3);
-  border: 1px solid var(--sa-border);
-  border-radius: var(--sa-radius-md);
 }
 
 /* ---- 窄屏：面板变成盖在上面的抽屉，牌子只留名字 -------------------------- */
@@ -3283,4 +3269,112 @@ button.sa-row:hover {
 }
 .sa-connect[data-state="failed"] {
   border-color: var(--sa-danger);
+}
+
+/* 桌面版的窗口按钮：贴着顶栏右上角，和顶栏一样高。 */
+.sa-window-controls {
+  display: flex;
+  align-self: stretch;
+  margin: 0 calc(-1 * var(--sa-space-3)) 0 var(--sa-space-2);
+}
+.sa-gate > .sa-window-controls {
+  position: fixed;
+  top: 0;
+  right: 0;
+  height: 36px;
+  margin: 0;
+}
+.sa-stage-actions:has(.sa-window-controls) {
+  align-self: stretch;
+}
+.sa-window-button {
+  display: grid;
+  place-items: center;
+  width: 46px;
+  border: 0;
+  background: none;
+  color: var(--sa-fg-muted);
+}
+.sa-window-button:hover {
+  background: var(--sa-hover);
+  color: var(--sa-fg);
+}
+.sa-window-button[data-action="close"]:hover {
+  background: #e5484d;
+  color: #fff;
+}
+/* 顶栏当标题栏用：拖的时候别选中上面的字。 */
+.sa-stage:has(.sa-window-controls),
+.sa-shell:has(.sa-window-controls) .sa-sidebar-head {
+  user-select: none;
+}
+
+/* ---- 玻璃态 ---------------------------------------------------------------
+ * 三栏和顶栏是玻璃，透出 body 上的光斑；浮在内容上面的（输入框、菜单、面板、弹层）
+ * 是更实一点的玻璃，把后面的字糊开。卡片只做半透明，不再各自模糊，免得叠太多层。 */
+.sa-stage,
+.sa-sidebar,
+.sa-panel {
+  background: var(--sa-glass);
+  backdrop-filter: var(--sa-glass-blur);
+  box-shadow: var(--sa-glass-edge);
+}
+.sa-main {
+  background: color-mix(in srgb, var(--sa-bg) 42%, transparent);
+}
+.sa-composer-box,
+.sa-mention-menu,
+.sa-to-latest,
+.sa-queue,
+.sa-approval,
+.sa-palette,
+.sa-connect-panel {
+  background: var(--sa-glass-strong);
+  backdrop-filter: var(--sa-glass-blur);
+}
+.sa-composer-box,
+.sa-mention-menu,
+.sa-to-latest,
+.sa-queue,
+.sa-approval {
+  box-shadow: var(--sa-glass-edge), var(--sa-shadow);
+}
+.sa-composer-box:focus-within {
+  box-shadow:
+    var(--sa-glass-edge),
+    0 0 0 3px color-mix(in srgb, var(--sa-accent) 18%, transparent),
+    var(--sa-shadow);
+}
+.sa-card,
+.sa-exec,
+.sa-stage-search,
+.sa-presence-chip,
+.sa-new-room-button,
+.sa-button-quiet,
+.sa-connect-mode,
+.sa-connect-reason,
+.sa-msg[data-sender="user"][data-kind="chat"] > .sa-msg-body {
+  background: var(--sa-glass);
+  box-shadow: var(--sa-glass-edge);
+}
+/* 窄屏的抽屉盖在内容上，要更实一点才看得清。 */
+@media (max-width: 1100px) {
+  .sa-shell .sa-panel,
+  .sa-shell[data-rooms="open"] .sa-sidebar {
+    background: var(--sa-glass-strong);
+  }
+}
+/* 系统要求少用透明、或者不支持模糊的，退回实心底色。 */
+@media (prefers-reduced-transparency: reduce) {
+  :root {
+    --sa-glass: var(--sa-bg-side);
+    --sa-glass-strong: var(--sa-bg-raised);
+    --sa-glass-blur: none;
+  }
+}
+@supports not (backdrop-filter: blur(1px)) {
+  :root {
+    --sa-glass: var(--sa-bg-side);
+    --sa-glass-strong: var(--sa-bg-raised);
+  }
 }

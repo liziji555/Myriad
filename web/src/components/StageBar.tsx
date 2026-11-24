@@ -4,6 +4,7 @@ import { THEME_LABEL, type Theme } from "../api/theme";
 import type { Room } from "../api/types";
 import { BotAvatar } from "./BotAvatar";
 import { Icon } from "./Icon";
+import { WindowControls } from "./WindowControls";
 
 const THEME_ICON = { system: "auto", light: "sun", dark: "moon" } as const;
 
@@ -147,6 +148,7 @@ export function StageBar({
             <Icon name="panel" />
           </button>
         )}
+        <WindowControls />
       </div>
     </header>
   );
