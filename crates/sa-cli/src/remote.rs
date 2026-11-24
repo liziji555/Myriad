@@ -197,6 +197,12 @@ impl SshTarget {
     /// 密码只交给这一个 ssh，不写到哪里。
     pub fn install_key(&self, password: Option<&str>) -> Result<()> {
         let config = self.ssh_config()?;
+        // ssh 连跳板机时也会来问密码，我们分不清是谁在问，不能把服务器的密码交出去。
+        if password.is_some() && config.proxied {
+            bail!(
+                "{self} 要经跳板机连，这里没法替你填密码：在终端里运行 sa connect --install-key {self}，按提示分别输密码"
+            );
+        }
         let key = local_public_key(&config.identities)?;
         let mut command = self.base_command();
         command.args([
