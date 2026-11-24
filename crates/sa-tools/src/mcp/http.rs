@@ -23,6 +23,8 @@ const VERSION: &str = "mcp-protocol-version";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// 断开时告诉服务会话结束了，最多等这么久。
 const GOODBYE_TIMEOUT: Duration = Duration::from_secs(5);
+/// 一条通知最多等这么久，免得一条发不出去的通知把后面的都堵住。
+const NOTIFY_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_SHOWN_BODY_CHARS: usize = 200;
 
 /// 服务说的话往这里放。拿掉就是线断了。
@@ -109,16 +111,17 @@ async fn pump(remote: Arc<Remote>, outbox: DuplexStream) {
             .flatten()
             .and_then(|id| running.remove(&id));
         let asking = message.get("method").and(message["id"].as_u64());
-        let remote = remote.clone();
-        let post = posts.spawn(async move {
-            remote.post(message).await;
+        let Some(id) = asking else {
+            // 通知按顺序发完再往下：握手完成的通知要在后面的请求之前到。
+            let _ = tokio::time::timeout(NOTIFY_TIMEOUT, remote.post(message)).await;
             if let Some(given_up) = given_up {
                 given_up.abort();
             }
-        });
-        if let Some(id) = asking {
-            running.insert(id, post);
-        }
+            continue;
+        };
+        let remote = remote.clone();
+        let post = posts.spawn(async move { remote.post(message).await });
+        running.insert(id, post);
     }
     drop(posts);
     if let Some(stream) = remote.stream.lock().unwrap().take() {
@@ -126,10 +129,13 @@ async fn pump(remote: Arc<Remote>, outbox: DuplexStream) {
     }
     let session = remote.session.lock().unwrap().take();
     if let Some(session) = session {
-        let bye = remote
+        let mut bye = remote
             .client
             .delete(remote.url.clone())
             .header(SESSION, session);
+        if let Some(version) = remote.version.lock().unwrap().clone() {
+            bye = bye.header(VERSION, version);
+        }
         let _ = tokio::time::timeout(GOODBYE_TIMEOUT, bye.send()).await;
     }
 }
@@ -193,7 +199,7 @@ impl Remote {
             .to_ascii_lowercase();
         let mut answered = asking.is_none();
         if kind.starts_with("text/event-stream") {
-            let mut events = response.bytes_stream().eventsource();
+            let mut events = events(response);
             while let Some(Ok(event)) = events.next().await {
                 answered |= self.take(&event.data, asking, first).await;
                 if answered && asking.is_some() {
@@ -275,7 +281,8 @@ impl Remote {
         if !response.status().is_success() || !streaming {
             return Err("不是事件流".into());
         }
-        let mut events = response.bytes_stream().eventsource();
+        let base = response.url().clone();
+        let mut events = events(response);
         let endpoint = loop {
             match tokio::time::timeout(CONNECT_TIMEOUT, events.next()).await {
                 Ok(Some(Ok(event))) if event.event == "endpoint" => break event.data,
@@ -283,8 +290,8 @@ impl Remote {
                 _ => return Err("服务没有说往哪发".into()),
             }
         };
-        let endpoint = self
-            .url
+        // 相对的地址按事件流实际所在的网址来算（可能跳转过）。
+        let endpoint = base
             .join(endpoint.trim())
             .map_err(|error| error.to_string())?;
         // 请求头里可能有令牌：不带着它去别的地方。
@@ -295,9 +302,6 @@ impl Remote {
         let inbox = self.inbox.clone();
         let stream = tokio::spawn(async move {
             while let Some(Ok(event)) = events.next().await {
-                if event.data.len() > MAX_LINE_BYTES {
-                    continue;
-                }
                 if let Ok(message) = serde_json::from_str::<Value>(&event.data) {
                     deliver(&inbox, &message).await;
                 }
@@ -331,6 +335,33 @@ async fn deliver(inbox: &Inbox, message: &Value) {
     if writer.write_all(&line).await.is_err() {
         *inbox = None;
     }
+}
+
+/// 回应里的 SSE 事件。一个事件攒到太长还没完的，当成流断了，不再往内存里放。
+fn events(
+    response: reqwest::Response,
+) -> impl futures_util::Stream<Item = Result<eventsource_stream::Event, ()>> + Unpin {
+    let (mut pending, mut blank) = (0usize, false);
+    let capped = response.bytes_stream().map(move |chunk| {
+        let chunk = chunk.map_err(|_| ())?;
+        // 空行是一个事件的结尾：只数它后面还没完的那一段。
+        for byte in chunk.iter() {
+            match byte {
+                b'\n' if blank => pending = 0,
+                b'\n' => blank = true,
+                b'\r' => {}
+                _ => {
+                    blank = false;
+                    pending += 1;
+                }
+            }
+        }
+        if pending > MAX_LINE_BYTES {
+            return Err(());
+        }
+        Ok::<_, ()>(chunk)
+    });
+    Box::pin(capped.eventsource().map(|event| event.map_err(|_| ())))
 }
 
 /// 回应的正文，太长的不要。
