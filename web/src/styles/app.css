@@ -3187,3 +3187,100 @@ button.sa-row:hover {
     animation: none;
   }
 }
+
+/* 桌面版的「连接」面板 */
+.sa-connect-panel {
+  display: grid;
+  gap: var(--sa-space-3);
+  width: min(680px, 100%);
+  max-height: 80vh;
+  padding: var(--sa-space-4);
+  border: 1px solid var(--sa-border);
+  border-radius: var(--sa-radius-lg);
+  background: var(--sa-bg);
+  box-shadow: 0 16px 48px color-mix(in srgb, var(--sa-fg) 22%, transparent);
+  overflow-y: auto;
+}
+.sa-connect-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.sa-connect-head h2 {
+  margin: 0;
+  font-size: var(--sa-text-lg, 16px);
+}
+.sa-connect-modes {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--sa-space-3);
+}
+.sa-connect-mode {
+  display: grid;
+  gap: var(--sa-space-1);
+  padding: var(--sa-space-3);
+  border: 1px solid var(--sa-border);
+  border-radius: var(--sa-radius-md);
+  background: var(--sa-bg-raised);
+  color: var(--sa-fg-muted);
+  font: inherit;
+  font-size: var(--sa-text-sm);
+  text-align: left;
+  cursor: pointer;
+}
+.sa-connect-mode strong {
+  display: flex;
+  align-items: center;
+  gap: var(--sa-space-1);
+  color: var(--sa-fg);
+  font-size: var(--sa-text-base);
+}
+.sa-connect-mode[aria-checked="true"] {
+  border-color: var(--sa-accent);
+  box-shadow: 0 0 0 1px var(--sa-accent);
+}
+.sa-connect-row {
+  display: grid;
+  grid-template-columns: 1fr 8em;
+  gap: var(--sa-space-3);
+}
+.sa-connect-key {
+  display: flex;
+  gap: var(--sa-space-2);
+}
+.sa-connect-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--sa-space-2);
+}
+.sa-connect-path,
+.sa-connect-reason {
+  margin: 0;
+  padding: var(--sa-space-2);
+  border: 1px solid var(--sa-border);
+  border-radius: var(--sa-radius-sm);
+  background: var(--sa-bg-raised);
+  color: var(--sa-fg);
+  font: 13px/1.5 ui-monospace, Consolas, monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.sa-connect-hint {
+  margin: 0;
+  font-size: var(--sa-text-sm);
+  color: var(--sa-fg-muted);
+}
+.sa-connect-ok {
+  margin: 0;
+  font-size: var(--sa-text-sm);
+  color: var(--sa-success, var(--sa-accent));
+}
+.sa-connect-password {
+  padding: var(--sa-space-3);
+  border: 1px solid var(--sa-border);
+  border-radius: var(--sa-radius-md);
+}
+.sa-connect[data-state="failed"] {
+  border-color: var(--sa-danger);
+}

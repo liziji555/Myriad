@@ -110,6 +110,8 @@ pub struct SshTarget {
     pub host: String,
     /// 不给就用 SSH 自己的默认值。
     pub port: Option<u16>,
+    /// 指定用哪把私钥。不给就由 SSH 自己挑（ssh-agent、~/.ssh/config、默认的那几把）。
+    pub identity: Option<PathBuf>,
 }
 
 impl SshTarget {
@@ -129,7 +131,13 @@ impl SshTarget {
         Ok(Self {
             host: host.to_string(),
             port,
+            identity: None,
         })
+    }
+
+    pub fn with_identity(mut self, identity: Option<PathBuf>) -> Self {
+        self.identity = identity;
+        self
     }
 
     /// 所有 ssh 调用共用的参数：不问密码、不卡住，第一次连的主机自动记下它的指纹，
@@ -151,6 +159,9 @@ impl SshTarget {
         ]);
         if let Some(port) = self.port {
             command.arg("-p").arg(port.to_string());
+        }
+        if let Some(identity) = &self.identity {
+            command.arg("-i").arg(identity);
         }
         command
     }
@@ -259,9 +270,11 @@ impl SshTarget {
 }
 
 /// 在服务器上从标准输入读一行公钥，没有就加进 authorized_keys。用 `sh -c`，登录 shell 是 fish 之类的也能跑。
-const INSTALL_KEY: &str = "sh -c 'umask 077; read -r key || exit 1; \
+/// 有没有只看类型和公钥本身：同一把钥匙备注不一样（或者没带备注）不再加一遍；注释掉的行不算。
+const INSTALL_KEY: &str = "sh -c 'umask 077; read -r kind blob note || exit 1; \
+[ -n \"$blob\" ] || exit 1; key=\"$kind $blob${note:+ $note}\"; \
 mkdir -p ~/.ssh && touch ~/.ssh/authorized_keys || exit 1; \
-grep -qxF \"$key\" ~/.ssh/authorized_keys && exit 0; \
+awk -v k=\"$kind\" -v b=\"$blob\" \"\\$1 !~ /^#/ { for (i = 1; i < NF; i++) if (\\$i == k && \\$(i + 1) == b) found = 1 } END { exit !found }\" ~/.ssh/authorized_keys && exit 0; \
 if [ -s ~/.ssh/authorized_keys ] && [ -n \"$(tail -c 1 ~/.ssh/authorized_keys)\" ]; then echo >> ~/.ssh/authorized_keys; fi; \
 printf \"%s\\n\" \"$key\" >> ~/.ssh/authorized_keys'";
 
@@ -341,6 +354,14 @@ fn local_public_key(identities: &[PathBuf], agent: &str) -> Result<String> {
         let public = public_path(private);
         // 私钥只在 agent 里、本机只有 .pub 的也算。
         let Ok(key) = read_public_key(&public) else {
+            // 只有私钥、没有 .pub（云厂商下载的 .pem 常这样）：没设口令就能算出公钥。
+            match derive_public_key(private) {
+                Some(key) => return Ok(key),
+                None if private.is_file() && !public.exists() => {
+                    locked.get_or_insert(private.clone());
+                }
+                None => {}
+            }
             continue;
         };
         if key_in(agent, &key) || private.is_file() && unlocked(private) {
@@ -413,6 +434,28 @@ fn unlocked(private: &Path) -> bool {
         .stderr(Stdio::null());
     hide_console(&mut keygen);
     keygen.status().is_ok_and(|status| status.success())
+}
+
+/// 从没设口令的私钥算出公钥（`ssh-keygen -y`）。
+fn derive_public_key(private: &Path) -> Option<String> {
+    let mut keygen = Command::new("ssh-keygen");
+    keygen
+        .args(["-y", "-P", "", "-f"])
+        .arg(private)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null());
+    hide_console(&mut keygen);
+    let output = keygen
+        .output()
+        .ok()
+        .filter(|output| output.status.success())?;
+    let text = String::from_utf8(output.stdout).ok()?;
+    // 只要类型和公钥本身，后面的备注不要：备注里什么字符都可能有。
+    let mut fields = text.lines().next()?.split_whitespace();
+    let key = format!("{} {}", fields.next()?, fields.next()?);
+    let plain =
+        (key.starts_with("ssh-") || key.starts_with("ecdsa-")) && !key.contains(['\'', '"', '\\']);
+    plain.then_some(key)
 }
 
 /// 这台服务器用的 ssh-agent 里有的公钥（`ssh-add -L`），没有 agent 就是空的。
@@ -902,6 +945,19 @@ mod tests {
             std::fs::read_to_string(&keys).unwrap(),
             "ssh-rsa BBBB old\nssh-ed25519 AAAA one\n"
         );
+        // 同一把钥匙，备注没带或者不一样：不再加一遍。
+        install("ssh-ed25519 AAAA");
+        install("ssh-ed25519 AAAA it's \"mine\"");
+        assert_eq!(
+            std::fs::read_to_string(&keys).unwrap(),
+            "ssh-rsa BBBB old\nssh-ed25519 AAAA one\n"
+        );
+        // 注释掉的、只是开头一样的都不算已经有了。
+        std::fs::write(&keys, "# ssh-ed25519 CCCC off\nssh-ed25519 CCCCDD other\n").unwrap();
+        install("ssh-ed25519 CCCC");
+        assert!(std::fs::read_to_string(&keys)
+            .unwrap()
+            .ends_with("other\nssh-ed25519 CCCC\n"));
     }
 
     #[test]
