@@ -381,12 +381,12 @@ fn rewrite(
             ProviderKind::OpenaiCompat => "openai_compat",
             ProviderKind::Anthropic => "anthropic",
         };
-        entry.insert("kind", value(kind));
-        entry.insert("base_url", value(&provider.base_url));
+        set_str(entry, "kind", kind);
+        set_str(entry, "base_url", &provider.base_url);
         if provider.api_key_env.is_empty() {
             entry.remove("api_key_env");
         } else {
-            entry.insert("api_key_env", value(&provider.api_key_env));
+            set_str(entry, "api_key_env", &provider.api_key_env);
         }
     }
     let table = doc
@@ -395,6 +395,16 @@ fn rewrite(
         .as_table_like_mut()
         .context("config.toml 的 tiers 不是一节")?;
     for (name, tier) in tiers.iter() {
+        // 没改的档位不动，它上面和后面的注释才留得住。
+        let same = table.get(name).is_some_and(|old| {
+            toml::from_str::<toml::Value>(&format!("t = {old}"))
+                .ok()
+                .and_then(|value| value.get("t").cloned()?.try_into::<TierModel>().ok())
+                .is_some_and(|old| &old == tier)
+        });
+        if same {
+            continue;
+        }
         let mut inline = InlineTable::new();
         inline.insert("provider", tier.provider.as_str().into());
         inline.insert("model", tier.model.as_str().into());
@@ -404,9 +414,25 @@ fn rewrite(
         if let Some(window) = tier.context_window {
             inline.insert("context_window", (window as i64).into());
         }
-        table.insert(name, value(inline));
+        match table.get_mut(name) {
+            Some(old) => *old = value(inline),
+            None => {
+                table.insert(name, value(inline));
+            }
+        }
     }
     Ok(doc.to_string())
+}
+
+/// 值没变就不动；变了只换值，这一行上面的注释留着。
+fn set_str(table: &mut dyn toml_edit::TableLike, key: &str, new: &str) {
+    match table.get_mut(key) {
+        Some(old) if old.as_str() == Some(new) => {}
+        Some(old) => *old = toml_edit::value(new),
+        None => {
+            table.insert(key, toml_edit::value(new));
+        }
+    }
 }
 
 /// 先写到旁边的临时文件再换过去：写到一半断电也不会留下半个文件。只有当前用户能读写。
@@ -669,6 +695,57 @@ tiers = { cheap = { provider = "old", model = "m" }, mid = { provider = "old", m
             again["tiers"]["strong"]["model"].as_str(),
             Some("deepseek-v4-pro")
         );
+    }
+
+    #[test]
+    fn rewrite_keeps_notes_next_to_settings() {
+        let text = r#"[providers.old]
+# 接口类型
+kind = "openai_compat"
+# 中转的地址
+base_url = "https://a.example" # 备用 b.example
+api_key_env = "OLD_API_KEY"
+
+[tiers]
+# 省钱用这个
+cheap = { provider = "old", model = "m" } # 便宜
+mid = { provider = "old", model = "m" }
+# 最强的
+strong = { provider = "old", model = "m" }
+"#;
+        let mut config = Config::parse(DEFAULT_CONFIG_TOML).unwrap();
+        let mut provider = config.providers.remove("deepseek").unwrap();
+        provider.base_url = "https://a.example".into();
+        provider.api_key_env = "OLD_API_KEY".into();
+        let providers = BTreeMap::from([("old".to_string(), provider)]);
+        for tier in [
+            &mut config.tiers.cheap,
+            &mut config.tiers.mid,
+            &mut config.tiers.strong,
+        ] {
+            *tier = TierModel {
+                provider: "old".into(),
+                model: "m".into(),
+                thinking: None,
+                context_window: None,
+            };
+        }
+        // 什么都没改：一个字都不动。
+        assert_eq!(rewrite(text, &providers, &config.tiers).unwrap(), text);
+        // 只改一个档位：别处的注释都在。
+        config.tiers.strong.model = "big".into();
+        let changed = rewrite(text, &providers, &config.tiers).unwrap();
+        for note in [
+            "# 接口类型",
+            "# 中转的地址",
+            "# 备用 b.example",
+            "# 省钱用这个",
+            "# 便宜",
+            "# 最强的",
+        ] {
+            assert!(changed.contains(note), "{note}\n{changed}");
+        }
+        assert!(changed.contains(r#"model = "big""#));
     }
 
     #[test]
