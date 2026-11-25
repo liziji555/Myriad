@@ -292,7 +292,11 @@ impl ConfigModels {
                 base_url,
                 // 界面里新加的不读环境变量：不然起个名字就能把别的密钥发到任意地址。
                 api_key_env: old.map(|old| old.api_key_env.clone()).unwrap_or_default(),
-                session_header: old.and_then(|old| old.session_header.clone()),
+                // 请求头的名字不是密钥，地址换了也跟着走。
+                session_header: state
+                    .providers
+                    .get(&name)
+                    .and_then(|old| old.session_header.clone()),
             };
             anyhow::ensure!(
                 providers.insert(name.clone(), provider).is_none(),
