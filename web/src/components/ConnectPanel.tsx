@@ -290,7 +290,7 @@ export function ConnectPanel({ state, invoke, onClose }: Props) {
                 {connecting ? "正在连…" : state.pinned === "server" ? "重新连接" : "保存并连接"}
               </button>
               {(connecting || busy === "test") && (
-                <button type="button" className="sa-link" onClick={cancel}>
+                <button type="button" className="sa-button sa-button-quiet" onClick={cancel}>
                   {connecting ? "不连了" : "不测了"}
                 </button>
               )}
