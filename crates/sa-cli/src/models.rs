@@ -275,8 +275,14 @@ impl ConfigModels {
         let text = rewrite(&text, &providers, &tiers)?;
         // 写之前按整份配置的规矩再查一遍：查不过就什么都不改。
         Config::parse(&text)?;
-        replace_private(&files.keys, &toml::to_string(&keys)?)?;
+        // 中途断了也不能让哪份配置找不到自己的密钥：先让密钥文件新旧都有，换好配置再去掉不用的。
+        let mut both = state.keys.clone();
+        both.extend(keys.clone());
+        replace_private(&files.keys, &toml::to_string(&both)?)?;
         replace_private(&files.config, &text)?;
+        if both != keys {
+            replace_private(&files.keys, &toml::to_string(&keys)?)?;
+        }
         state.providers = providers;
         state.tiers = tiers;
         state.keys = keys;
