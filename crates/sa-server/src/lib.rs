@@ -16,12 +16,25 @@ use axum::{middleware, Router};
 use sa_adapters::github_events;
 use sa_engine::Engine;
 use sa_orchestrator::Orchestrator;
+use sa_protocol::{ModelSettings, SaveModelsRequest, TestModelRequest, TestModelResult};
 use std::future::Future;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 
 pub use assets::frontend_is_embedded;
+
+/// 界面里的「模型」页背后的东西：看、改、试模型服务和档位。失败时返回给人看的原因。
+pub trait ModelAdmin: Send + Sync {
+    fn settings(&self) -> ModelSettings;
+    /// 保存整份设置，马上生效。
+    fn save(&self, request: SaveModelsRequest) -> Result<ModelSettings, String>;
+    /// 调一次模型看通不通。不保存。
+    fn test(
+        &self,
+        request: TestModelRequest,
+    ) -> futures_util::future::BoxFuture<'static, TestModelResult>;
+}
 
 #[derive(Clone)]
 pub struct AppState {
@@ -30,6 +43,8 @@ pub struct AppState {
     pub(crate) token: Arc<str>,
     /// GitHub Webhook 的密钥和筛选。没有配密钥时 `/hooks/github` 不收任何东西。
     pub(crate) github_hook: Option<Arc<GithubHook>>,
+    /// 模型设置。用假模型时没有。
+    pub(crate) models: Option<Arc<dyn ModelAdmin>>,
     /// 置为 `true` 表示服务正在关闭：长连接（SSE）据此主动结束，否则优雅关闭会一直等它们。
     pub(crate) closing: watch::Sender<bool>,
 }
@@ -45,12 +60,19 @@ impl AppState {
             orchestrator,
             token: token.into(),
             github_hook: None,
+            models: None,
             closing: watch::Sender::new(false),
         }
     }
 
     pub fn orchestrator(&self) -> Arc<Orchestrator> {
         self.orchestrator.clone()
+    }
+
+    /// 让界面能看、能改模型设置。
+    pub fn with_models(mut self, models: Arc<dyn ModelAdmin>) -> Self {
+        self.models = Some(models);
+        self
     }
 
     /// 打开 `/hooks/github`：用 `secret` 验签名。
@@ -139,6 +161,8 @@ pub fn router(state: AppState) -> Router {
         .route("/links/{link_id}", delete(routes::delete_link))
         .route("/rooms/{room_id}/pairing", post(routes::create_pairing))
         .route("/extensions", get(routes::extensions))
+        .route("/models", get(routes::models).put(routes::save_models))
+        .route("/models/test", post(routes::test_model))
         .route("/shares", get(routes::list_shares))
         .route("/shares/poll", post(routes::poll_share))
         .route("/shares/reply", post(routes::reply_share))

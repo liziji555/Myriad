@@ -10,10 +10,11 @@ use sa_protocol::{
     ApprovalId, AuditPage, Bot, BotId, CreateBotRequest, CreateLinkRequest, CreateRoomRequest,
     CreateRoutineRequest, CreateTaskRequest, DecideApprovalRequest, EditQueuedRequest, Extensions,
     HarnessDesk, Health, ImportReport, ImportTemplateRequest, Link, LinkId, Message, MessagePage,
-    ModelTier, Notice, NoticeId, Pairing, PermissionRule, PostMessageRequest, QueuedId, Room,
-    RoomId, RoomQueue, Routine, RoutineId, RuleId, Share, ShareCall, SharePoll, ShareReply,
-    StopResponse, Task, TaskActionRequest, TaskDetail, TaskId, TeamTemplate, TemplateFile,
-    UpdateBotRequest, UpdateRoomRequest, UpdateRoutineRequest, UsageSummary,
+    ModelSettings, ModelTier, Notice, NoticeId, Pairing, PermissionRule, PostMessageRequest,
+    QueuedId, Room, RoomId, RoomQueue, Routine, RoutineId, RuleId, SaveModelsRequest, Share,
+    ShareCall, SharePoll, ShareReply, StopResponse, Task, TaskActionRequest, TaskDetail, TaskId,
+    TeamTemplate, TemplateFile, TestModelRequest, TestModelResult, UpdateBotRequest,
+    UpdateRoomRequest, UpdateRoutineRequest, UsageSummary,
 };
 use serde::Deserialize;
 
@@ -605,6 +606,44 @@ pub async fn extensions(State(state): State<AppState>) -> Result<Json<Extensions
         .await
         .map_err(AppError::internal)?;
     Ok(Json(found))
+}
+
+fn model_admin(state: &AppState) -> Result<std::sync::Arc<dyn crate::ModelAdmin>, AppError> {
+    state.models.clone().ok_or_else(|| {
+        AppError::new(
+            StatusCode::CONFLICT,
+            "conflict",
+            "现在用的是不联网的假模型（--mock），没有模型设置",
+        )
+    })
+}
+
+/// 接了哪些模型服务，三个档位各用哪个模型。
+pub async fn models(State(state): State<AppState>) -> Result<Json<ModelSettings>, AppError> {
+    Ok(Json(model_admin(&state)?.settings()))
+}
+
+/// 保存模型设置，马上生效。写得不对时什么都不改。
+pub async fn save_models(
+    State(state): State<AppState>,
+    body: Result<Json<SaveModelsRequest>, JsonRejection>,
+) -> Result<Json<ModelSettings>, AppError> {
+    let Json(body) = body.map_err(|e| AppError::bad_request(e.body_text()))?;
+    let admin = model_admin(&state)?;
+    let saved = tokio::task::spawn_blocking(move || admin.save(body))
+        .await
+        .map_err(AppError::internal)?
+        .map_err(|message| AppError::new(StatusCode::BAD_REQUEST, "invalid", message))?;
+    Ok(Json(saved))
+}
+
+/// 调一次模型看通不通。没通也是 200，原因在 `message` 里。
+pub async fn test_model(
+    State(state): State<AppState>,
+    body: Result<Json<TestModelRequest>, JsonRejection>,
+) -> Result<Json<TestModelResult>, AppError> {
+    let Json(body) = body.map_err(|e| AppError::bad_request(e.body_text()))?;
+    Ok(Json(model_admin(&state)?.test(body).await))
 }
 
 pub async fn list_shares(State(state): State<AppState>) -> Json<Vec<Share>> {

@@ -108,6 +108,9 @@ pub fn serve_until(
                 app.orchestrator.start_mcp(mcp);
             }
             let mut state = AppState::new(app.engine.clone(), app.orchestrator.clone(), token);
+            if let Some(models) = &app.models {
+                state = state.with_models(models.clone());
+            }
             // 外面的连接都是可选的：没设对应的环境变量就不开。
             let github = &app.config.github;
             if let Some(secret) = env_value(&github.webhook_secret_env) {

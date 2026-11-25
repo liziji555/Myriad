@@ -259,6 +259,90 @@ pub struct Extensions {
     pub mcp: Vec<McpServerInfo>,
 }
 
+/// 模型服务说的是哪种接口。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum ProviderKind {
+    /// OpenAI 的 Chat Completions，以及兼容它的服务。
+    OpenaiCompat,
+    /// Anthropic 的 Messages，以及兼容它的中转。
+    Anthropic,
+}
+
+/// 一个模型服务。密钥不往外给，只说有没有。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ModelProvider {
+    pub name: String,
+    pub kind: ProviderKind,
+    pub base_url: String,
+    pub has_key: bool,
+}
+
+/// 一个档位用哪个模型服务的哪个模型。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TierChoice {
+    pub provider: String,
+    pub model: String,
+    /// 是否开启思考模式。不写就用模型服务自己的默认值。
+    pub thinking: Option<bool>,
+    /// 上下文窗口（token）。不写就用模型服务报的大小。
+    pub context_window: Option<u32>,
+}
+
+/// 现在接了哪些模型服务，三个档位各用哪个模型。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ModelSettings {
+    /// 这份设置的版本。保存时原样带回来，对不上说明别处已经改过。
+    pub revision: String,
+    pub providers: Vec<ModelProvider>,
+    pub cheap: TierChoice,
+    pub mid: TierChoice,
+    pub strong: TierChoice,
+}
+
+/// 要保存或者要测试的一个模型服务。`api_key` 不写表示沿用已经存着的那个。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ModelProviderInput {
+    pub name: String,
+    pub kind: ProviderKind,
+    pub base_url: String,
+    #[serde(default)]
+    pub api_key: Option<String>,
+}
+
+/// 整份模型设置：没写进来的模型服务会被删掉。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SaveModelsRequest {
+    /// 读到的那份设置的 `revision`。
+    pub revision: String,
+    pub providers: Vec<ModelProviderInput>,
+    pub cheap: TierChoice,
+    pub mid: TierChoice,
+    pub strong: TierChoice,
+}
+
+/// 用这个模型服务的这个模型说一句话，看通不通。不保存。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TestModelRequest {
+    pub provider: ModelProviderInput,
+    pub model: String,
+}
+
+/// `message` 是给人看的：通了是模型回的话，没通是原因。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TestModelResult {
+    pub ok: bool,
+    pub message: String,
+}
+
 /// 模板里的一个 Bot：只有名字、档位、分工、是否启用。没有 ID、时间和任何密钥，换一台机器也能用。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]

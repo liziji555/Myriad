@@ -173,18 +173,15 @@ pub struct Server {
 pub struct Provider {
     pub kind: ProviderKind,
     pub base_url: String,
+    /// 密钥放在哪个环境变量里。空着就只用界面「模型」页里填的。
+    #[serde(default)]
     pub api_key_env: String,
     /// 把会话 ID 放在这个请求头里发给服务端。不写就不发。
     #[serde(default)]
     pub session_header: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ProviderKind {
-    OpenaiCompat,
-    Anthropic,
-}
+pub use sa_protocol::ProviderKind;
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -363,9 +360,6 @@ impl Config {
             }
         }
         for (name, provider) in &self.providers {
-            if provider.api_key_env.trim().is_empty() {
-                bail!("[providers.{name}] 没有填 api_key_env");
-            }
             if let Some(header) = &provider.session_header {
                 // HTTP 请求头名字允许的字符（RFC 9110 的 token）。
                 let valid = !header.is_empty()

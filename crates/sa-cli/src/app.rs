@@ -29,6 +29,8 @@ pub struct App {
     pub config: Config,
     pub engine: Arc<Engine>,
     pub orchestrator: Arc<Orchestrator>,
+    /// 界面里的「模型」页改的东西。用假模型时没有。
+    pub models: Option<Arc<ConfigModels>>,
     /// 给人看的工作目录。
     pub workdir: String,
     pub mock: bool,
@@ -47,22 +49,29 @@ impl App {
         args: &RunArgs,
         tune: impl FnOnce(&mut Settings),
     ) -> Result<Self> {
-        let models = |config: &Config| -> Arc<dyn ModelRouter> {
-            if args.mock {
-                // 假模型也看 mid 档位的窗口大小：调小它就能演示自动压缩。
-                Arc::new(models::mock(config.tiers.mid.context_window))
-            } else {
-                Arc::new(ConfigModels::new(config.clone()))
-            }
+        if args.mock {
+            // 假模型也看 mid 档位的窗口大小：调小它就能演示自动压缩。
+            let models = |config: &Config| -> Result<Arc<dyn ModelRouter>> {
+                Ok(Arc::new(models::mock(config.tiers.mid.context_window)))
+            };
+            return Self::open_tuned(data_dir, args, models, tune);
+        }
+        let mut real = None;
+        let models = |config: &Config| -> Result<Arc<dyn ModelRouter>> {
+            let models = Arc::new(ConfigModels::open(config.clone(), data_dir)?);
+            real = Some(models.clone());
+            Ok(models)
         };
-        Self::open_tuned(data_dir, args, models, tune)
+        let mut app = Self::open_tuned(data_dir, args, models, tune)?;
+        app.models = real;
+        Ok(app)
     }
 
     /// 和 [`App::open_and_tune`] 一样，但由调用方决定用哪些模型。测试用它把等待时间调短。
     pub fn open_tuned(
         data_dir: &DataDir,
         args: &RunArgs,
-        models: impl FnOnce(&Config) -> Arc<dyn ModelRouter>,
+        models: impl FnOnce(&Config) -> Result<Arc<dyn ModelRouter>>,
         tune: impl FnOnce(&mut Settings),
     ) -> Result<Self> {
         let (engine, lock) = open_state(data_dir)?;
@@ -95,6 +104,7 @@ impl App {
                 .providers
                 .values()
                 .map(|provider| provider.api_key_env.clone())
+                .filter(|var| !var.is_empty())
                 .chain([
                     config.github.token_env.clone(),
                     config.github.webhook_secret_env.clone(),
@@ -107,7 +117,7 @@ impl App {
                         .filter_map(|server| server.token_env.clone()),
                 ),
         );
-        let models = models(&config);
+        let models = models(&config)?;
         let mut settings = Settings {
             sessions_dir: data_dir.sessions(),
             fence,
@@ -139,6 +149,7 @@ impl App {
             config,
             engine,
             orchestrator,
+            models: None,
             workdir,
             mock: args.mock,
             _lock: lock,
