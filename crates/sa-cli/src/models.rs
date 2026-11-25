@@ -46,6 +46,33 @@ struct State {
     keys: BTreeMap<String, String>,
     /// 每个模型服务只建一个客户端，连接可以复用。
     clients: HashMap<String, Arc<dyn Provider>>,
+    /// 每存一次换一个。界面保存时带回来，对不上就是别处已经改过。
+    revision: String,
+}
+
+fn new_revision() -> String {
+    uuid::Uuid::new_v4().simple().to_string()
+}
+
+/// 密钥只走加密的连接；本机和内网里自己搭的模型服务可以用 http。
+fn check_url(name: &str, base_url: &str) -> Result<(), String> {
+    let url = reqwest::Url::parse(base_url)
+        .map_err(|_| format!("「{name}」的地址要是一个 http(s) 地址"))?;
+    let host = url.host_str().unwrap_or_default();
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    let local = match host.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(ip)) => ip.is_loopback() || ip.is_private() || ip.is_link_local(),
+        Ok(std::net::IpAddr::V6(ip)) => ip.is_loopback() || (ip.segments()[0] & 0xfe00) == 0xfc00,
+        Err(_) => host == "localhost" || host.ends_with(".localhost"),
+    };
+    match url.scheme() {
+        "https" => Ok(()),
+        "http" if local => Ok(()),
+        "http" => Err(format!(
+            "「{name}」的地址要用 https：http 只能用在本机和内网，不然密钥会明文发出去"
+        )),
+        _ => Err(format!("「{name}」的地址要是一个 http(s) 地址")),
+    }
 }
 
 impl ConfigModels {
@@ -62,6 +89,7 @@ impl ConfigModels {
                 tiers: config.tiers,
                 keys: BTreeMap::new(),
                 clients: HashMap::new(),
+                revision: new_revision(),
             }),
         }
     }
@@ -86,9 +114,21 @@ impl ConfigModels {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// 存着的密钥只给存着的那个地址用：地址换了就得重新填，不会把它发到别处去。
+    fn key_for(&self, state: &State, name: &str, base_url: &str) -> Option<String> {
+        let same = state
+            .providers
+            .get(name)
+            .is_some_and(|provider| provider.base_url.trim() == base_url.trim());
+        self.key(state, name).filter(|_| same)
+    }
+
     fn key(&self, state: &State, name: &str) -> Option<String> {
         let saved = state.keys.get(name).cloned();
-        let from_env = || (self.env)(&state.providers.get(name)?.api_key_env);
+        let from_env = || {
+            let var = &state.providers.get(name)?.api_key_env;
+            (!var.is_empty()).then(|| (self.env)(var)).flatten()
+        };
         saved
             .or_else(from_env)
             .map(|key| key.trim().to_string())
@@ -148,9 +188,13 @@ impl ModelRouter for ConfigModels {
             None => {
                 let var = &provider.api_key_env;
                 let key = self.key(&state, name).ok_or_else(|| {
+                    let or_env = if var.is_empty() {
+                        String::new()
+                    } else {
+                        format!("或者把它放进环境变量 {var} 后重新启动。")
+                    };
                     format!(
-                        "没有模型密钥：请在界面的「模型」页给「{name}」填上 API Key，\
-                         或者把它放进环境变量 {var} 后重新启动。\
+                        "没有模型密钥：请在界面的「模型」页给「{name}」填上 API Key。{or_env}\
                          只想先看看流程的话，可以加 --mock 用不联网的假模型。"
                     )
                 })?;
@@ -191,6 +235,7 @@ fn tier(choice: TierChoice) -> TierModel {
 impl ConfigModels {
     fn view(&self, state: &State) -> ModelSettings {
         ModelSettings {
+            revision: state.revision.clone(),
             providers: state
                 .providers
                 .iter()
@@ -213,6 +258,10 @@ impl ConfigModels {
             .as_ref()
             .context("这次运行没有可以写的配置文件")?;
         let mut state = self.state();
+        anyhow::ensure!(
+            request.revision == state.revision,
+            "模型设置在别处改过了。点「重新读取」看到最新的，再改一次"
+        );
         let mut providers = BTreeMap::new();
         let mut keys = BTreeMap::new();
         for input in request.providers {
@@ -224,25 +273,23 @@ impl ConfigModels {
                 "模型服务的名字只能用小写字母、数字、横线和下划线，最多 24 个字符（现在是「{name}」）"
             );
             let base_url = input.base_url.trim().to_string();
-            anyhow::ensure!(
-                reqwest::Url::parse(&base_url)
-                    .is_ok_and(|url| matches!(url.scheme(), "http" | "https")),
-                "「{name}」的地址要是一个 http(s) 地址"
-            );
-            let old = state.providers.get(&name);
+            check_url(&name, &base_url).map_err(anyhow::Error::msg)?;
+            // 地址没变才算同一个模型服务：存着的密钥、环境变量里的密钥都只给原来的地址。
+            let old = state
+                .providers
+                .get(&name)
+                .filter(|old| old.base_url.trim() == base_url);
             let key = input.api_key.map(|key| key.trim().to_string());
             if let Some(key) = key.filter(|key| !key.is_empty()) {
                 keys.insert(name.clone(), key);
-            } else if let Some(key) = state.keys.get(&name) {
+            } else if let Some(key) = state.keys.get(&name).filter(|_| old.is_some()) {
                 keys.insert(name.clone(), key.clone());
             }
             let provider = ProviderConfig {
                 kind: input.kind,
                 base_url,
-                api_key_env: old.map_or_else(
-                    || format!("{}_API_KEY", name.to_uppercase().replace('-', "_")),
-                    |old| old.api_key_env.clone(),
-                ),
+                // 界面里新加的不读环境变量：不然起个名字就能把别的密钥发到任意地址。
+                api_key_env: old.map(|old| old.api_key_env.clone()).unwrap_or_default(),
                 session_header: old.and_then(|old| old.session_header.clone()),
             };
             anyhow::ensure!(
@@ -259,8 +306,9 @@ impl ConfigModels {
             let name = &tier.provider;
             let has_key = |provider: &ProviderConfig| {
                 let saved = keys.get(name).cloned();
+                let var = &provider.api_key_env;
                 saved
-                    .or_else(|| (self.env)(&provider.api_key_env))
+                    .or_else(|| (!var.is_empty()).then(|| (self.env)(var)).flatten())
                     .is_some_and(|key| !key.trim().is_empty())
             };
             // 不存在的模型服务下面检查整份配置时会说。
@@ -287,6 +335,7 @@ impl ConfigModels {
         state.tiers = tiers;
         state.keys = keys;
         state.clients.clear();
+        state.revision = new_revision();
         Ok(self.view(&state))
     }
 }
@@ -329,7 +378,11 @@ fn rewrite(
         };
         entry.insert("kind", value(kind));
         entry.insert("base_url", value(&provider.base_url));
-        entry.insert("api_key_env", value(&provider.api_key_env));
+        if provider.api_key_env.is_empty() {
+            entry.remove("api_key_env");
+        } else {
+            entry.insert("api_key_env", value(&provider.api_key_env));
+        }
     }
     let table = doc
         .entry("tiers")
@@ -387,10 +440,12 @@ impl ModelAdmin for ConfigModels {
         } = request.provider;
         let state = self.state();
         let name = name.trim();
+        let base_url = base_url.trim().to_string();
+        let checked = check_url(name, &base_url);
         let key = api_key
             .map(|key| key.trim().to_string())
             .filter(|key| !key.is_empty())
-            .or_else(|| self.key(&state, name));
+            .or_else(|| self.key_for(&state, name, &base_url));
         let header = state
             .providers
             .get(name)
@@ -399,13 +454,16 @@ impl ModelAdmin for ConfigModels {
         let model = request.model.trim().to_string();
         Box::pin(async move {
             let failed = |message: String| TestModelResult { ok: false, message };
+            if let Err(message) = checked {
+                return failed(message);
+            }
             let Some(key) = key else {
                 return failed("还没有填 API Key".into());
             };
             if model.is_empty() {
                 return failed("还没有填模型的名字".into());
             }
-            let client = match client(kind, base_url.trim(), key, header.as_deref()) {
+            let client = match client(kind, &base_url, key, header.as_deref()) {
                 Ok(client) => client,
                 Err(error) => return failed(error.to_string()),
             };
@@ -530,8 +588,9 @@ mod tests {
         }
     }
 
-    fn request(key: Option<&str>) -> SaveModelsRequest {
+    fn request(models: &ConfigModels, key: Option<&str>) -> SaveModelsRequest {
         SaveModelsRequest {
+            revision: models.settings().revision,
             providers: vec![ModelProviderInput {
                 name: "mine".into(),
                 kind: ProviderKind::Anthropic,
@@ -550,7 +609,7 @@ mod tests {
         let models = opened(dir.path());
         assert!(models.resolve(ModelTier::Mid).is_err());
 
-        let saved = models.save(request(Some("sk-secret"))).unwrap();
+        let saved = models.save(request(&models, Some("sk-secret"))).unwrap();
         assert_eq!(saved.providers.len(), 1);
         assert!(saved.providers[0].has_key);
         assert_eq!(models.resolve(ModelTier::Strong).unwrap().model, "big");
@@ -562,7 +621,7 @@ mod tests {
         assert!(!text.contains("[providers.deepseek]"));
 
         // 不重新填密钥就沿用存着的；重新打开也还在。
-        models.save(request(None)).unwrap();
+        models.save(request(&models, None)).unwrap();
         let data_dir = DataDir::resolve(Some(dir.path().to_path_buf())).unwrap();
         let config = Config::load(&data_dir.config()).unwrap();
         let mut again = ConfigModels::open(config, &data_dir).unwrap();
@@ -612,7 +671,7 @@ tiers = { cheap = { provider = "old", model = "m" }, mid = { provider = "old", m
         let dir = tempfile::tempdir().unwrap();
         let models = opened(dir.path());
         let before = std::fs::read_to_string(dir.path().join("config.toml")).unwrap();
-        let mut no_key = request(None);
+        let mut no_key = request(&models, None);
         assert!(models.save(no_key.clone()).unwrap_err().contains("API Key"));
         no_key.providers[0].api_key = Some("k".into());
         no_key.strong = pick("gone", "big");
@@ -620,7 +679,7 @@ tiers = { cheap = { provider = "old", model = "m" }, mid = { provider = "old", m
             .save(no_key)
             .unwrap_err()
             .contains("不存在的模型服务"));
-        let mut bad_name = request(Some("k"));
+        let mut bad_name = request(&models, Some("k"));
         bad_name.providers[0].name = "My Model".into();
         assert!(models.save(bad_name).unwrap_err().contains("小写字母"));
         assert_eq!(
@@ -630,12 +689,67 @@ tiers = { cheap = { provider = "old", model = "m" }, mid = { provider = "old", m
         assert_eq!(models.settings().providers[0].name, "deepseek");
     }
 
+    #[test]
+    fn a_stale_save_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let models = opened(dir.path());
+        let stale = request(&models, Some("k"));
+        models.save(stale.clone()).unwrap();
+        let error = models.save(stale).unwrap_err();
+        assert!(error.contains("在别处改过"), "{error}");
+    }
+
+    #[test]
+    fn saved_keys_stay_with_their_address() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut models = opened(dir.path());
+        // 环境里有别的密钥：界面里新加的模型服务起什么名字都读不到。
+        models.env = Box::new(|_| Some("from-env".into()));
+        let error = models.save(request(&models, None)).unwrap_err();
+        assert!(error.contains("还没有填 API Key"), "{error}");
+        models.save(request(&models, Some("sk-secret"))).unwrap();
+
+        // 地址换了不重新填密钥：不存，也不拿存着的去测。
+        let mut moved = request(&models, None);
+        moved.providers[0].base_url = "https://elsewhere.example".into();
+        let error = models.save(moved.clone()).unwrap_err();
+        assert!(error.contains("还没有填 API Key"), "{error}");
+        let state = models.state();
+        assert!(models
+            .key_for(&state, "mine", "https://elsewhere.example")
+            .is_none());
+        assert!(models
+            .key_for(&state, "mine", "https://example.com")
+            .is_some());
+    }
+
+    #[test]
+    fn plain_http_is_only_for_local_addresses() {
+        for ok in [
+            "https://api.example.com/v1",
+            "http://localhost:11434/v1",
+            "http://127.0.0.1:8080",
+            "http://192.168.1.5:8000/v1",
+            "http://[::1]:8080",
+        ] {
+            assert!(check_url("x", ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "http://api.example.com/v1",
+            "http://8.8.8.8",
+            "ftp://x",
+            "nope",
+        ] {
+            assert!(check_url("x", bad).is_err(), "{bad}");
+        }
+    }
+
     #[tokio::test]
     async fn test_reports_why_a_model_is_unreachable() {
         let dir = tempfile::tempdir().unwrap();
         let models = opened(dir.path());
         let mut request = TestModelRequest {
-            provider: request(None).providers.remove(0),
+            provider: request(&models, None).providers.remove(0),
             model: "small".into(),
         };
         let result = models.test(request.clone()).await;

@@ -296,6 +296,8 @@ pub struct TierChoice {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct ModelSettings {
+    /// 这份设置的版本。保存时原样带回来，对不上说明别处已经改过。
+    pub revision: String,
     pub providers: Vec<ModelProvider>,
     pub cheap: TierChoice,
     pub mid: TierChoice,
@@ -317,6 +319,8 @@ pub struct ModelProviderInput {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct SaveModelsRequest {
+    /// 读到的那份设置的 `revision`。
+    pub revision: String,
     pub providers: Vec<ModelProviderInput>,
     pub cheap: TierChoice,
     pub mid: TierChoice,

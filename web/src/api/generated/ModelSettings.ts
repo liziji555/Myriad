@@ -5,4 +5,8 @@ import type { TierChoice } from "./TierChoice";
 /**
  * 现在接了哪些模型服务，三个档位各用哪个模型。
  */
-export type ModelSettings = { providers: Array<ModelProvider>, cheap: TierChoice, mid: TierChoice, strong: TierChoice, };
+export type ModelSettings = { 
+/**
+ * 这份设置的版本。保存时原样带回来，对不上说明别处已经改过。
+ */
+revision: string, providers: Array<ModelProvider>, cheap: TierChoice, mid: TierChoice, strong: TierChoice, };

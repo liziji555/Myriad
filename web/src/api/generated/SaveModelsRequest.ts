@@ -5,4 +5,8 @@ import type { TierChoice } from "./TierChoice";
 /**
  * 整份模型设置：没写进来的模型服务会被删掉。
  */
-export type SaveModelsRequest = { providers: Array<ModelProviderInput>, cheap: TierChoice, mid: TierChoice, strong: TierChoice, };
+export type SaveModelsRequest = { 
+/**
+ * 读到的那份设置的 `revision`。
+ */
+revision: string, providers: Array<ModelProviderInput>, cheap: TierChoice, mid: TierChoice, strong: TierChoice, };

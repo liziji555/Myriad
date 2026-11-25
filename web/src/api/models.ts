@@ -20,9 +20,17 @@ export interface ProviderDraft {
   has_key: boolean;
   /** 已经存在服务器上的。存过之后名字不能改：密钥是按名字存的。 */
   saved: boolean;
+  /** 存着的地址。存着的密钥只给这个地址用，地址改了要重新填。 */
+  saved_url: string | null;
+}
+
+/** 不重新填密钥行不行：有存着的，而且地址没改。 */
+export function keepsKey(provider: ProviderDraft): boolean {
+  return provider.has_key && provider.base_url.trim() === provider.saved_url;
 }
 
 export interface ModelsDraft {
+  revision: string;
   providers: ProviderDraft[];
   cheap: TierChoice;
   mid: TierChoice;
@@ -31,7 +39,13 @@ export interface ModelsDraft {
 
 export function draftOf(settings: ModelSettings): ModelsDraft {
   return {
-    providers: settings.providers.map((provider) => ({ ...provider, api_key: "", saved: true })),
+    revision: settings.revision,
+    providers: settings.providers.map((provider) => ({
+      ...provider,
+      api_key: "",
+      saved: true,
+      saved_url: provider.base_url,
+    })),
     cheap: settings.cheap,
     mid: settings.mid,
     strong: settings.strong,
@@ -49,6 +63,7 @@ export function providerInput(provider: ProviderDraft) {
 
 export function saveRequest(draft: ModelsDraft): SaveModelsRequest {
   return {
+    revision: draft.revision,
     providers: draft.providers.map(providerInput),
     cheap: draft.cheap,
     mid: draft.mid,
@@ -71,7 +86,11 @@ export function draftProblem(draft: ModelsDraft): string | null {
     const provider = draft.providers.find((p) => p.name.trim() === choice.provider);
     if (!provider) return `「${label}」档还没有选模型服务`;
     if (choice.model.trim() === "") return `「${label}」档还没有填模型的名字`;
-    if (!provider.has_key && provider.api_key.trim() === "") return `「${provider.name.trim()}」还没有填 API Key`;
+    if (!keepsKey(provider) && provider.api_key.trim() === "") {
+      return provider.has_key
+        ? `「${provider.name.trim()}」的地址改了，要重新填 API Key`
+        : `「${provider.name.trim()}」还没有填 API Key`;
+    }
   }
   return null;
 }

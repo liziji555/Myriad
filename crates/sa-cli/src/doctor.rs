@@ -245,6 +245,13 @@ fn check_api_keys(
                     format!("{name}：已在界面的「模型」页填好"),
                 );
             }
+            if var.is_empty() {
+                return Check::new(
+                    "模型密钥",
+                    Status::Warn,
+                    format!("{name}：还没有密钥（在界面的「模型」页填），Bot 将无法调用模型"),
+                );
+            }
             match env(var) {
                 Some(value) if !value.trim().is_empty() => Check::new(
                     "模型密钥",

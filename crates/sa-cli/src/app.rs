@@ -104,6 +104,7 @@ impl App {
                 .providers
                 .values()
                 .map(|provider| provider.api_key_env.clone())
+                .filter(|var| !var.is_empty())
                 .chain([
                     config.github.token_env.clone(),
                     config.github.webhook_secret_env.clone(),

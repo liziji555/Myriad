@@ -4,6 +4,7 @@ import {
   KINDS,
   TIERS,
   draftOf,
+  keepsKey,
   draftProblem,
   providerInput,
   saveRequest,
@@ -21,12 +22,16 @@ export function ModelsPanel() {
   const [testing, setTesting] = useState<ModelTier | null>(null);
   const [results, setResults] = useState<Partial<Record<ModelTier, TestModelResult>>>({});
 
-  useEffect(() => {
+  const load = () => {
+    setError(null);
+    setSaved(false);
+    setResults({});
     api
       .models()
       .then((settings) => setDraft(draftOf(settings)))
       .catch((cause: unknown) => setError(cause instanceof Error ? cause.message : String(cause)));
-  }, []);
+  };
+  useEffect(load, []);
 
   if (!draft) {
     return <p className="sa-panel-empty">{error ?? "正在加载…"}</p>;
@@ -134,7 +139,9 @@ export function ModelsPanel() {
                 type="password"
                 value={provider.api_key}
                 autoComplete="off"
-                placeholder={provider.has_key ? "已经存着，不改就留空" : "还没有填"}
+                placeholder={
+                  keepsKey(provider) ? "已经存着，不改就留空" : provider.has_key ? "地址改了，要重新填" : "还没有填"
+                }
                 onChange={(event) => setProvider(index, { api_key: event.target.value })}
               />
             </label>
@@ -155,7 +162,7 @@ export function ModelsPanel() {
               ...draft,
               providers: [
                 ...draft.providers,
-                { name: "", kind: "openai_compat", base_url: "", api_key: "", has_key: false, saved: false },
+                { name: "", kind: "openai_compat", base_url: "", api_key: "", has_key: false, saved: false, saved_url: null },
               ],
             })
           }
@@ -231,6 +238,9 @@ export function ModelsPanel() {
       <div className="sa-form-actions">
         <button type="button" className="sa-button" disabled={busy || problem !== null} onClick={() => void save()}>
           {busy ? "保存中…" : "保存"}
+        </button>
+        <button type="button" className="sa-button sa-button-quiet" disabled={busy} onClick={load}>
+          重新读取
         </button>
       </div>
     </div>
