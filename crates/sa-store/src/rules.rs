@@ -81,6 +81,7 @@ mod tests {
             discussion: Default::default(),
             rounds: sa_protocol::DEFAULT_ROUNDS,
             share: None,
+            permission: Default::default(),
             id: RoomId::new(),
             name: name.into(),
             host_bot_id: None,

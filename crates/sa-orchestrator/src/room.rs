@@ -12,8 +12,8 @@ use sa_kernel::{
 use sa_llm::{RetryPolicy, Usage};
 use sa_protocol::{
     ApprovalDecision, ApprovalId, Bot, BotId, Discussion, Harness, Message, MessageId, MessageKind,
-    MessageState, Room, RoomActivity, RoomId, Sender, SessionId, Source, StepApproval, StepState,
-    ToolStep, MAX_ROUNDS,
+    MessageState, PermissionMode, Room, RoomActivity, RoomId, Sender, SessionId, Source,
+    StepApproval, StepState, ToolStep, MAX_ROUNDS,
 };
 use sa_tools::{Fence, ToolCtx, ToolRegistry};
 use serde_json::Value;
@@ -1917,6 +1917,17 @@ impl Observer for RoomObserver {
 
     async fn request_approval(&self, request: ApprovalRequest<'_>) -> bool {
         let engine = &self.shared.engine;
+        // 房间设成了「完全权限」：不问。每次现查，改了设置马上生效。
+        {
+            let (engine, room) = (engine.clone(), self.room_id.clone());
+            match db(move || engine.get_room(&room)).await {
+                Ok(room) if room.permission == PermissionMode::Full => return true,
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::error!(room = %self.room_id, "查不了房间的权限设置：{error}")
+                }
+            }
+        }
         let key = match self.share {
             Some(_) => None,
             None => rule_key(request.tool, request.input, &self.fence),

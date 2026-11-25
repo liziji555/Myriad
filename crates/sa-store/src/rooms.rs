@@ -1,12 +1,12 @@
 use crate::Result;
 use rusqlite::{params, Connection};
-use sa_protocol::{BotId, Discussion, Room, RoomId};
+use sa_protocol::{BotId, Discussion, PermissionMode, Room, RoomId};
 use std::collections::HashMap;
 
 /// 写入房间及其成员。
 pub fn insert(conn: &Connection, room: &Room) -> Result<()> {
     conn.execute(
-        "INSERT INTO rooms (id, name, host_bot_id, created_at, updated_at, discussion, rounds, share) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        "INSERT INTO rooms (id, name, host_bot_id, created_at, updated_at, discussion, rounds, share, permission) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             room.id.as_str(),
             room.name,
@@ -15,7 +15,8 @@ pub fn insert(conn: &Connection, room: &Room) -> Result<()> {
             room.updated_at,
             room.discussion.as_str(),
             room.rounds,
-            room.share
+            room.share,
+            room.permission.as_str()
         ],
     )?;
     for bot_id in &room.member_bot_ids {
@@ -44,7 +45,7 @@ pub fn list(conn: &Connection) -> Result<Vec<Room>> {
     }
 
     let mut stmt = conn.prepare(
-        "SELECT id, name, host_bot_id, created_at, updated_at, discussion, rounds, share FROM rooms ORDER BY updated_at DESC, id DESC",
+        "SELECT id, name, host_bot_id, created_at, updated_at, discussion, rounds, share, permission FROM rooms ORDER BY updated_at DESC, id DESC",
     )?;
     let rows = stmt.query_map([], |row| {
         let id: String = row.get(0)?;
@@ -58,6 +59,7 @@ pub fn list(conn: &Connection) -> Result<Vec<Room>> {
             discussion: Discussion::parse(&row.get::<_, String>(5)?).unwrap_or_default(),
             rounds: row.get(6)?,
             share: row.get(7)?,
+            permission: PermissionMode::parse(&row.get::<_, String>(8)?).unwrap_or_default(),
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -70,7 +72,7 @@ pub fn get(conn: &Connection, id: &RoomId) -> Result<Option<Room>> {
 /// 改房间的名字、入口 Bot、讨论方式和共享目录。
 pub fn update(conn: &Connection, room: &Room) -> Result<()> {
     conn.execute(
-        "UPDATE rooms SET name = ?2, host_bot_id = ?3, updated_at = ?4, discussion = ?5, rounds = ?6, share = ?7 WHERE id = ?1",
+        "UPDATE rooms SET name = ?2, host_bot_id = ?3, updated_at = ?4, discussion = ?5, rounds = ?6, share = ?7, permission = ?8 WHERE id = ?1",
         params![
             room.id.as_str(),
             room.name,
@@ -78,7 +80,8 @@ pub fn update(conn: &Connection, room: &Room) -> Result<()> {
             room.updated_at,
             room.discussion.as_str(),
             room.rounds,
-            room.share
+            room.share,
+            room.permission.as_str()
         ],
     )?;
     Ok(())

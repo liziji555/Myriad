@@ -652,6 +652,40 @@ async fn writing_inside_the_workdir_needs_no_approval() {
     assert_eq!(rig.last_tool_result(), "已新建 笔记.md（1 行）。");
 }
 
+/// 房间设成「完全权限」：命令不问就跑；改回「每次都问」马上又要问。
+#[tokio::test]
+async fn full_permission_runs_commands_without_asking() {
+    let dir = tempfile::tempdir().unwrap();
+    let replies = vec![
+        shell("c1", "echo ok"),
+        MockReply::text("跑完了"),
+        shell("c2", "echo ok"),
+        MockReply::text("又跑完了"),
+    ];
+    let rig = start(dir.path(), replies, true);
+    let set = |permission| {
+        let edit = sa_protocol::UpdateRoomRequest {
+            permission: Some(permission),
+            ..Default::default()
+        };
+        rig.engine.edit_room(&rig.room, &edit).unwrap();
+    };
+
+    set(sa_protocol::PermissionMode::Full);
+    rig.say("跑一下").await;
+    let done = rig
+        .until("第一句说完", |m| {
+            m.state == MessageState::Complete && !m.steps.is_empty()
+        })
+        .await;
+    assert_eq!(done.steps[0].state, StepState::Ok);
+    assert!(done.steps[0].approval.is_none());
+
+    set(sa_protocol::PermissionMode::Ask);
+    rig.say("再跑一下").await;
+    rig.waiting_approval().await;
+}
+
 /// 命令要先批准。「允许一次」只管这一次；「总是允许」之后同样的命令不再问。
 #[tokio::test]
 async fn shell_waits_for_approval_and_always_is_remembered() {

@@ -1,4 +1,7 @@
-use crate::{ApprovalDecision, BotId, Discussion, Harness, Message, ModelTier, RoomId, Run, Task};
+use crate::{
+    ApprovalDecision, BotId, Discussion, Harness, Message, ModelTier, PermissionMode, RoomId, Run,
+    Task,
+};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
@@ -129,6 +132,9 @@ pub struct UpdateRoomRequest {
     #[serde(default)]
     #[ts(optional)]
     pub share: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub permission: Option<PermissionMode>,
 }
 
 /// 人开一个任务。

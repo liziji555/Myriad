@@ -123,6 +123,7 @@ mod tests {
             discussion: Default::default(),
             rounds: sa_protocol::DEFAULT_ROUNDS,
             share: None,
+            permission: Default::default(),
             created_at: 1,
             updated_at: 1,
         };
