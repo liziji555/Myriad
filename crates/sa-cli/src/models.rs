@@ -98,11 +98,11 @@ impl ConfigModels {
     pub fn open(config: Config, data_dir: &DataDir) -> Result<Self> {
         let mut models = Self::new(config);
         let keys = data_dir.model_keys();
-        models
-            .state
-            .get_mut()
-            .unwrap_or_else(|e| e.into_inner())
-            .keys = load_keys(&keys)?;
+        let state = models.state.get_mut().unwrap_or_else(|e| e.into_inner());
+        state.keys = load_keys(&keys)?;
+        // 上次保存清到一半留下的：模型服务已经删了，密钥不能留给以后同名的。
+        let providers = &state.providers;
+        state.keys.retain(|name, _| providers.contains_key(name));
         models.files = Some(Files {
             config: data_dir.config(),
             keys,
@@ -328,8 +328,11 @@ impl ConfigModels {
         both.extend(keys.clone());
         replace_private(&files.keys, &toml::to_string(&both)?)?;
         replace_private(&files.config, &text)?;
+        // 到这里新设置已经存好了。多留的密钥没人用，下次打开时也会丢掉，清不掉不算失败。
         if both != keys {
-            replace_private(&files.keys, &toml::to_string(&keys)?)?;
+            let _ = toml::to_string(&keys)
+                .map_err(anyhow::Error::from)
+                .and_then(|text| replace_private(&files.keys, &text));
         }
         state.providers = providers;
         state.tiers = tiers;
