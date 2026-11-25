@@ -1920,9 +1920,14 @@ impl Observer for RoomObserver {
         // 房间设成了「完全权限」：不问。每次现查，改了设置马上生效。
         {
             let (engine, room) = (engine.clone(), self.room_id.clone());
-            match db(move || engine.get_room(&room)).await {
-                Ok(room) if room.permission == PermissionMode::Full => return true,
-                Ok(_) => {}
+            // 连着 GitHub、Telegram 的房间照样问：外面来的话不是这里的人说的，不能替人做主。
+            let full = db(move || {
+                Ok(engine.get_room(&room)?.permission == PermissionMode::Full
+                    && !engine.list_links()?.iter().any(|link| link.room_id == room))
+            });
+            match full.await {
+                Ok(true) => return true,
+                Ok(false) => {}
                 Err(error) => {
                     tracing::error!(room = %self.room_id, "查不了房间的权限设置：{error}")
                 }

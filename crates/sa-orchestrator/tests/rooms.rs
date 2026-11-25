@@ -686,6 +686,21 @@ async fn full_permission_runs_commands_without_asking() {
     rig.waiting_approval().await;
 }
 
+/// 连着 GitHub 的房间，设成「完全权限」也照样问：issue 是外面的人写的。
+#[tokio::test]
+async fn full_permission_still_asks_in_a_linked_room() {
+    let dir = tempfile::tempdir().unwrap();
+    let rig = start(dir.path(), vec![shell("c1", "echo ok")], true);
+    let edit = sa_protocol::UpdateRoomRequest {
+        permission: Some(sa_protocol::PermissionMode::Full),
+        ..Default::default()
+    };
+    rig.engine.edit_room(&rig.room, &edit).unwrap();
+    rig.engine.link_repo(&rig.room, "owner/repo").unwrap();
+    rig.say("跑一下").await;
+    rig.waiting_approval().await;
+}
+
 /// 命令要先批准。「允许一次」只管这一次；「总是允许」之后同样的命令不再问。
 #[tokio::test]
 async fn shell_waits_for_approval_and_always_is_remembered() {
