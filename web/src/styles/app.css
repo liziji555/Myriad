@@ -1258,13 +1258,15 @@ button.sa-row:hover {
 .sa-composer-bar {
   position: relative;
   display: flex;
+  /* 窄屏上正在回复时一行放不下：停止、插话、发送换到下一行，不压住权限和模型。 */
+  flex-wrap: wrap;
   align-items: center;
   gap: var(--sa-space-2);
   padding: var(--sa-space-1) var(--sa-space-2) var(--sa-space-2);
 }
 .sa-composer-controls {
   display: flex;
-  flex: 1;
+  flex: 1 1 200px;
   align-items: center;
   gap: var(--sa-space-2);
   min-width: 0;
