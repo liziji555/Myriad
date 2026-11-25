@@ -1217,6 +1217,8 @@ button.sa-row:hover {
 }
 .sa-composer-box {
   display: grid;
+  /* 底下那一行的字不换行，不写死的话它会把这一列撑得比框还宽。 */
+  grid-template-columns: minmax(0, 1fr);
   border: 1px solid var(--sa-border-strong);
   border-radius: var(--sa-radius-xl);
   background: var(--sa-bg-raised);
@@ -1254,27 +1256,139 @@ button.sa-row:hover {
   cursor: not-allowed;
 }
 .sa-composer-bar {
+  position: relative;
   display: flex;
+  /* 窄屏上正在回复时一行放不下：停止、插话、发送换到下一行，不压住权限和模型。 */
+  flex-wrap: wrap;
   align-items: center;
   gap: var(--sa-space-2);
-  padding: var(--sa-space-1) var(--sa-space-2) var(--sa-space-2) var(--sa-space-4);
+  padding: var(--sa-space-1) var(--sa-space-2) var(--sa-space-2);
 }
-.sa-composer-hint {
+.sa-composer-controls {
+  display: flex;
+  flex: 1 1 200px;
+  align-items: center;
+  gap: var(--sa-space-2);
+  min-width: 0;
+}
+/* 权限那个不缩；模型名长的时候缩的是模型那个。 */
+.sa-chip-wrap {
+  flex: none;
+}
+.sa-chip-wrap-end {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+.sa-chip-wrap-end {
+  margin-left: auto;
+}
+.sa-chip {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
+  max-width: 100%;
+  height: 28px;
+  padding: 0 var(--sa-space-2);
+  border: 0;
+  border-radius: var(--sa-radius-md);
+  background: none;
+  color: var(--sa-fg-muted);
+  font-size: var(--sa-text-sm);
+  white-space: nowrap;
+  transition: background var(--sa-motion);
+}
+.sa-chip:hover:not(:disabled),
+.sa-chip[aria-expanded="true"] {
+  background: var(--sa-hover);
+  color: var(--sa-fg);
+}
+.sa-chip[data-warn="true"] {
+  color: var(--sa-warn);
+}
+.sa-chip-text {
   min-width: 0;
   overflow: hidden;
-  white-space: nowrap;
-  color: var(--sa-fg-faint);
+  text-overflow: ellipsis;
+}
+.sa-chip-tag {
+  flex: none;
+  margin-left: 6px;
+  padding: 0 5px;
+  border: 1px solid var(--sa-border);
+  border-radius: var(--sa-radius-sm);
+  color: var(--sa-fg-muted);
   font-size: var(--sa-text-xs);
 }
-.sa-composer-hint .sa-kbd + .sa-kbd {
-  margin-left: -1px;
+.sa-chip .sa-chip-tag {
+  margin-left: 0;
+}
+.sa-chip-error {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--sa-danger);
+  font-size: var(--sa-text-xs);
+}
+/* 从输入框底下那一行往上弹出来的小菜单：贴着框的左边或右边，框再窄也不出框；
+   草稿写得再长也只盖住草稿，不顶出屏幕，屏幕矮就在菜单里滚。 */
+.sa-chip-menu {
+  position: absolute;
+  bottom: calc(100% + var(--sa-space-2));
+  left: 0;
+  z-index: 20;
+  display: grid;
+  gap: 2px;
+  box-sizing: border-box;
+  width: max-content;
+  min-width: min(220px, 100%);
+  max-width: min(340px, 100%);
+  max-height: min(360px, 60vh);
+  overflow-y: auto;
+  padding: var(--sa-space-1);
+  border: 1px solid var(--sa-border);
+  border-radius: var(--sa-radius-lg);
+  background: var(--sa-glass-strong);
+  backdrop-filter: var(--sa-glass-blur);
+  box-shadow: var(--sa-glass-edge), var(--sa-shadow);
+}
+.sa-chip-wrap-end .sa-chip-menu {
+  right: 0;
+  left: auto;
+}
+.sa-chip-option {
+  display: grid;
+  gap: 1px;
+  padding: var(--sa-space-2);
+  border: 0;
+  border-radius: var(--sa-radius-sm);
+  background: none;
+  text-align: left;
+}
+.sa-chip-option:hover {
+  background: var(--sa-hover);
+}
+.sa-chip-option[aria-checked="true"] {
+  background: var(--sa-active);
+}
+.sa-chip-option-title {
+  display: flex;
+  align-items: center;
+  overflow-wrap: anywhere;
+}
+.sa-chip-option-note,
+.sa-chip-option-more {
+  color: var(--sa-fg-muted);
+  font-size: var(--sa-text-xs);
+}
+.sa-chip-option-more {
+  border-top: 1px solid var(--sa-border);
+  border-radius: 0 0 var(--sa-radius-sm) var(--sa-radius-sm);
 }
 .sa-composer-actions {
   display: flex;
   align-items: center;
+  flex: none;
   gap: var(--sa-space-2);
   margin-left: auto;
 }
@@ -1565,8 +1679,7 @@ button.sa-row:hover {
   .sa-presence-name,
   .sa-presence-text,
   .sa-stage .sa-brand,
-  .sa-stage-sep,
-  .sa-composer-hint {
+  .sa-stage-sep {
     display: none;
   }
   .sa-presence-chip {

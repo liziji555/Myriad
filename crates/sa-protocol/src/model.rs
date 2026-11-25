@@ -139,11 +139,31 @@ pub struct Room {
     #[serde(default)]
     #[ts(optional)]
     pub share: Option<String>,
+    /// Bot 要改文件、执行命令时问不问人。
+    #[serde(default)]
+    pub permission: PermissionMode,
     #[ts(type = "number")]
     pub created_at: Millis,
     #[ts(type = "number")]
     pub updated_at: Millis,
 }
+
+/// 房间里的 Bot 要做需要批准的事时怎么办。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum PermissionMode {
+    /// 每次都问人。
+    #[default]
+    Ask,
+    /// 不问，直接做。做了什么照样记在审计里。
+    Full,
+}
+
+str_enum!(PermissionMode {
+    Ask => "ask",
+    Full => "full",
+});
 
 /// 别的电脑用 `sa share` 共享过来的目录。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]

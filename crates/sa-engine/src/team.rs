@@ -2,8 +2,8 @@
 
 use crate::{now_ms, to_json, Audit, Engine, EngineError, Result, MAX_ROOM_NAME_CHARS};
 use sa_protocol::{
-    Bot, BotId, BotKind, BotRef, EventKind, Harness, ModelTier, Room, RoomId, UpdateRoomRequest,
-    MAX_ROUNDS,
+    Bot, BotId, BotKind, BotRef, EventKind, Harness, ModelTier, PermissionMode, Room, RoomId,
+    UpdateRoomRequest, MAX_ROUNDS,
 };
 use sa_store::{bots, events, rooms};
 
@@ -166,13 +166,14 @@ impl Engine {
                 discussion: None,
                 rounds: None,
                 share: None,
+                permission: None,
             },
         )
     }
 
     /// 改房间的设置：名字、入口 Bot（必须已经是成员）、没点名的话怎么接、轮流讨论转几圈、用哪个共享目录。没写的不变。
     pub fn edit_room(&self, id: &RoomId, edit: &UpdateRoomRequest) -> Result<Room> {
-        self.change_room(id, |room, _| {
+        let room = self.change_room(id, |room, _| {
             if let Some(name) = &edit.name {
                 let name = name.trim();
                 if name.is_empty() {
@@ -214,8 +215,19 @@ impl Engine {
                 }
                 room.share = (!share.is_empty()).then(|| share.to_string());
             }
+            if let Some(permission) = edit.permission {
+                room.permission = permission;
+            }
             Ok(RoomChange::Keep)
-        })
+        })?;
+        if let Some(permission) = edit.permission {
+            let summary = match permission {
+                PermissionMode::Ask => "改成了每次都问",
+                PermissionMode::Full => "改成了完全权限：Bot 改文件、执行命令不再问",
+            };
+            self.audit(Audit::user("room.permission", summary).room(&room.id));
+        }
+        Ok(room)
     }
 
     /// 把一个 Bot 拉进房间。房间还没有入口 Bot 时，它就是入口。

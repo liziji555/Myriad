@@ -11,6 +11,7 @@ import { DESKTOP_CHANGED, DESKTOP_OPEN, desktopInvoke, type DesktopState } from 
 import { ConnectPanel } from "./components/ConnectPanel";
 import { noticesFor } from "./api/workspace";
 import { CommandPalette, type PaletteEntry } from "./components/CommandPalette";
+import { ComposerControls } from "./components/ComposerControls";
 import { Composer } from "./components/Composer";
 import {
   ContextPanel,
@@ -591,6 +592,17 @@ function Shell() {
               prefill={prefill}
               onPrefilled={() => setPrefill(null)}
               commands={slashCommands}
+              controls={
+                <ComposerControls
+                  room={room}
+                  host={members.find((bot) => bot.id === room.host_bot_id) ?? null}
+                  onPermission={(permission) => workspace.team.updateRoom(room.id, { permission })}
+                  onTier={(tier) =>
+                    room.host_bot_id ? workspace.team.updateBot(room.host_bot_id, { tier }) : Promise.resolve()
+                  }
+                  onManageModels={() => showPanel("models")}
+                />
+              }
               disabledReason={
                 room.host_bot_id ? null : "这个房间里还没有 Bot，发了也没人回应"
               }

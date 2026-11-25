@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { loadDraft, saveDraft, withExample } from "../api/drafts";
 import { groupCommands, matchCommands, slashQuery, type SlashCommand } from "../api/slash";
 import type { Bot, EditQueuedRequest, QueuedId, QueuedInput } from "../api/types";
@@ -15,6 +15,8 @@ interface Props {
   /** 别处（空房间里的示例）要填进来的一句话。填完之后调用 `onPrefilled`，同一句不会填两次。 */
   prefill: string | null;
   onPrefilled(): void;
+  /** 输入框下面那一行左边放的东西：权限档位、模型。 */
+  controls: ReactNode;
   /** 输入 `/` 时列出来的命令。 */
   commands: readonly SlashCommand[];
   /** 不能发消息的原因；能发时为空。 */
@@ -47,6 +49,7 @@ export function Composer({
   roomId,
   prefill,
   onPrefilled,
+  controls,
   commands,
   disabledReason,
   replying,
@@ -279,7 +282,7 @@ export function Composer({
                 ? `回车排队，等${steerTo}说完再发；点「插话」现在就给它们看`
                 : queueing
                   ? "回车排到最后，前面的发完再发"
-                  : "说点什么，或者交代一件事…")
+                  : "说点什么，或者交代一件事…（@ 点名，/ 命令）")
             }
             onChange={(event) => {
               setText(event.target.value);
@@ -291,11 +294,7 @@ export function Composer({
             onKeyDown={onKeyDown}
           />
           <div className="sa-composer-bar">
-            <p className="sa-composer-hint">
-              <kbd className="sa-kbd">@</kbd> 点名 <kbd className="sa-kbd">/</kbd> 命令{" "}
-              <kbd className="sa-kbd">Shift</kbd>
-              <kbd className="sa-kbd">回车</kbd> 换行
-            </p>
+            {controls}
             <div className="sa-composer-actions">
               {replying && (
                 <button type="button" className="sa-stop" onClick={() => void run(onStop)}>
