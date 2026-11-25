@@ -269,7 +269,9 @@ impl ConfigModels {
             let plain =
                 |c: char| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_';
             anyhow::ensure!(
-                !name.is_empty() && name.len() <= 24 && name.chars().all(plain),
+                // 手写在 config.toml 里的名字不按这个规矩，照样能留着。
+                state.providers.contains_key(&name)
+                    || (!name.is_empty() && name.len() <= 24 && name.chars().all(plain)),
                 "模型服务的名字只能用小写字母、数字、横线和下划线，最多 24 个字符（现在是「{name}」）"
             );
             let base_url = input.base_url.trim().to_string();

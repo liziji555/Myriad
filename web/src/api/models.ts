@@ -76,7 +76,8 @@ export function draftProblem(draft: ModelsDraft): string | null {
   const names = new Set<string>();
   for (const provider of draft.providers) {
     const name = provider.name.trim();
-    if (!/^[a-z0-9_-]{1,24}$/.test(name)) return "模型服务的名字只能用小写字母、数字、横线和下划线";
+    // 存过的名字改不了，手写在 config.toml 里的也照样留着。
+    if (!provider.saved && !/^[a-z0-9_-]{1,24}$/.test(name)) return "模型服务的名字只能用小写字母、数字、横线和下划线";
     if (names.has(name)) return `有两个模型服务都叫「${name}」`;
     names.add(name);
     if (!/^https?:\/\/\S+$/.test(provider.base_url.trim())) return `「${name}」还没有填地址`;

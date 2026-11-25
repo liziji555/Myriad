@@ -21,6 +21,17 @@ describe("models", () => {
     expect(saveRequest(draft).revision).toBe("r1");
   });
 
+  it("存过的名字不合规矩也能保存", () => {
+    const draft = draftOf({
+      ...settings,
+      providers: [{ ...settings.providers[0], name: "MyGateway" }],
+      cheap: { ...settings.cheap, provider: "MyGateway" },
+      mid: { ...settings.mid, provider: "MyGateway" },
+      strong: { ...settings.strong, provider: "MyGateway" },
+    });
+    expect(draftProblem(draft)).toBeNull();
+  });
+
   it("地址改了要重新填密钥", () => {
     const draft = draftOf(settings);
     draft.providers[0].base_url = "https://elsewhere.example";
