@@ -556,14 +556,17 @@ mod tests {
             mock: true,
         };
         // 和 --mock 用的是同一个假模型，只是出字更快。
-        let models = |_: &crate::config::Config| -> Arc<dyn sa_orchestrator::ModelRouter> {
-            Arc::new(SingleModel(ResolvedModel {
-                provider: Arc::new(MockProvider::demo().with_chunk_delay(Duration::from_millis(4))),
-                model: "mock".into(),
-                thinking: None,
-                context_window: None,
-            }))
-        };
+        let models =
+            |_: &crate::config::Config| -> anyhow::Result<Arc<dyn sa_orchestrator::ModelRouter>> {
+                Ok(Arc::new(SingleModel(ResolvedModel {
+                    provider: Arc::new(
+                        MockProvider::demo().with_chunk_delay(Duration::from_millis(4)),
+                    ),
+                    model: "mock".into(),
+                    thinking: None,
+                    context_window: None,
+                })))
+            };
         App::open_tuned(&data_dir, &args, models, |settings| {
             one_at_a_time(settings);
             tune(settings);

@@ -16,6 +16,7 @@ const NAV: readonly { tab: PanelTab; label: string; icon: IconName }[] = [
   { tab: "routines", label: "定时任务", icon: "clock" },
   { tab: "members", label: "队员和成员", icon: "users" },
   { tab: "links", label: "连接", icon: "link" },
+  { tab: "models", label: "模型", icon: "bot" },
   { tab: "extensions", label: "技能和 MCP", icon: "plug" },
   { tab: "files", label: "文件", icon: "file" },
   { tab: "usage", label: "用量", icon: "chart" },

@@ -358,6 +358,7 @@ function Shell() {
           tabAction("routines", "打开定时任务"),
           tabAction("members", "管理 Bot 和房间成员"),
           tabAction("links", "连接 GitHub 仓库和 Telegram 聊天"),
+          tabAction("models", "接自己的模型：模型服务和三个档位"),
           tabAction("extensions", "看技能和 MCP 服务"),
           tabAction("usage", "看用量和花费"),
           tabAction("audit", "看审计日志：谁批准了什么、做了什么"),

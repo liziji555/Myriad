@@ -6,6 +6,7 @@ import type { ExecCard } from "../api/execution";
 import { AuditPanel } from "./AuditPanel";
 import { ExecutionPanel } from "./ExecutionPanel";
 import { ExtensionsPanel } from "./ExtensionsPanel";
+import { ModelsPanel } from "./ModelsPanel";
 import { LinksPanel } from "./LinksPanel";
 import { MembersPanel } from "./MembersPanel";
 import { RoutinesPanel } from "./RoutinesPanel";
@@ -19,6 +20,7 @@ export type PanelTab =
   | "routines"
   | "members"
   | "links"
+  | "models"
   | "extensions"
   | "usage"
   | "audit"
@@ -31,6 +33,7 @@ const TABS: readonly { id: PanelTab; label: string }[] = [
   { id: "routines", label: "定时" },
   { id: "members", label: "成员" },
   { id: "links", label: "连接" },
+  { id: "models", label: "模型" },
   { id: "extensions", label: "扩展" },
   { id: "usage", label: "用量" },
   { id: "audit", label: "审计" },
@@ -180,6 +183,7 @@ export function ContextPanel({
           />
         )}
         {tab === "links" && <LinksPanel room={room} links={links} actions={linkActions} />}
+        {tab === "models" && <ModelsPanel />}
         {tab === "extensions" && <ExtensionsPanel />}
         {tab === "usage" && <UsagePanel refreshKey={usageKey} />}
         {tab === "audit" && (

@@ -69,7 +69,7 @@ pub fn collect(data_dir: &DataDir, env: &dyn Fn(&str) -> Option<String>) -> Vec<
         }
     };
     if let Some(config) = &config {
-        checks.extend(check_api_keys(config, env));
+        checks.extend(check_api_keys(config, data_dir, env));
         checks.push(check_budget(config));
     }
     checks.push(check_git());
@@ -224,7 +224,13 @@ fn check_git() -> Check {
     }
 }
 
-fn check_api_keys(config: &Config, env: &dyn Fn(&str) -> Option<String>) -> Vec<Check> {
+fn check_api_keys(
+    config: &Config,
+    data_dir: &DataDir,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Vec<Check> {
+    // 在界面的「模型」页填的密钥。读不出来就当没有。
+    let saved = crate::models::load_keys(&data_dir.model_keys()).unwrap_or_default();
     config
         .providers
         .iter()
@@ -232,6 +238,13 @@ fn check_api_keys(config: &Config, env: &dyn Fn(&str) -> Option<String>) -> Vec<
         .filter(|(name, _)| config.tiers.iter().any(|(_, tier)| &tier.provider == *name))
         .map(|(name, provider)| {
             let var = &provider.api_key_env;
+            if saved.get(name).is_some_and(|key| !key.trim().is_empty()) {
+                return Check::new(
+                    "模型密钥",
+                    Status::Ok,
+                    format!("{name}：已在界面的「模型」页填好"),
+                );
+            }
             match env(var) {
                 Some(value) if !value.trim().is_empty() => Check::new(
                     "模型密钥",
@@ -241,7 +254,9 @@ fn check_api_keys(config: &Config, env: &dyn Fn(&str) -> Option<String>) -> Vec<
                 _ => Check::new(
                     "模型密钥",
                     Status::Warn,
-                    format!("{name}：环境变量 {var} 未设置，Bot 将无法调用模型"),
+                    format!(
+                        "{name}：还没有密钥（在界面的「模型」页填，或者设环境变量 {var}），Bot 将无法调用模型"
+                    ),
                 ),
             }
         })

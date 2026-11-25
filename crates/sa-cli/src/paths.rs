@@ -72,6 +72,11 @@ impl DataDir {
         self.root.join("prompts").join("chat.md")
     }
 
+    /// 在界面里填的模型密钥：模型服务的名字 → 密钥。只有当前用户能读。
+    pub fn model_keys(&self) -> PathBuf {
+        self.root.join("model-keys.toml")
+    }
+
     pub fn token(&self) -> PathBuf {
         self.root.join("token")
     }

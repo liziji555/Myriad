@@ -179,12 +179,7 @@ pub struct Provider {
     pub session_header: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ProviderKind {
-    OpenaiCompat,
-    Anthropic,
-}
+pub use sa_protocol::ProviderKind;
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
