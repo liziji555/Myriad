@@ -1217,6 +1217,8 @@ button.sa-row:hover {
 }
 .sa-composer-box {
   display: grid;
+  /* 底下那一行的字不换行，不写死的话它会把这一列撑得比框还宽。 */
+  grid-template-columns: minmax(0, 1fr);
   border: 1px solid var(--sa-border-strong);
   border-radius: var(--sa-radius-xl);
   background: var(--sa-bg-raised);
@@ -1297,6 +1299,7 @@ button.sa-row:hover {
   color: var(--sa-warn);
 }
 .sa-chip-text {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
 }
@@ -1378,6 +1381,7 @@ button.sa-row:hover {
 .sa-composer-actions {
   display: flex;
   align-items: center;
+  flex: none;
   gap: var(--sa-space-2);
   margin-left: auto;
 }
