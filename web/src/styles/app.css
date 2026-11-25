@@ -1269,7 +1269,12 @@ button.sa-row:hover {
   gap: var(--sa-space-2);
   min-width: 0;
 }
+/* 权限那个不缩；模型名长的时候缩的是模型那个。 */
 .sa-chip-wrap {
+  flex: none;
+}
+.sa-chip-wrap-end {
+  flex: 0 1 auto;
   min-width: 0;
 }
 .sa-chip-wrap-end {
