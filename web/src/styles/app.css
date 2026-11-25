@@ -1297,6 +1297,10 @@ button.sa-row:hover {
   white-space: nowrap;
   transition: background var(--sa-motion);
 }
+.sa-add {
+  flex: none;
+  padding: 0 7px;
+}
 .sa-chip:hover:not(:disabled),
 .sa-chip[aria-expanded="true"] {
   background: var(--sa-hover);
@@ -1804,6 +1808,11 @@ button.sa-row:hover {
   border-radius: var(--sa-radius-sm);
   cursor: pointer;
   overflow-wrap: anywhere;
+}
+.sa-menu-hint {
+  margin-left: var(--sa-space-2);
+  color: var(--sa-fg-muted);
+  font-size: var(--sa-text-xs);
 }
 .sa-menu-item[aria-selected="true"] {
   background: var(--sa-active);

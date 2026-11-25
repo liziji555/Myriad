@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { loadDraft, saveDraft, withExample } from "../api/drafts";
-import { groupCommands, matchCommands, slashQuery, type SlashCommand } from "../api/slash";
+import { draftAfter, groupCommands, matchCommands, slashQuery, type SlashCommand } from "../api/slash";
 import type { Bot, EditQueuedRequest, QueuedId, QueuedInput } from "../api/types";
 import { BotAvatar } from "./BotAvatar";
 import { Icon } from "./Icon";
@@ -66,6 +66,8 @@ export function Composer({
   const [caret, setCaret] = useState(0);
   const [picked, setPicked] = useState(0);
   const [dismissed, setDismissed] = useState(false);
+  /** 点「+」打开的命令菜单：不用先打 `/`，写好的草稿也不动。 */
+  const [adding, setAdding] = useState(false);
   const [text, setDraft] = useState(() => loadDraft(roomId));
   /** 改输入框里的内容，同时记成这个房间的草稿。 */
   const setText = (next: string) => {
@@ -142,7 +144,7 @@ export function Composer({
     // 只跟着要填的那句话走。
   }, [prefill]);
 
-  const slash = dismissed ? null : slashQuery(text);
+  const slash = dismissed ? null : adding ? "" : slashQuery(text);
   const commandOptions = slash === null ? [] : matchCommands(commands, slash);
   const mention = dismissed || slash !== null ? null : mentionAt(text, caret);
   const options = mention
@@ -159,10 +161,36 @@ export function Composer({
       // 邮箱、包名里的 `@` 不是在点名：只有单独起头的 `@` 才提示。
       (mention !== null && mention.query !== "" && (mention.start === 0 || /\s/.test(text[mention.start - 1]))));
 
+  // 命令多了菜单要滚：用上下键选到看不见的那一个时，把它滚出来。
+  const commandMenu = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    commandMenu.current?.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: "nearest" });
+  }, [command?.id]);
+
   const runCommand = (picked: SlashCommand) => {
-    setText("");
+    // 从 `/` 选的：那几个字是命令，不留。从「+」选的：草稿是人写好的话，留着。
+    const next = draftAfter(picked, adding ? text : "");
+    setText(next);
+    setAdding(false);
     setPicked(0);
-    picked.run();
+    if (picked.insert === undefined) {
+      picked.run();
+      return;
+    }
+    const position = picked.insert.length;
+    setCaret(position);
+    requestAnimationFrame(() => {
+      input.current?.focus();
+      input.current?.setSelectionRange(position, position);
+    });
+  };
+
+  /** 开关「+」的菜单。焦点放回输入框：菜单的上下键、回车是它在接。 */
+  const toggleAdding = () => {
+    input.current?.focus();
+    setAdding(!(adding && !dismissed));
+    setDismissed(false);
+    setPicked(0);
   };
 
   const complete = (bot: Bot) => {
@@ -198,6 +226,7 @@ export function Composer({
     if ((count > 0 || noMatch) && event.key === "Escape" && !event.nativeEvent.isComposing) {
       event.preventDefault();
       setDismissed(true);
+      setAdding(false);
       return;
     }
     // 输入法选字时的回车不算发送。
@@ -235,7 +264,7 @@ export function Composer({
           </ul>
         )}
         {command && (
-          <div className="sa-mention-menu" role="listbox" aria-label="命令">
+          <div ref={commandMenu} className="sa-mention-menu" role="listbox" aria-label="命令">
             {groupCommands(commandOptions).map(({ group, items }) => (
               <div key={group} role="group" aria-label={group}>
                 <p className="sa-menu-group" aria-hidden="true">
@@ -252,7 +281,8 @@ export function Composer({
                       runCommand(item);
                     }}
                   >
-                    {item.title}
+                    <span className="sa-menu-title">{item.title}</span>
+                    {item.hint && <span className="sa-menu-hint">{item.hint}</span>}
                   </div>
                 ))}
               </div>
@@ -282,18 +312,39 @@ export function Composer({
                 ? `回车排队，等${steerTo}说完再发；点「插话」现在就给它们看`
                 : queueing
                   ? "回车排到最后，前面的发完再发"
-                  : "说点什么，或者交代一件事…（@ 点名，/ 命令）")
+                  : "说点什么，或者交代一件事…（@ 点名，/ 技能和命令）")
             }
             onChange={(event) => {
               setText(event.target.value);
               setCaret(event.target.selectionStart);
               setDismissed(false);
+              setAdding(false);
               setPicked(0);
             }}
+            onBlur={() => setAdding(false)}
             onSelect={(event) => setCaret(event.currentTarget.selectionStart)}
             onKeyDown={onKeyDown}
           />
           <div className="sa-composer-bar">
+            <button
+              type="button"
+              className="sa-chip sa-add"
+              disabled={disabledReason !== null}
+              aria-label="技能和命令"
+              aria-expanded={adding && !dismissed}
+              title="技能和命令（也可以在空的输入框里打 /）"
+              // 用 mousedown：菜单的上下键、回车是输入框在接，焦点要留在输入框里。
+              onMouseDown={(event) => {
+                event.preventDefault();
+                toggleAdding();
+              }}
+              // 键盘上按回车、空格没有 mousedown，只有 click（detail 是 0）。
+              onClick={(event) => {
+                if (event.detail === 0) toggleAdding();
+              }}
+            >
+              <Icon name="plus" size={14} />
+            </button>
             {controls}
             <div className="sa-composer-actions">
               {replying && (

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { groupCommands, matchCommands, slashQuery, type SlashCommand } from "./slash";
+import { draftAfter, groupCommands, matchCommands, skillPrompt, slashQuery, type SlashCommand } from "./slash";
 
 const command = (id: string, group: string, title: string): SlashCommand => ({ id, group, title, run: () => {} });
 const commands = [
@@ -30,5 +30,17 @@ describe("slash", () => {
     expect(groups.map((g) => g.group)).toEqual(["面板", "动作"]);
     expect(groups[0].items.map((c) => c.id)).toEqual(["tasks", "usage"]);
     expect(groups[1].items.map((c) => c.id)).toEqual(["new-room", "stop"]);
+  });
+
+  it("说明里的字也能找到", () => {
+    const skill = { ...command("skill:review", "技能", "review"), hint: "审查一个 PR" };
+    expect(matchCommands([skill], "审查").length).toBe(1);
+  });
+
+  it("选了技能把话放到草稿前面，选了动作草稿不动", () => {
+    const skill = { ...command("skill:review", "技能", "review"), insert: skillPrompt("review") };
+    expect(draftAfter(skill, "")).toBe("用「review」技能：");
+    expect(draftAfter(skill, "看看 #55")).toBe("用「review」技能：看看 #55");
+    expect(draftAfter(commands[0], "写了一半")).toBe("写了一半");
   });
 });
