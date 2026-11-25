@@ -1216,6 +1216,7 @@ button.sa-row:hover {
   padding: 0 var(--sa-space-4);
 }
 .sa-composer-box {
+  position: relative;
   display: grid;
   border: 1px solid var(--sa-border-strong);
   border-radius: var(--sa-radius-xl);
@@ -1267,7 +1268,6 @@ button.sa-row:hover {
   min-width: 0;
 }
 .sa-chip-wrap {
-  position: relative;
   min-width: 0;
 }
 .sa-chip-wrap-end {
@@ -1320,7 +1320,7 @@ button.sa-row:hover {
   color: var(--sa-danger);
   font-size: var(--sa-text-xs);
 }
-/* 从按钮往上弹出来的小菜单。 */
+/* 从输入框往上弹出来的小菜单：贴着框的左边或右边，框再窄也不出框。 */
 .sa-chip-menu {
   position: absolute;
   bottom: calc(100% + var(--sa-space-2));
@@ -1328,9 +1328,10 @@ button.sa-row:hover {
   z-index: 20;
   display: grid;
   gap: 2px;
+  box-sizing: border-box;
   width: max-content;
-  min-width: 220px;
-  max-width: min(340px, 80vw);
+  min-width: min(220px, 100%);
+  max-width: min(340px, 100%);
   padding: var(--sa-space-1);
   border: 1px solid var(--sa-border);
   border-radius: var(--sa-radius-lg);
