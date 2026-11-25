@@ -1353,3 +1353,33 @@ async fn extensions_list_skills_from_disk_each_time() {
     let response = app.oneshot(anonymous).await.unwrap();
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
+
+#[tokio::test]
+async fn context_usage_grows_with_the_conversation() {
+    let (app, engine) = app();
+    let room = engine.list_rooms().unwrap().pop().unwrap();
+    let path = format!("/api/rooms/{}/context", room.id);
+
+    let before: Option<sa_protocol::ContextUsage> =
+        json(app.clone().oneshot(get(&path)).await.unwrap()).await;
+    let before = before.expect("默认房间有内置的入口 Bot");
+    assert_eq!(before.used, 0);
+    assert!(before.compact_at > 0 && before.compact_at < before.window);
+
+    let said = post(
+        &format!("/api/rooms/{}/messages", room.id),
+        r#"{"content":"你好"}"#,
+    );
+    app.clone().oneshot(said).await.unwrap();
+    settled(&app, &room, 2).await;
+    let after: Option<sa_protocol::ContextUsage> =
+        json(app.clone().oneshot(get(&path)).await.unwrap()).await;
+    assert!(after.unwrap().used > 0);
+
+    let missing = app
+        .clone()
+        .oneshot(get("/api/rooms/nope/context"))
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+}

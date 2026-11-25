@@ -43,6 +43,11 @@ impl Limits {
     }
 }
 
+/// 窗口是 `window` 的模型，对话到多大（估算的 token）会自动压缩。
+pub fn compact_threshold(window: usize) -> usize {
+    Limits::new(window, None).threshold
+}
+
 /// 粗略估算一段文字有多少 token：中文等非 ASCII 字符一个算一个，ASCII 四个算一个。
 ///
 /// 宁可估多：估少了会在窗口放不下时才发现。

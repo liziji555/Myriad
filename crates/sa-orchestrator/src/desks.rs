@@ -20,6 +20,48 @@ impl Shared {
 }
 
 impl Orchestrator {
+    /// 入口 Bot 在这个房间里的对话占了上下文窗口多少。
+    ///
+    /// 没有入口 Bot、它交给 harness 干、或者它的模型现在用不了时是 `None`。
+    pub async fn room_context(
+        &self,
+        room: &RoomId,
+    ) -> Result<Option<sa_protocol::ContextUsage>, OrchestratorError> {
+        let (engine, room) = (self.shared.engine.clone(), room.clone());
+        let sessions = self.shared.settings.sessions_dir.clone();
+        let found = db(move || {
+            let Some(host) = engine.get_room(&room)?.host_bot_id else {
+                return Ok(None);
+            };
+            let bot = engine.get_bot(&host)?;
+            if bot.harness != sa_protocol::Harness::Builtin {
+                return Ok(None);
+            }
+            let session = engine.ensure_front_session(&room, &host)?;
+            Ok(Some((bot.tier, sessions.join(format!("{session}.jsonl")))))
+        })
+        .await?;
+        let Some((tier, path)) = found else {
+            return Ok(None);
+        };
+        let Ok(model) = self.shared.models.resolve(tier) else {
+            return Ok(None);
+        };
+        let window = model
+            .context_window
+            .unwrap_or_else(|| model.provider.capabilities(&model.model).context_window as usize);
+        let used = tokio::task::spawn_blocking(move || sa_kernel::Transcript::context_size(&path))
+            .await
+            .map_err(|error| OrchestratorError::Conflict(error.to_string()))?
+            .map_err(|error| OrchestratorError::Conflict(error.to_string()))?;
+        let clamp = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
+        Ok(Some(sa_protocol::ContextUsage {
+            used: clamp(used),
+            compact_at: clamp(sa_kernel::compact_threshold(window)),
+            window: clamp(window),
+        }))
+    }
+
     /// 房间里开着独立目录的 harness 工位。
     pub async fn room_desks(&self, room: &RoomId) -> Result<Vec<HarnessDesk>, OrchestratorError> {
         let (engine, room) = (self.shared.engine.clone(), room.clone());
