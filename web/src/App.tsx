@@ -622,6 +622,7 @@ function Shell() {
                 <ComposerControls
                   room={room}
                   host={members.find((bot) => bot.id === room.host_bot_id) ?? null}
+                  busy={replying}
                   onPermission={(permission) => workspace.team.updateRoom(room.id, { permission })}
                   onTier={(tier) =>
                     room.host_bot_id ? workspace.team.updateBot(room.host_bot_id, { tier }) : Promise.resolve()

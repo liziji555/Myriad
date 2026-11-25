@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { api } from "../api/client";
-import { TIERS } from "../api/models";
-import type { Bot, ModelSettings, ModelTier, PermissionMode, Room } from "../api/types";
+import { contextMeter, TIERS } from "../api/models";
+import type { Bot, ContextUsage, ModelSettings, ModelTier, PermissionMode, Room } from "../api/types";
 import { Icon } from "./Icon";
 
 export const PERMISSIONS: readonly { id: PermissionMode; label: string; note: string }[] = [
@@ -20,13 +20,15 @@ interface Props {
   room: Room;
   /** 房间的入口 Bot：这里换的是它用的模型。 */
   host: Bot | null;
+  /** 房间里有 Bot 正在回复：停下来之后重新看一次上下文用了多少。 */
+  busy: boolean;
   onPermission(mode: PermissionMode): Promise<void>;
   onTier(tier: ModelTier): Promise<void>;
   onManageModels(): void;
 }
 
 /** 输入框下面那一行：这个房间的权限档位，和入口 Bot 用的模型。 */
-export function ComposerControls({ room, host, onPermission, onTier, onManageModels }: Props) {
+export function ComposerControls({ room, host, busy, onPermission, onTier, onManageModels }: Props) {
   const [open, setOpen] = useState<"permission" | "model" | null>(null);
   const [models, setModels] = useState<ModelSettings | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -44,6 +46,19 @@ export function ComposerControls({ room, host, onPermission, onTier, onManageMod
       stale = true;
     };
   }, [open]);
+
+  const [context, setContext] = useState<ContextUsage | null>(null);
+  useEffect(() => {
+    let stale = false;
+    api
+      .roomContext(room.id)
+      .then((usage) => !stale && setContext(usage))
+      .catch(() => !stale && setContext(null));
+    return () => {
+      stale = true;
+    };
+  }, [room.id, host?.id, host?.tier, host?.harness, busy, models]);
+  const meter = context && contextMeter(context);
 
   useEffect(() => {
     if (!open) return;
@@ -108,6 +123,11 @@ export function ComposerControls({ room, host, onPermission, onTier, onManageMod
       {error && (
         <span className="sa-chip-error" role="alert">
           {error}
+        </span>
+      )}
+      {meter && (
+        <span className="sa-context" data-warn={meter.percent >= 80} title={meter.note} aria-label={meter.note}>
+          上下文 {meter.percent}%
         </span>
       )}
       <div className="sa-chip-wrap sa-chip-wrap-end">

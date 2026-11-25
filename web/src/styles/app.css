@@ -1282,6 +1282,21 @@ button.sa-row:hover {
 .sa-chip-wrap-end {
   margin-left: auto;
 }
+/* 上下文用了多少：紧挨在模型左边。 */
+.sa-context {
+  flex: none;
+  margin-left: auto;
+  color: var(--sa-fg-muted);
+  font-size: var(--sa-text-xs);
+  white-space: nowrap;
+  cursor: default;
+}
+.sa-context[data-warn="true"] {
+  color: var(--sa-warn);
+}
+.sa-context + .sa-chip-wrap-end {
+  margin-left: 0;
+}
 .sa-chip {
   display: flex;
   align-items: center;

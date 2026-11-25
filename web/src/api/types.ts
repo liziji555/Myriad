@@ -45,6 +45,7 @@ export type { TestModelRequest } from "./generated/TestModelRequest";
 export type { TestModelResult } from "./generated/TestModelResult";
 export type { TierChoice } from "./generated/TierChoice";
 export type { Harness } from "./generated/Harness";
+export type { ContextUsage } from "./generated/ContextUsage";
 export type { HarnessDesk } from "./generated/HarnessDesk";
 export type { DeskChange } from "./generated/DeskChange";
 export type { Notice } from "./generated/Notice";

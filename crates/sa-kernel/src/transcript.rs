@@ -91,6 +91,45 @@ pub struct Transcript {
     fail_next_write_after: Option<usize>,
 }
 
+/// 把文件内容读成一条条记录，返回记录和完整的那部分有多长。最后一行没写完的不算。
+fn parse(raw: &[u8], path: &Path) -> Result<(Vec<Entry>, usize), TranscriptError> {
+    let mut entries = Vec::new();
+    let mut good_len = 0usize;
+    let mut lines = raw.split_inclusive(|b| *b == b'\n').enumerate().peekable();
+    while let Some((index, line)) = lines.next() {
+        let complete = line.ends_with(b"\n");
+        let is_last = lines.peek().is_none();
+        let parsed = std::str::from_utf8(line)
+            .map_err(|e| e.to_string())
+            .and_then(|text| {
+                if text.trim().is_empty() {
+                    Ok(None)
+                } else {
+                    serde_json::from_str::<Entry>(text)
+                        .map(Some)
+                        .map_err(|e| e.to_string())
+                }
+            });
+        match parsed {
+            Ok(entry) if complete => {
+                entries.extend(entry);
+                good_len += line.len();
+            }
+            // 最后一行没有换行符：写到一半。即使碰巧能解析也不算数。
+            _ if is_last && !complete => break,
+            Ok(_) => unreachable!("完整的行在上面处理了"),
+            Err(reason) => {
+                return Err(TranscriptError::Corrupt {
+                    path: path.to_path_buf(),
+                    line: index + 1,
+                    reason,
+                })
+            }
+        }
+    }
+    Ok((entries, good_len))
+}
+
 impl Transcript {
     /// 打开（没有就新建）一份记录并读入全部内容。
     ///
@@ -113,40 +152,7 @@ impl Transcript {
         let mut raw = Vec::new();
         file.read_to_end(&mut raw).map_err(io)?;
 
-        let mut entries = Vec::new();
-        let mut good_len = 0usize;
-        let mut lines = raw.split_inclusive(|b| *b == b'\n').enumerate().peekable();
-        while let Some((index, line)) = lines.next() {
-            let complete = line.ends_with(b"\n");
-            let is_last = lines.peek().is_none();
-            let parsed = std::str::from_utf8(line)
-                .map_err(|e| e.to_string())
-                .and_then(|text| {
-                    if text.trim().is_empty() {
-                        Ok(None)
-                    } else {
-                        serde_json::from_str::<Entry>(text)
-                            .map(Some)
-                            .map_err(|e| e.to_string())
-                    }
-                });
-            match parsed {
-                Ok(entry) if complete => {
-                    entries.extend(entry);
-                    good_len += line.len();
-                }
-                // 最后一行没有换行符：写到一半。即使碰巧能解析也不算数。
-                _ if is_last && !complete => break,
-                Ok(_) => unreachable!("完整的行在上面处理了"),
-                Err(reason) => {
-                    return Err(TranscriptError::Corrupt {
-                        path: path.to_path_buf(),
-                        line: index + 1,
-                        reason,
-                    })
-                }
-            }
-        }
+        let (entries, good_len) = parse(&raw, path)?;
         if good_len < raw.len() {
             tracing::warn!(path = %path.display(), "会话记录的最后一行没写完，已截掉");
             file.set_len(good_len as u64).map_err(io)?;
@@ -164,6 +170,36 @@ impl Transcript {
         };
         transcript.close_open_tool_calls(LOST_RESULT)?;
         Ok(transcript)
+    }
+
+    /// 只读地看一眼一份记录现在发给模型的对话有多大（估算的 token）。没有这个文件就是 0。
+    ///
+    /// 不修、不截、不写：别处可能正开着它往里追加。
+    pub fn context_size(path: &Path) -> Result<usize, TranscriptError> {
+        let io = |source| TranscriptError::Io {
+            path: path.to_path_buf(),
+            source,
+        };
+        let mut file = match File::open(path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(error) => return Err(io(error)),
+        };
+        let mut raw = Vec::new();
+        file.read_to_end(&mut raw).map_err(io)?;
+        let (entries, good_len) = parse(&raw, path)?;
+        let transcript = Self {
+            path: path.to_path_buf(),
+            file,
+            entries,
+            len: good_len as u64,
+            broken: true,
+            #[cfg(test)]
+            fail_next_write_after: None,
+        };
+        Ok(crate::compact::estimate_messages(
+            &transcript.to_chat_messages(),
+        ))
     }
 
     pub fn path(&self) -> &Path {
@@ -535,5 +571,38 @@ mod tests {
             t.entries()[1].parent_uuid.as_ref(),
             Some(&t.entries()[0].uuid)
         );
+    }
+
+    #[test]
+    fn context_size_reads_without_touching_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        assert_eq!(Transcript::context_size(&path).unwrap(), 0);
+        assert!(!path.exists(), "只是看一眼，不新建文件");
+
+        let mut t = Transcript::open(&path).unwrap();
+        t.append(user("第一条", 1)).unwrap();
+        let one = Transcript::context_size(&path).unwrap();
+        assert!(one > 0);
+        t.append(assistant("", &["call_0"])).unwrap();
+        let raw = std::fs::read(&path).unwrap();
+        // 没等到结果的工具调用留着不补：那是正开着它的那一方的事。
+        assert!(Transcript::context_size(&path).unwrap() > one);
+        assert_eq!(std::fs::read(&path).unwrap(), raw);
+
+        // 压缩之后变小。
+        t.append(EntryBody::ToolResult {
+            tool_call_id: "call_0".into(),
+            content: "很长的结果".repeat(200),
+            is_error: false,
+        })
+        .unwrap();
+        let full = Transcript::context_size(&path).unwrap();
+        t.append(EntryBody::Summary {
+            content: "摘要".into(),
+            kept: 0,
+        })
+        .unwrap();
+        assert!(Transcript::context_size(&path).unwrap() < full);
     }
 }
