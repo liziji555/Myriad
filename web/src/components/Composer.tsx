@@ -161,6 +161,12 @@ export function Composer({
       // 邮箱、包名里的 `@` 不是在点名：只有单独起头的 `@` 才提示。
       (mention !== null && mention.query !== "" && (mention.start === 0 || /\s/.test(text[mention.start - 1]))));
 
+  // 命令多了菜单要滚：用上下键选到看不见的那一个时，把它滚出来。
+  const commandMenu = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    commandMenu.current?.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: "nearest" });
+  }, [command?.id]);
+
   const runCommand = (picked: SlashCommand) => {
     // 从 `/` 选的：那几个字是命令，不留。从「+」选的：草稿是人写好的话，留着。
     const next = draftAfter(picked, adding ? text : "");
@@ -258,7 +264,7 @@ export function Composer({
           </ul>
         )}
         {command && (
-          <div className="sa-mention-menu" role="listbox" aria-label="命令">
+          <div ref={commandMenu} className="sa-mention-menu" role="listbox" aria-label="命令">
             {groupCommands(commandOptions).map(({ group, items }) => (
               <div key={group} role="group" aria-label={group}>
                 <p className="sa-menu-group" aria-hidden="true">
