@@ -179,6 +179,14 @@ export function Composer({
     });
   };
 
+  /** 开关「+」的菜单。焦点放回输入框：菜单的上下键、回车是它在接。 */
+  const toggleAdding = () => {
+    input.current?.focus();
+    setAdding(!(adding && !dismissed));
+    setDismissed(false);
+    setPicked(0);
+  };
+
   const complete = (bot: Bot) => {
     if (!mention) return;
     const next = `${text.slice(0, mention.start)}@${bot.name} ${text.slice(caret)}`;
@@ -322,10 +330,11 @@ export function Composer({
               // 用 mousedown：菜单的上下键、回车是输入框在接，焦点要留在输入框里。
               onMouseDown={(event) => {
                 event.preventDefault();
-                input.current?.focus();
-                setAdding(!(adding && !dismissed));
-                setDismissed(false);
-                setPicked(0);
+                toggleAdding();
+              }}
+              // 键盘上按回车、空格没有 mousedown，只有 click（detail 是 0）。
+              onClick={(event) => {
+                if (event.detail === 0) toggleAdding();
               }}
             >
               <Icon name="plus" size={14} />
