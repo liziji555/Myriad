@@ -101,6 +101,8 @@ export function ModelsPanel() {
                 maxLength={24}
                 spellCheck={false}
                 placeholder="比如 deepseek"
+                disabled={provider.saved}
+                title={provider.saved ? "存过的模型服务不能改名；要换名字就删掉它再加一个" : undefined}
                 onChange={(event) => setProvider(index, { name: event.target.value })}
               />
             </label>
@@ -153,7 +155,7 @@ export function ModelsPanel() {
               ...draft,
               providers: [
                 ...draft.providers,
-                { name: "", kind: "openai_compat", base_url: "", api_key: "", has_key: false },
+                { name: "", kind: "openai_compat", base_url: "", api_key: "", has_key: false, saved: false },
               ],
             })
           }

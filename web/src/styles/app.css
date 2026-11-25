@@ -1825,6 +1825,10 @@ button.sa-row:hover {
 .sa-field textarea {
   resize: vertical;
 }
+.sa-field input:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
 .sa-check {
   display: flex;
   gap: var(--sa-space-2);

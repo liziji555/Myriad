@@ -21,7 +21,7 @@ describe("models", () => {
 
   it("说得出为什么不能保存", () => {
     const draft = draftOf(settings);
-    draft.providers.push({ name: "My Model", kind: "anthropic", base_url: "", api_key: "", has_key: false });
+    draft.providers.push({ name: "My Model", kind: "anthropic", base_url: "", api_key: "", has_key: false, saved: false });
     expect(draftProblem(draft)).toContain("小写字母");
     draft.providers[1].name = "mine";
     expect(draftProblem(draft)).toContain("还没有填地址");

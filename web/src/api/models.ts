@@ -18,6 +18,8 @@ export interface ProviderDraft {
   base_url: string;
   api_key: string;
   has_key: boolean;
+  /** 已经存在服务器上的。存过之后名字不能改：密钥是按名字存的。 */
+  saved: boolean;
 }
 
 export interface ModelsDraft {
@@ -29,7 +31,7 @@ export interface ModelsDraft {
 
 export function draftOf(settings: ModelSettings): ModelsDraft {
   return {
-    providers: settings.providers.map((provider) => ({ ...provider, api_key: "" })),
+    providers: settings.providers.map((provider) => ({ ...provider, api_key: "", saved: true })),
     cheap: settings.cheap,
     mid: settings.mid,
     strong: settings.strong,
