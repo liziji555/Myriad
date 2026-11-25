@@ -432,9 +432,12 @@ function Shell() {
       run: entry.run,
     }))
     .sort((a, b) => Number(b.group === "面板") - Number(a.group === "面板"));
-  // 技能排在最前面：这个房间里有 Bot 能用的才列出来。
+  // 技能排在最前面：这个房间里有 Bot 能用的才列出来。停用的 Bot 不说话，harness 用的是它自己的技能。
+  const skilled = members.filter((bot) => bot.enabled && bot.harness === "builtin");
   const skillCommands: SlashCommand[] = skills
-    .filter((skill) => skill.bots.length === 0 || members.some((bot) => skill.bots.includes(bot.name)))
+    .filter((skill) =>
+      skill.bots.length === 0 ? skilled.length > 0 : skilled.some((bot) => skill.bots.includes(bot.name)),
+    )
     .map((skill) => ({
       id: `skill:${skill.name}`,
       group: "技能",
