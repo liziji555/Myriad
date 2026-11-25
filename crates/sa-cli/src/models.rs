@@ -292,6 +292,7 @@ impl ConfigModels {
 }
 
 /// 把配置文件里的 `[providers]` 和 `[tiers]` 换成新的，别的部分和注释原样留着。
+/// 这两节写成一行的 `{ ... }` 也认。
 fn rewrite(
     text: &str,
     providers: &BTreeMap<String, ProviderConfig>,
@@ -306,7 +307,7 @@ fn rewrite(
             table.set_implicit(true);
             Item::Table(table)
         })
-        .as_table_mut()
+        .as_table_like_mut()
         .context("config.toml 的 providers 不是一节")?;
     let gone: Vec<String> = table
         .iter()
@@ -320,20 +321,20 @@ fn rewrite(
         let entry = table
             .entry(name)
             .or_insert_with(|| Item::Table(Table::new()))
-            .as_table_mut()
+            .as_table_like_mut()
             .with_context(|| format!("config.toml 的 providers.{name} 不是一节"))?;
         let kind = match provider.kind {
             ProviderKind::OpenaiCompat => "openai_compat",
             ProviderKind::Anthropic => "anthropic",
         };
-        entry["kind"] = value(kind);
-        entry["base_url"] = value(&provider.base_url);
-        entry["api_key_env"] = value(&provider.api_key_env);
+        entry.insert("kind", value(kind));
+        entry.insert("base_url", value(&provider.base_url));
+        entry.insert("api_key_env", value(&provider.api_key_env));
     }
     let table = doc
         .entry("tiers")
         .or_insert_with(|| Item::Table(Table::new()))
-        .as_table_mut()
+        .as_table_like_mut()
         .context("config.toml 的 tiers 不是一节")?;
     for (name, tier) in tiers.iter() {
         let mut inline = InlineTable::new();
@@ -345,7 +346,7 @@ fn rewrite(
         if let Some(window) = tier.context_window {
             inline.insert("context_window", (window as i64).into());
         }
-        table[name] = value(inline);
+        table.insert(name, value(inline));
     }
     Ok(doc.to_string())
 }
@@ -576,6 +577,34 @@ mod tests {
                 .mode();
             assert_eq!(mode & 0o777, 0o600);
         }
+    }
+
+    #[test]
+    fn rewrite_accepts_inline_tables() {
+        let text = r#"providers = { old = { kind = "openai_compat", base_url = "https://a.example", api_key_env = "OLD_API_KEY" } }
+tiers = { cheap = { provider = "old", model = "m" }, mid = { provider = "old", model = "m" }, strong = { provider = "old", model = "m" } }
+"#;
+        let mut config = Config::parse(DEFAULT_CONFIG_TOML).unwrap();
+        let mut provider = config.providers.remove("deepseek").unwrap();
+        provider.base_url = "https://b.example".into();
+        let providers = BTreeMap::from([("old".to_string(), provider)]);
+        for tier in [
+            &mut config.tiers.cheap,
+            &mut config.tiers.mid,
+            &mut config.tiers.strong,
+        ] {
+            tier.provider = "old".into();
+        }
+        let text = rewrite(text, &providers, &config.tiers).unwrap();
+        let again: toml::Value = toml::from_str(&text).unwrap();
+        assert_eq!(
+            again["providers"]["old"]["base_url"].as_str(),
+            Some("https://b.example")
+        );
+        assert_eq!(
+            again["tiers"]["strong"]["model"].as_str(),
+            Some("deepseek-v4-pro")
+        );
     }
 
     #[test]
