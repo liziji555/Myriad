@@ -428,7 +428,8 @@ async fn say_hello(client: Arc<dyn Provider>, model: String) -> Result<String, L
         tools: vec![],
         max_tokens: Some(256),
         thinking: None,
-        session_id: None,
+        // 有的网关要求每个会话带一个请求头，没有就拒绝。
+        session_id: Some(format!("test_{}", uuid::Uuid::new_v4().simple())),
     };
     let mut stream = client.stream(request, CancellationToken::new()).await?;
     let mut reply = Accumulator::default();
