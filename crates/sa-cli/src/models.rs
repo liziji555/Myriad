@@ -63,7 +63,14 @@ fn check_url(name: &str, base_url: &str) -> Result<(), String> {
     let local = match host.parse::<std::net::IpAddr>() {
         Ok(std::net::IpAddr::V4(ip)) => ip.is_loopback() || ip.is_private() || ip.is_link_local(),
         Ok(std::net::IpAddr::V6(ip)) => ip.is_loopback() || (ip.segments()[0] & 0xfe00) == 0xfc00,
-        Err(_) => host == "localhost" || host.ends_with(".localhost"),
+        // 内网里按名字找的机器：没有点的短名字，或者只在内网里解析的后缀。
+        Err(_) => {
+            host == "localhost"
+                || (!host.is_empty() && !host.contains('.'))
+                || [".localhost", ".local", ".internal", ".lan", ".home.arpa"]
+                    .iter()
+                    .any(|suffix| host.ends_with(suffix))
+        }
     };
     match url.scheme() {
         "https" => Ok(()),
@@ -275,12 +282,15 @@ impl ConfigModels {
                 "模型服务的名字只能用小写字母、数字、横线和下划线，最多 24 个字符（现在是「{name}」）"
             );
             let base_url = input.base_url.trim().to_string();
-            check_url(&name, &base_url).map_err(anyhow::Error::msg)?;
             // 地址没变才算同一个模型服务：存着的密钥、环境变量里的密钥都只给原来的地址。
             let old = state
                 .providers
                 .get(&name)
                 .filter(|old| old.base_url.trim() == base_url);
+            // 没动过的地址不再查：手写在 config.toml 里的照样能留着。
+            if old.is_none() {
+                check_url(&name, &base_url).map_err(anyhow::Error::msg)?;
+            }
             let key = input.api_key.map(|key| key.trim().to_string());
             if let Some(key) = key.filter(|key| !key.is_empty()) {
                 keys.insert(name.clone(), key);
@@ -817,6 +827,8 @@ strong = { provider = "old", model = "m" }
             "http://127.0.0.1:8080",
             "http://192.168.1.5:8000/v1",
             "http://[::1]:8080",
+            "http://ollama:11434/v1",
+            "http://gateway.corp.internal/v1",
         ] {
             assert!(check_url("x", ok).is_ok(), "{ok}");
         }

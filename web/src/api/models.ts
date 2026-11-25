@@ -44,7 +44,7 @@ export function draftOf(settings: ModelSettings): ModelsDraft {
       ...provider,
       api_key: "",
       saved: true,
-      saved_url: provider.base_url,
+      saved_url: provider.base_url.trim(),
     })),
     cheap: settings.cheap,
     mid: settings.mid,
