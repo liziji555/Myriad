@@ -1216,7 +1216,6 @@ button.sa-row:hover {
   padding: 0 var(--sa-space-4);
 }
 .sa-composer-box {
-  position: relative;
   display: grid;
   border: 1px solid var(--sa-border-strong);
   border-radius: var(--sa-radius-xl);
@@ -1255,6 +1254,7 @@ button.sa-row:hover {
   cursor: not-allowed;
 }
 .sa-composer-bar {
+  position: relative;
   display: flex;
   align-items: center;
   gap: var(--sa-space-2);
@@ -1320,7 +1320,8 @@ button.sa-row:hover {
   color: var(--sa-danger);
   font-size: var(--sa-text-xs);
 }
-/* 从输入框往上弹出来的小菜单：贴着框的左边或右边，框再窄也不出框。 */
+/* 从输入框底下那一行往上弹出来的小菜单：贴着框的左边或右边，框再窄也不出框；
+   草稿写得再长也只盖住草稿，不顶出屏幕，屏幕矮就在菜单里滚。 */
 .sa-chip-menu {
   position: absolute;
   bottom: calc(100% + var(--sa-space-2));
@@ -1332,6 +1333,8 @@ button.sa-row:hover {
   width: max-content;
   min-width: min(220px, 100%);
   max-width: min(340px, 100%);
+  max-height: min(360px, 60vh);
+  overflow-y: auto;
   padding: var(--sa-space-1);
   border: 1px solid var(--sa-border);
   border-radius: var(--sa-radius-lg);
