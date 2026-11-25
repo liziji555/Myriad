@@ -287,12 +287,13 @@ impl ConfigModels {
                 .providers
                 .get(&name)
                 .filter(|old| old.base_url.trim() == base_url);
-            // 没动过的地址不再查：手写在 config.toml 里的照样能留着。
-            if old.is_none() {
+            let key = input.api_key.map(|key| key.trim().to_string());
+            let key = key.filter(|key| !key.is_empty());
+            // 地址没动、密钥也没重新填的不再查：手写在 config.toml 里的照样能留着。
+            if old.is_none() || key.is_some() {
                 check_url(&name, &base_url).map_err(anyhow::Error::msg)?;
             }
-            let key = input.api_key.map(|key| key.trim().to_string());
-            if let Some(key) = key.filter(|key| !key.is_empty()) {
+            if let Some(key) = key {
                 keys.insert(name.clone(), key);
             } else if let Some(key) = state.keys.get(&name).filter(|_| old.is_some()) {
                 keys.insert(name.clone(), key.clone());
