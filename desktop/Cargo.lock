@@ -3668,7 +3668,7 @@ checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
 name = "sa-adapters"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "hex",
  "hmac",
@@ -3684,7 +3684,7 @@ dependencies = [
 
 [[package]]
 name = "sa-cli"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3716,7 +3716,7 @@ dependencies = [
 
 [[package]]
 name = "sa-desktop"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -3732,7 +3732,7 @@ dependencies = [
 
 [[package]]
 name = "sa-engine"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "hex",
@@ -3750,7 +3750,7 @@ dependencies = [
 
 [[package]]
 name = "sa-kernel"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -3767,7 +3767,7 @@ dependencies = [
 
 [[package]]
 name = "sa-llm"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "eventsource-stream",
@@ -3784,7 +3784,7 @@ dependencies = [
 
 [[package]]
 name = "sa-orchestrator"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3808,7 +3808,7 @@ dependencies = [
 
 [[package]]
 name = "sa-protocol"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -3818,7 +3818,7 @@ dependencies = [
 
 [[package]]
 name = "sa-server"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "axum",
  "futures-util",
@@ -3836,7 +3836,7 @@ dependencies = [
 
 [[package]]
 name = "sa-store"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "rusqlite",
  "sa-protocol",
@@ -3847,7 +3847,7 @@ dependencies = [
 
 [[package]]
 name = "sa-tools"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "eventsource-stream",

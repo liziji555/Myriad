@@ -54,7 +54,7 @@ export function createLightLayer(root: HTMLElement = document.body): LightLayer 
     height: "100%",
     overflow: "hidden",
     pointerEvents: "none",
-    zIndex: "10",
+    zIndex: "45",
   });
   root.append(svg);
   const prefix = `light-${++layerSerial}`;

@@ -27,12 +27,15 @@ import {
 import { Notices } from "./components/Notices";
 import { applyTheme, loadTheme, nextTheme } from "./api/theme";
 import { Sidebar, type RoomState } from "./components/Sidebar";
-import { StageBar } from "./components/StageBar";
+import { StageBar, type MainView } from "./components/StageBar";
 import { WindowControls } from "./components/WindowControls";
 import { Timeline } from "./components/Timeline";
 import { FlowView } from "./components/FlowView";
+import { TrajectoryPane } from "./components/TrajectoryPane";
 import { flowOf } from "./api/flow";
-import { LightProvider } from "./light/LightProvider";
+import { HUE_COLORS, hueOf } from "./api/avatar";
+import { LightProvider, useLight } from "./light/LightProvider";
+import "./vendor/light-ui/running-border.css";
 
 /** 窗口够宽时左栏常驻（可以收成窄条），窄了变成从左上角呼出的抽屉。 */
 const DOCKED = "(min-width: 1101px)";
@@ -60,6 +63,7 @@ export function App() {
 }
 
 function Shell() {
+  const emit = useLight();
   const workspace = useWorkspace();
   const [selected, setSelected] = useState<RoomId | null>(null);
   const [tab, setTab] = useState<PanelTab>("execution");
@@ -145,7 +149,7 @@ function Shell() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [theme, setTheme] = useState(loadTheme);
   const [createSignal, setCreateSignal] = useState(0);
-  const [view, setView] = useState<"chat" | "flow">("chat");
+  const [view, setView] = useState<MainView>("split");
   // 房间列表收起后把「新建房间」的信号清掉，不然下次打开列表又弹出填名字的框。
   const listShown = docked ? !collapsed : roomsOpen;
   useEffect(() => {
@@ -310,13 +314,13 @@ function Shell() {
         (edge) => edge.kind === "dispatch" || edge.kind === "peer",
       ).length
     : 0;
-  // 从协作视图点一个节点：回到对话，滚到那条消息闪一下。
+  // 从协作视图或工作树轨迹点一个节点：确保对话可见，滚到那条消息闪一下。
   const openMessage = (messageId: string) => {
-    setView("chat");
+    if (view === "flow") setView("split");
     window.setTimeout(() => {
       const target = document.querySelector(`[data-message-id="${messageId}"]`);
       if (!target) return;
-      target.scrollIntoView({ block: "center" });
+      target.scrollIntoView({ block: "center", behavior: "smooth" });
       target.setAttribute("data-flash", "true");
       window.setTimeout(() => target.removeAttribute("data-flash"), 1600);
     }, 60);
@@ -324,13 +328,33 @@ function Shell() {
   const pendingTasks = roomTasks.filter((task) =>
     ["review", "waiting", "blocked"].includes(task.state),
   ).length;
-  // 点了现场栏上的牌子：主线上有那条消息就滚过去闪一下，否则打开那个任务。
+  // 点了现场栏上的牌子：主线上有那条消息就滚过去闪一下，同屏模式下再发射一道流光落到该队员最新的工作树节点。
   const jumpTo = (row: Presence) => {
-    // 在协作视图里点的：先切回对话，等主线显示出来再滚。
+    const fireToTree = () => {
+      const chip = document.querySelector(`[data-presence-bot="${CSS.escape(row.botId)}"]`);
+      const nodes = document.querySelectorAll(`[data-traj-bot="${CSS.escape(row.botId)}"] .sa-traj-glyph`);
+      const lastGlyph = nodes.length > 0 ? nodes[nodes.length - 1] : null;
+      if (chip && lastGlyph) {
+        void emit({
+          id: `chip-${row.botId}-${Date.now()}`,
+          source: chip,
+          target: lastGlyph,
+          color: HUE_COLORS[hueOf(row.botId)],
+          duration: 1100,
+          sourceKind: "model",
+        });
+      }
+    };
     if (view === "flow") {
-      setView("chat");
-      window.setTimeout(() => reveal(row), 60);
-    } else reveal(row);
+      setView("split");
+      window.setTimeout(() => {
+        reveal(row);
+        fireToTree();
+      }, 60);
+    } else {
+      reveal(row);
+      fireToTree();
+    }
   };
   const reveal = (row: Presence) => {
     const target =
@@ -530,6 +554,9 @@ function Shell() {
         presence={presence}
         connected={workspace.connected}
         pendingTasks={pendingTasks}
+        view={view}
+        liveLanes={liveLanes}
+        onView={setView}
         docked={docked}
         roomsOpen={roomsShown}
         drawerOpen={panelOpen}
@@ -583,155 +610,148 @@ function Shell() {
           />
         </>
       )}
-      <main className="sa-main">
-        {room ? (
-          <>
-            <Notices
-              notices={noticesFor(workspace.notices, room.id)}
-              onDismiss={workspace.dismissNotice}
-              onShowTask={(taskId) => {
-                setFocusTask(taskId);
-                showPanel("tasks");
-              }}
-              onShowUsage={() => showPanel("usage")}
-            />
-            <div className="sa-viewbar" role="tablist" aria-label="看法">
-              <button
-                type="button"
-                role="tab"
-                aria-selected={view === "chat"}
-                onClick={() => setView("chat")}
-              >
-                对话
-              </button>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={view === "flow"}
-                onClick={() => setView("flow")}
-              >
-                协作
-                {liveLanes > 0 && (
-                  <span
-                    className="sa-viewbar-live"
-                    aria-label={`${liveLanes} 个在做`}
-                  />
+      <div className="sa-workspace">
+        <main className="sa-main" data-view={view}>
+          {room ? (
+            <div className="sa-split-workspace" data-split={view === "split" && Boolean(flow)}>
+              <div className="sa-primary-column">
+                <Notices
+                  notices={noticesFor(workspace.notices, room.id)}
+                  onDismiss={workspace.dismissNotice}
+                  onShowTask={(taskId) => {
+                    setFocusTask(taskId);
+                    showPanel("tasks");
+                  }}
+                  onShowUsage={() => showPanel("usage")}
+                />
+                {view === "flow" && flow && (
+                  <>
+                    <div className="sa-flow-meta-bar">
+                      <span>
+                        {flow.lanes.length - 1} 条工作树泳道 · {handoffCount} 次派活与交接
+                        {liveLanes > 0 ? ` · ${liveLanes} 个正在运行` : ""}
+                      </span>
+                    </div>
+                    <FlowView
+                      key={room.id}
+                      flow={flow}
+                      presence={presence}
+                      onOpen={openMessage}
+                    />
+                  </>
                 )}
-              </button>
-              {flow && view === "flow" && (
-                <span className="sa-viewbar-meta">
-                  {flow.lanes.length - 1} 条线 · {handoffCount} 次派活和交接
-                  {liveLanes > 0 ? ` · ${liveLanes} 个在做` : ""}
-                </span>
+                {/* 全屏流线视图时主线只藏起来不卸载：没写完的打回意见、审批卡都还在。 */}
+                <div className="sa-viewpane" hidden={view === "flow" && !!flow}>
+                  <Timeline
+                    key={room.id}
+                    chat={roomChat}
+                    bots={workspace.bots}
+                    tasks={roomTasks}
+                    runs={workspace.board.runs}
+                    taskActions={workspace.tasks}
+                    members={members.filter((bot) => bot.enabled)}
+                    onShowTask={(taskId) => {
+                      setFocusTask(taskId);
+                      showPanel("tasks");
+                    }}
+                    loadError={loadError}
+                    onRetry={() => setRetry((n) => n + 1)}
+                    onLoadOlder={() => workspace.loadOlder(room.id)}
+                    onDecide={workspace.decideApproval}
+                    onExample={setPrefill}
+                    hidden={view === "flow" && !!flow}
+                  />
+                </div>
+                {roomChat?.activity?.routing ? (
+                  <p className="sa-room-status" role="status">
+                    正在挑选由谁来回答…
+                  </p>
+                ) : (
+                  queued.length > 0 && (
+                    <p className="sa-room-status" role="status">
+                      接下来：{queued.join("、")}
+                    </p>
+                  )
+                )}
+                <Composer
+                  key={`composer-${room.id}`}
+                  roomId={room.id}
+                  prefill={prefill}
+                  onPrefilled={() => setPrefill(null)}
+                  commands={[...skillCommands, ...slashCommands]}
+                  controls={
+                    <ComposerControls
+                      room={room}
+                      host={members.find((bot) => bot.id === room.host_bot_id) ?? null}
+                      busy={replying}
+                      onPermission={(permission) => workspace.team.updateRoom(room.id, { permission })}
+                      onTier={(tier) =>
+                        room.host_bot_id ? workspace.team.updateBot(room.host_bot_id, { tier }) : Promise.resolve()
+                      }
+                      onManageModels={() => showPanel("models")}
+                    />
+                  }
+                  disabledReason={
+                    room.host_bot_id ? null : "这个房间里还没有 Bot，发了也没人回应"
+                  }
+                  replying={replying}
+                  steerTo={speaking.length > 0 ? speaking.join("、") : null}
+                  members={members.filter((bot) => bot.enabled)}
+                  queue={roomChat?.queue ?? []}
+                  onSend={(content) => workspace.sendMessage(room.id, content)}
+                  onQueue={(content) => workspace.queueMessage(room.id, content)}
+                  onEditQueued={workspace.editQueued}
+                  onCancelQueued={workspace.cancelQueued}
+                  onStop={() => workspace.stopReply(room.id)}
+                />
+              </div>
+              {view === "split" && flow && (
+                <TrajectoryPane
+                  key={`traj-${room.id}`}
+                  roomId={room.id}
+                  flow={flow}
+                  bots={workspace.bots}
+                  presence={presence}
+                  onOpen={openMessage}
+                  onShowDiff={() => showPanel("files")}
+                />
               )}
             </div>
-            {view === "flow" && flow && (
-              <FlowView
-                key={room.id}
-                flow={flow}
-                presence={presence}
-                onOpen={openMessage}
-              />
-            )}
-            {/* 协作视图时主线只藏起来不卸载：没写完的打回意见、审批卡都还在。 */}
-            <div className="sa-viewpane" hidden={view === "flow" && !!flow}>
-              <Timeline
-                key={room.id}
-                chat={roomChat}
-                bots={workspace.bots}
-                tasks={roomTasks}
-                runs={workspace.board.runs}
-                taskActions={workspace.tasks}
-                members={members.filter((bot) => bot.enabled)}
-                onShowTask={(taskId) => {
-                  setFocusTask(taskId);
-                  showPanel("tasks");
-                }}
-                loadError={loadError}
-                onRetry={() => setRetry((n) => n + 1)}
-                onLoadOlder={() => workspace.loadOlder(room.id)}
-                onDecide={workspace.decideApproval}
-                onExample={setPrefill}
-                hidden={view === "flow" && !!flow}
-              />
+          ) : (
+            <div className="sa-empty">
+              <h2>还没有房间</h2>
+              <p>在左边的房间列表里点 + 新建一个。</p>
             </div>
-            {roomChat?.activity?.routing ? (
-              <p className="sa-room-status" role="status">
-                正在挑选由谁来回答…
-              </p>
-            ) : (
-              queued.length > 0 && (
-                <p className="sa-room-status" role="status">
-                  接下来：{queued.join("、")}
-                </p>
-              )
-            )}
-            <Composer
-              key={`composer-${room.id}`}
-              roomId={room.id}
-              prefill={prefill}
-              onPrefilled={() => setPrefill(null)}
-              commands={[...skillCommands, ...slashCommands]}
-              controls={
-                <ComposerControls
-                  room={room}
-                  host={members.find((bot) => bot.id === room.host_bot_id) ?? null}
-                  busy={replying}
-                  onPermission={(permission) => workspace.team.updateRoom(room.id, { permission })}
-                  onTier={(tier) =>
-                    room.host_bot_id ? workspace.team.updateBot(room.host_bot_id, { tier }) : Promise.resolve()
-                  }
-                  onManageModels={() => showPanel("models")}
-                />
-              }
-              disabledReason={
-                room.host_bot_id ? null : "这个房间里还没有 Bot，发了也没人回应"
-              }
-              replying={replying}
-              steerTo={speaking.length > 0 ? speaking.join("、") : null}
-              members={members.filter((bot) => bot.enabled)}
-              queue={roomChat?.queue ?? []}
-              onSend={(content) => workspace.sendMessage(room.id, content)}
-              onQueue={(content) => workspace.queueMessage(room.id, content)}
-              onEditQueued={workspace.editQueued}
-              onCancelQueued={workspace.cancelQueued}
-              onStop={() => workspace.stopReply(room.id)}
-            />
-          </>
-        ) : (
-          <div className="sa-empty">
-            <h2>还没有房间</h2>
-            <p>在左边的房间列表里点 + 新建一个。</p>
-          </div>
-        )}
-      </main>
-      {room && (
-        <ContextPanel
-          tab={tab}
-          onTab={setTab}
-          onClose={() => setPanelOpen(false)}
-          width={layout.panelWidth}
-          onResize={(panelWidth) => changeLayout({ panelWidth })}
-          room={room}
-          members={members}
-          bots={workspace.bots}
-          team={workspace.team}
-          board={workspace.board}
-          taskActions={workspace.tasks}
-          focusTask={focusTask}
-          onFocusTask={setFocusTask}
-          routines={workspace.routines.filter(
-            (routine) => routine.room_id === room.id,
           )}
-          routineActions={workspace.routineActions}
-          links={workspace.links.filter((link) => link.room_id === room.id)}
-          linkActions={workspace.linkActions}
-          usageKey={workspace.notices.length}
-          execution={execution}
-          onJump={jumpTo}
-          onStopBot={(botId) => void workspace.stopBot(room.id, botId)}
-        />
-      )}
+        </main>
+        {room && (
+          <ContextPanel
+            tab={tab}
+            onTab={setTab}
+            onClose={() => setPanelOpen(false)}
+            width={layout.panelWidth}
+            onResize={(panelWidth) => changeLayout({ panelWidth })}
+            room={room}
+            members={members}
+            bots={workspace.bots}
+            team={workspace.team}
+            board={workspace.board}
+            taskActions={workspace.tasks}
+            focusTask={focusTask}
+            onFocusTask={setFocusTask}
+            routines={workspace.routines.filter(
+              (routine) => routine.room_id === room.id,
+            )}
+            routineActions={workspace.routineActions}
+            links={workspace.links.filter((link) => link.room_id === room.id)}
+            linkActions={workspace.linkActions}
+            usageKey={workspace.notices.length}
+            execution={execution}
+            onJump={jumpTo}
+            onStopBot={(botId) => void workspace.stopBot(room.id, botId)}
+          />
+        )}
+      </div>
     </div>
   );
 }
