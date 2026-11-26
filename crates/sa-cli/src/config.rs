@@ -138,6 +138,9 @@ pub struct McpServer {
     /// 这些工具不用问人，直接执行。别的每次都要批准。
     #[serde(default)]
     pub auto_approve: Vec<String>,
+    /// 是否信任该服务自报的 `annotations.readOnlyHint`（开启后只读工具自动免审批并在规划模式可用）。
+    #[serde(default)]
+    pub trust_annotations: bool,
     #[serde(default = "enabled_by_default")]
     pub enabled: bool,
 }
@@ -293,6 +296,7 @@ impl Config {
                     env: vars,
                     cwd: Some(cwd.to_path_buf()),
                     auto_approve: server.auto_approve.clone(),
+                    trust_annotations: server.trust_annotations,
                 }
             })
             .collect()

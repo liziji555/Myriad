@@ -143,12 +143,10 @@ pub(crate) struct Shared {
     pub tools: std::sync::RwLock<ToolRegistry>,
     /// 技能放在哪个目录。没有设就是没有技能。
     pub skills_dir: Mutex<Option<PathBuf>>,
-    /// 外部 MCP 服务，和它们现在怎么样。
-    pub mcp: Mutex<Vec<extensions::Mcp>>,
+    /// 外部 MCP 服务与当前代际（与工具注册在同一锁边界内同步，防止热重载竞态）。
+    pub mcp: Mutex<extensions::McpRegistry>,
     /// 串行化 MCP 热重载，防止并发重载产生重复连接或进程泄漏。
     pub mcp_reload_lock: tokio::sync::Mutex<()>,
-    /// MCP 连接代际编号：热重载递增代际，避免旧代际异步连接完成后把过期工具写回。
-    pub mcp_generation: std::sync::atomic::AtomicU64,
     pub settings: Settings,
     /// 触发后所有房间停下手里的事并退出。
     pub shutdown: CancellationToken,
@@ -276,7 +274,6 @@ impl Orchestrator {
                 skills_dir: Mutex::default(),
                 mcp: Mutex::default(),
                 mcp_reload_lock: tokio::sync::Mutex::new(()),
-                mcp_generation: std::sync::atomic::AtomicU64::new(0),
                 settings,
                 shutdown: CancellationToken::new(),
                 approvals: Mutex::new(HashMap::new()),

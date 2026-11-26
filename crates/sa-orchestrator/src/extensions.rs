@@ -10,6 +10,13 @@ use sa_tools::{SkillSet, SkillTool, Tool};
 use std::path::PathBuf;
 use std::sync::Arc;
 
+/// 外部 MCP 服务列表与代际号：统一受同一把锁保护，避免热重载清空与旧代际异步注册发生竞态。
+#[derive(Default)]
+pub(crate) struct McpRegistry {
+    pub generation: u64,
+    pub servers: Vec<Mcp>,
+}
+
 /// 一个外部 MCP 服务，和它现在怎么样。
 pub(crate) struct Mcp {
     pub server: Arc<McpServer>,
@@ -65,9 +72,13 @@ impl Shared {
         }
     }
 
-    fn set_mcp(&self, name: &str, change: impl FnOnce(&mut McpServerInfo)) {
-        let mut all = self.mcp.lock().unwrap();
-        if let Some(mcp) = all.iter_mut().find(|mcp| mcp.info.name == name) {
+    fn set_mcp_for(&self, server: &Arc<McpServer>, change: impl FnOnce(&mut McpServerInfo)) {
+        let mut reg = self.mcp.lock().unwrap();
+        if let Some(mcp) = reg
+            .servers
+            .iter_mut()
+            .find(|mcp| Arc::ptr_eq(&mcp.server, server))
+        {
             change(&mut mcp.info);
         }
     }
@@ -125,10 +136,7 @@ impl Orchestrator {
 
     /// 连一个外部 MCP 服务，连上了就把它的工具加给每个 Bot。返回加了哪些工具（服务自己的工具名）。
     pub async fn connect_mcp(&self, server: Arc<McpServer>) -> Result<Vec<String>, McpError> {
-        let gen = self
-            .shared
-            .mcp_generation
-            .load(std::sync::atomic::Ordering::SeqCst);
+        let gen = self.shared.mcp.lock().unwrap().generation;
         self.connect_mcp_in_gen(server, gen).await
     }
 
@@ -139,19 +147,14 @@ impl Orchestrator {
     ) -> Result<Vec<String>, McpError> {
         let name = server.name().to_string();
         {
-            if self
-                .shared
-                .mcp_generation
-                .load(std::sync::atomic::Ordering::SeqCst)
-                != gen
-            {
+            let mut reg = self.shared.mcp.lock().unwrap();
+            if reg.generation != gen {
                 return Err(McpError("MCP 配置已热重载，取消旧连接".into()));
             }
-            let mut all = self.shared.mcp.lock().unwrap();
-            if all.iter().any(|mcp| mcp.info.name == name) {
+            if reg.servers.iter().any(|mcp| mcp.info.name == name) {
                 return Err(McpError(format!("已经有一个叫「{name}」的 MCP 服务了")));
             }
-            all.push(Mcp {
+            reg.servers.push(Mcp {
                 server: server.clone(),
                 info: McpServerInfo {
                     name: name.clone(),
@@ -165,36 +168,57 @@ impl Orchestrator {
             connected = server.connect() => connected,
             _ = self.shared.shutdown.cancelled() => Err(McpError("服务正在关闭".into())),
         };
-        // 若连接耗时期间发生了新一轮热重载，立即关掉过期连接，不污染新代际工具表。
-        if self
-            .shared
-            .mcp_generation
-            .load(std::sync::atomic::Ordering::SeqCst)
-            != gen
-        {
-            server.close().await;
-            return Err(McpError("MCP 配置已热重载，丢弃旧连接".into()));
-        }
         match connected {
             Ok(infos) => {
-                let mut added = vec![];
-                for tool in server.tools(&infos) {
-                    let remote = tool.remote_name().to_string();
-                    if self.add_tool(tool) {
-                        added.push(remote);
+                // 在同一把 `self.shared.mcp` 锁边界内校验代际并原子发布整批工具，彻底消除热重载竞态。
+                let tools_to_add = server.tools(&infos);
+                let published = {
+                    let mut reg = self.shared.mcp.lock().unwrap();
+                    if reg.generation != gen
+                        || !reg
+                            .servers
+                            .iter()
+                            .any(|mcp| Arc::ptr_eq(&mcp.server, &server))
+                    {
+                        None
+                    } else {
+                        let mut added = vec![];
+                        {
+                            let mut tools = self.shared.tools.write().unwrap();
+                            for tool in tools_to_add {
+                                let remote = tool.remote_name().to_string();
+                                if tools.get(tool.name()).is_none() {
+                                    tools.register(tool);
+                                    added.push(remote);
+                                }
+                            }
+                        }
+                        if let Some(mcp) = reg
+                            .servers
+                            .iter_mut()
+                            .find(|mcp| Arc::ptr_eq(&mcp.server, &server))
+                        {
+                            mcp.info.state = McpState::Ready;
+                            mcp.info.tools = added.clone();
+                        }
+                        Some(added)
+                    }
+                };
+                match published {
+                    Some(added) => {
+                        tracing::info!("MCP 服务「{name}」连上了，{} 个工具", added.len());
+                        Ok(added)
+                    }
+                    None => {
+                        server.retire().await;
+                        Err(McpError("MCP 配置已热重载，丢弃旧连接".into()))
                     }
                 }
-                tracing::info!("MCP 服务「{name}」连上了，{} 个工具", added.len());
-                self.shared.set_mcp(&name, |info| {
-                    info.state = McpState::Ready;
-                    info.tools = added.clone();
-                });
-                Ok(added)
             }
             Err(error) => {
                 tracing::warn!("MCP 服务「{name}」没连上：{error}");
-                server.close().await;
-                self.shared.set_mcp(&name, |info| {
+                server.retire().await;
+                self.shared.set_mcp_for(&server, |info| {
                     info.state = McpState::Failed;
                     info.error = Some(error.0.clone());
                 });
@@ -205,10 +229,7 @@ impl Orchestrator {
 
     /// 在后台把配置里的 MCP 服务都连上。马上返回；哪个没连上只记下原因，不耽误别的。
     pub fn start_mcp(self: &Arc<Self>, specs: Vec<McpSpec>) {
-        let gen = self
-            .shared
-            .mcp_generation
-            .load(std::sync::atomic::Ordering::SeqCst);
+        let gen = self.shared.mcp.lock().unwrap().generation;
         self.set_mcp_specs(specs.clone());
         for spec in specs {
             let this = self.clone();
@@ -220,24 +241,20 @@ impl Orchestrator {
         }
     }
 
-    /// 热重载外部 MCP 服务：优雅断开旧连接、清理旧 `mcp__*` 工具并并行重连新配置，返回最新扩展状态。
+    /// 热重载外部 MCP 服务：递增代际并原子清理旧工具表、永久退役旧连接再并行重连新配置，返回最新扩展状态。
     pub async fn reload_mcp(self: &Arc<Self>, specs: Vec<McpSpec>) -> Extensions {
         let _guard = self.shared.mcp_reload_lock.lock().await;
-        let gen = self
-            .shared
-            .mcp_generation
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-            + 1;
-        let previous: Vec<Arc<McpServer>> = {
-            let mut all = self.shared.mcp.lock().unwrap();
-            all.drain(..).map(|mcp| mcp.server).collect()
-        };
-        {
+        let (gen, previous): (u64, Vec<Arc<McpServer>>) = {
+            let mut reg = self.shared.mcp.lock().unwrap();
+            reg.generation += 1;
+            let gen = reg.generation;
+            let prev = reg.servers.drain(..).map(|mcp| mcp.server).collect();
             let mut tools = self.shared.tools.write().unwrap();
             tools.remove_by_prefix("mcp__");
-        }
+            (gen, prev)
+        };
         for server in previous {
-            server.close().await;
+            server.retire().await;
         }
         // MCP 变更后驱逐常驻 ACP 进程，让下轮 ACP 重新带上最新 mcpServers。
         self.shared.acp_pool.evict_all();
@@ -264,22 +281,22 @@ impl Orchestrator {
             description: skill.description,
             bots: skill.bots,
         });
-        let mcp = self.shared.mcp.lock().unwrap();
+        let reg = self.shared.mcp.lock().unwrap();
         Extensions {
             skills: skills.collect(),
             skill_problems: set.problems,
-            mcp: mcp.iter().map(Mcp::now).collect(),
+            mcp: reg.servers.iter().map(Mcp::now).collect(),
         }
     }
 }
 
-/// 服务要关了：断开所有 MCP 服务，它们的进程一起结束。
+/// 服务要关了：退役并断开所有 MCP 服务，它们的进程一起结束。
 pub(crate) async fn shutdown(shared: &Shared) {
     let servers: Vec<Arc<McpServer>> = {
-        let all = shared.mcp.lock().unwrap();
-        all.iter().map(|mcp| mcp.server.clone()).collect()
+        let reg = shared.mcp.lock().unwrap();
+        reg.servers.iter().map(|mcp| mcp.server.clone()).collect()
     };
     for server in servers {
-        server.close().await;
+        server.retire().await;
     }
 }

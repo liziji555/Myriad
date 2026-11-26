@@ -97,6 +97,8 @@ api_base = "https://api.telegram.org"
 # env_from = ["FILES_TOKEN"]
 # # 它的工具每次调用都要你批准；这里列出的不用问：
 # auto_approve = ["read_file", "list_directory"]
+# # 如果信任该服务，设为 true 后凡服务端标注 readOnlyHint=true（非破坏性）的工具将自动放行并在规划模式可用：
+# trust_annotations = false
 # # enabled = false   # 先停用
 #
 # 通过网址连的远程服务写 url，不写 command：

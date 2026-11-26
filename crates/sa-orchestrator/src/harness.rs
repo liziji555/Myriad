@@ -90,7 +90,7 @@ impl AcpPool {
         let mut conn = taken?;
         let valid = !conn.child.has_exited()
             && conn.mcp_fingerprint == mcp_fingerprint
-            && expected_session.is_none_or(|sid| sid == conn.session_id);
+            && expected_session == Some(conn.session_id.as_str());
         if valid {
             Some(conn)
         } else {
@@ -158,7 +158,7 @@ impl AcpPool {
         drop(evicted);
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn len(&self) -> usize {
         self.entries.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
@@ -1457,6 +1457,19 @@ async fn run_acp_turn_on(
                 let Ok(msg) = serde_json::from_str::<Value>(line.trim()) else {
                     continue;
                 };
+                if str_of(&msg, "method") == "session/update" {
+                    let update = &msg["params"]["update"];
+                    if str_of(update, "sessionUpdate") == "current_mode_update" {
+                        let mode = match str_of(update, "currentModeId") {
+                            "" => str_of(update, "modeId"),
+                            m => m,
+                        };
+                        if !mode.is_empty() {
+                            conn.current_mode = Some(mode.to_string());
+                        }
+                    }
+                    continue;
+                }
                 if msg.get("method").is_none() && msg["id"].as_u64() == Some(mode_id) {
                     if msg.get("error").is_none_or(Value::is_null) {
                         conn.current_mode = Some(target_mode);
@@ -1465,6 +1478,11 @@ async fn run_acp_turn_on(
                 }
             }
         }
+    }
+
+    // 发 prompt 之前最后检查一次复用进程是否仍存活；一旦发出 prompt 就不再自动重放，避免重复改动工作目录。
+    if reused && conn.child.has_exited() {
+        return AcpTurnOutcome::ReusedDeadBeforeOutput;
     }
 
     let prompt_id = conn.next_id;
@@ -1498,7 +1516,6 @@ async fn run_acp_turn_on(
     let mut open: HashMap<String, (String, String)> = HashMap::new();
     let mut perm_seq = 0u64;
     let mut plan_seq = 0u64;
-    let mut saw_any_frame = false;
     let mut got_prompt_response = false;
     let mut failure: Option<String> = None;
 
@@ -1521,7 +1538,6 @@ async fn run_acp_turn_on(
         let Ok(msg) = serde_json::from_str::<Value>(trimmed) else {
             continue;
         };
-        saw_any_frame = true;
 
         if msg.get("method").is_none() {
             let id = msg["id"].as_u64();
@@ -1619,6 +1635,15 @@ async fn run_acp_turn_on(
                                 StepEnd::Failed
                             };
                             observer.tool_finished(&key, end, &out).await;
+                        }
+                    }
+                    "current_mode_update" => {
+                        let mode = match str_of(update, "currentModeId") {
+                            "" => str_of(update, "modeId"),
+                            m => m,
+                        };
+                        if !mode.is_empty() {
+                            conn.current_mode = Some(mode.to_string());
                         }
                     }
                     "usage_update" => {
@@ -1741,11 +1766,6 @@ async fn run_acp_turn_on(
             _ => {}
         }
     };
-
-    // 如果复用的常驻进程在吐出任何消息前就 EOF 退出了，无感退回冷启动。
-    if reused && !stopped && !saw_any_frame && !got_prompt_response && failure.is_none() {
-        return AcpTurnOutcome::ReusedDeadBeforeOutput;
-    }
 
     if !reasoning.trim().is_empty() {
         observer
@@ -2659,6 +2679,7 @@ mod tests {
 import json, os, sys
 pid = os.getpid()
 turn = 0
+current_mode = "code"
 for raw in sys.stdin:
     raw = raw.strip()
     if not raw:
@@ -2678,11 +2699,20 @@ for raw in sys.stdin:
             }
         }), flush=True)
     elif method == "session/set_mode":
+        current_mode = msg["params"]["modeId"]
         print(json.dumps({"jsonrpc": "2.0", "id": mid, "result": {}}), flush=True)
     elif method == "session/prompt":
         turn += 1
         text = msg["params"]["prompt"][0]["text"]
-        if "try-write" in text:
+        if "self-plan" in text:
+            current_mode = "plan"
+            print(json.dumps({
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {"update": {"sessionUpdate": "current_mode_update", "currentModeId": "plan"}}
+            }), flush=True)
+            out = f"pid={pid},turn={turn},mode={current_mode}"
+        elif "try-write" in text:
             print(json.dumps({
                 "jsonrpc": "2.0",
                 "id": 999,
@@ -2697,9 +2727,9 @@ for raw in sys.stdin:
             }), flush=True)
             resp = json.loads(sys.stdin.readline())
             chosen = resp["result"]["outcome"].get("optionId", "none")
-            out = f"pid={pid},turn={turn},perm={chosen}"
+            out = f"pid={pid},turn={turn},perm={chosen},mode={current_mode}"
         else:
-            out = f"pid={pid},turn={turn}"
+            out = f"pid={pid},turn={turn},mode={current_mode}"
         print(json.dumps({
             "jsonrpc": "2.0",
             "method": "session/update",
@@ -2754,6 +2784,69 @@ for raw in sys.stdin:
         assert_eq!(second.session, first.session);
         assert!(second.text.contains("turn=2"), "{}", second.text);
         assert!(second.text.contains("perm=deny"), "{}", second.text);
+        assert!(second.text.contains("mode=plan"), "{}", second.text);
+
+        // 第三轮回到 Ask 模式且 Agent 在本轮主动切回 plan（通过 current_mode_update 通知），
+        // 第四轮 Ask 必须感知到该通知并重新发送 session/set_mode 切回 code。
+        let third = run(
+            &Launch {
+                harness: Harness::Acp,
+                command: &cmd,
+                dir: dir.path(),
+                prompt: "self-plan",
+                session: second.session.as_deref(),
+                permission: PermissionMode::Ask,
+                mcp_servers: &[],
+                acp_pool: Some(&pool),
+                acp_scope: Some("room:r1:bot:b1"),
+            },
+            &Null,
+            &CancellationToken::new(),
+        )
+        .await;
+        assert_eq!(third.end, TurnEnd::Completed);
+        assert!(third.text.contains("turn=3,mode=plan"), "{}", third.text);
+
+        let fourth = run(
+            &Launch {
+                harness: Harness::Acp,
+                command: &cmd,
+                dir: dir.path(),
+                prompt: "back-to-ask",
+                session: third.session.as_deref(),
+                permission: PermissionMode::Ask,
+                mcp_servers: &[],
+                acp_pool: Some(&pool),
+                acp_scope: Some("room:r1:bot:b1"),
+            },
+            &Null,
+            &CancellationToken::new(),
+        )
+        .await;
+        assert_eq!(fourth.end, TurnEnd::Completed);
+        assert!(fourth.text.contains("turn=4,mode=code"), "{}", fourth.text);
+
+        // session: None 时不得复用旧会话（防止命令切换后复活旧上下文）。
+        let fresh = run(
+            &Launch {
+                harness: Harness::Acp,
+                command: &cmd,
+                dir: dir.path(),
+                prompt: "brand-new",
+                session: None,
+                permission: PermissionMode::Ask,
+                mcp_servers: &[],
+                acp_pool: Some(&pool),
+                acp_scope: Some("room:r1:bot:b1"),
+            },
+            &Null,
+            &CancellationToken::new(),
+        )
+        .await;
+        assert_eq!(fresh.end, TurnEnd::Completed);
+        assert_ne!(fresh.session, first.session);
+        assert!(fresh.text.contains("turn=1"), "{}", fresh.text);
+
         pool.evict_all();
         assert_eq!(pool.len(), 0);
     }

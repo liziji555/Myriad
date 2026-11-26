@@ -61,6 +61,9 @@ pub struct McpSpec {
     pub cwd: Option<PathBuf>,
     /// 这些工具不用问人，直接执行。写服务自己的工具名。
     pub auto_approve: Vec<String>,
+    /// 是否信任该服务自报的工具注解（如 `readOnlyHint=true` 自动免审批并在规划模式可用）。
+    /// 默认 `false`：遵循 MCP 规范，除非运维显式信任该服务，否则不因远端声明跳过审批。
+    pub trust_annotations: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -474,9 +477,12 @@ fn render(result: &Value) -> Result<String, McpError> {
 pub struct McpServer {
     name: String,
     auto_approve: Vec<String>,
+    trust_annotations: bool,
     dialer: Dialer,
     timeouts: McpTimeouts,
     conn: tokio::sync::Mutex<Option<Arc<Connection>>>,
+    /// 热重载或停用后置为 `true`：禁止旧实例在已运行轮次中偷偷重连。
+    retired: AtomicBool,
     /// 上一次重新连接为什么没成。连上了就清掉。
     trouble: Mutex<Option<String>>,
 }
@@ -484,7 +490,11 @@ pub struct McpServer {
 impl McpServer {
     /// 配置里写的一个服务。这里还不启动、不连，[`McpServer::connect`] 时才动。
     pub fn new(spec: McpSpec) -> Self {
-        let (name, auto_approve) = (spec.name.clone(), spec.auto_approve.clone());
+        let (name, auto_approve, trust_annotations) = (
+            spec.name.clone(),
+            spec.auto_approve.clone(),
+            spec.trust_annotations,
+        );
         let dialer: Dialer = Box::new(move || {
             let spec = spec.clone();
             Box::pin(async move {
@@ -494,7 +504,7 @@ impl McpServer {
                 }
             })
         });
-        Self::with_dialer(&name, auto_approve, dialer)
+        Self::with_dialer(&name, auto_approve, dialer).with_trusted_annotations(trust_annotations)
     }
 
     /// 用给定的办法接线的服务。测试用它接一个进程内的假服务。
@@ -502,11 +512,19 @@ impl McpServer {
         Self {
             name: name.to_string(),
             auto_approve,
+            trust_annotations: false,
             dialer,
             timeouts: McpTimeouts::default(),
             conn: tokio::sync::Mutex::new(None),
+            retired: AtomicBool::new(false),
             trouble: Mutex::new(None),
         }
+    }
+
+    /// 显式信任该服务自报的 `annotations.readOnlyHint`（仅应对受控/可信服务开启）。
+    pub fn with_trusted_annotations(mut self, trust: bool) -> Self {
+        self.trust_annotations = trust;
+        self
     }
 
     pub fn timeouts(mut self, timeouts: McpTimeouts) -> Self {
@@ -527,8 +545,15 @@ impl McpServer {
     /// 连上（已经连着的先断开），返回它提供的工具。
     pub async fn connect(&self) -> Result<Vec<McpToolInfo>, McpError> {
         let mut slot = self.conn.lock().await;
+        if self.retired.load(Ordering::SeqCst) {
+            return Err(McpError("这个 MCP 服务已热重载或停用。".into()));
+        }
         *slot = None;
         let (conn, tools) = self.dial().await?;
+        if self.retired.load(Ordering::SeqCst) {
+            drop(conn);
+            return Err(McpError("这个 MCP 服务已热重载或停用。".into()));
+        }
         *slot = Some(conn);
         *self.trouble.lock().unwrap() = None;
         Ok(tools)
@@ -549,14 +574,32 @@ impl McpServer {
         *self.conn.lock().await = None;
     }
 
-    /// 一条能用的连接。断了的重连一次。
+    /// 永久退役该实例并断开连接：此后任何旧工具引用调用都会直接报错，绝不偷偷重连旧配置。
+    pub async fn retire(&self) {
+        self.retired.store(true, Ordering::SeqCst);
+        *self.conn.lock().await = None;
+    }
+
+    /// 一条能用的连接。断了的重连一次；已退役的服务绝不重连。
     async fn live(&self) -> Result<Arc<Connection>, McpError> {
         let mut slot = self.conn.lock().await;
+        if self.retired.load(Ordering::SeqCst) {
+            return Err(McpError(format!(
+                "MCP 服务「{}」已热重载或停用，请在新一轮中使用最新工具。",
+                self.name
+            )));
+        }
         if let Some(conn) = slot.as_ref().filter(|conn| !conn.is_closed()) {
             return Ok(conn.clone());
         }
         *slot = None;
         let dialed = self.dial().await;
+        if self.retired.load(Ordering::SeqCst) {
+            return Err(McpError(format!(
+                "MCP 服务「{}」已热重载或停用，请在新一轮中使用最新工具。",
+                self.name
+            )));
+        }
         *self.trouble.lock().unwrap() = dialed.as_ref().err().map(|error| error.0.clone());
         let (conn, _) = dialed?;
         *slot = Some(conn.clone());
@@ -596,8 +639,9 @@ impl McpServer {
                 schema if schema["type"] == "object" => schema.clone(),
                 _ => json!({ "type": "object" }),
             };
-            let read_only = info.annotations.read_only_hint == Some(true)
+            let hint_read_only = info.annotations.read_only_hint == Some(true)
                 && info.annotations.destructive_hint != Some(true);
+            let read_only = self.trust_annotations && hint_read_only;
             let destructive = info.annotations.destructive_hint == Some(true);
             tools.push(McpTool {
                 name,
@@ -607,6 +651,7 @@ impl McpServer {
                 schema,
                 auto: self.auto_approve.iter().any(|auto| auto == &info.name),
                 read_only,
+                hint_read_only,
                 destructive,
                 server: self.clone(),
             });
@@ -751,8 +796,10 @@ pub struct McpTool {
     schema: Value,
     /// 在配置 `auto_approve` 中显式放行。
     auto: bool,
-    /// 服务通过 `annotations.readOnlyHint == true`（且非破坏性）声明只读。
+    /// 运维显式信任该服务注解且服务声明 `readOnlyHint == true`（非破坏性）。
     read_only: bool,
+    /// 服务自报只读（未显式信任时仅作审批提示，不跳过审批）。
+    hint_read_only: bool,
     /// 服务通过 `annotations.destructiveHint == true` 声明破坏性操作。
     destructive: bool,
     server: Arc<McpServer>,
@@ -809,6 +856,8 @@ impl Tool for McpTool {
         }
         let warn = if self.destructive {
             "⚠️ 该工具声明为破坏性操作（destructiveHint=true），请仔细核对参数后再批准。\n"
+        } else if self.hint_read_only {
+            "（该工具声明为只读；如信任此服务，可在 config.toml 设置 trust_annotations = true 自动放行）\n"
         } else {
             ""
         };
@@ -1257,59 +1306,77 @@ mod tests {
 
     #[tokio::test]
     async fn mcp_tool_annotations_auto_allow_readonly_and_warn_destructive() {
-        let dialer: Dialer = Box::new(|| {
-            Box::pin(async {
-                let (ours, theirs) = tokio::io::duplex(64 * 1024);
-                tokio::spawn(async move {
-                    let (reader, mut writer) = tokio::io::split(theirs);
-                    let mut reader = BufReader::new(reader);
-                    let mut line = vec![];
-                    while let Ok(true) = read_line(&mut reader, &mut line).await {
-                        let msg: Value = serde_json::from_slice(&line).unwrap();
-                        let (Some(method), Some(id)) = (msg["method"].as_str(), msg.get("id"))
-                        else {
-                            continue;
-                        };
-                        let result = match method {
-                            "initialize" => json!({
-                                "protocolVersion": PROTOCOL_VERSION,
-                                "capabilities": { "tools": {} }
-                            }),
-                            "tools/list" => json!({
-                                "tools": [
-                                    {
-                                        "name": "read_docs",
-                                        "description": "读取文档",
-                                        "inputSchema": { "type": "object" },
-                                        "annotations": { "title": "查文档", "readOnlyHint": true }
-                                    },
-                                    {
-                                        "name": "drop_table",
-                                        "description": "删表",
-                                        "inputSchema": { "type": "object" },
-                                        "annotations": { "readOnlyHint": true, "destructiveHint": true }
-                                    }
-                                ]
-                            }),
-                            _ => json!({}),
-                        };
-                        let reply = json!({ "jsonrpc": "2.0", "id": id, "result": result });
-                        writer
-                            .write_all(format!("{reply}\n").as_bytes())
-                            .await
-                            .unwrap();
-                    }
-                });
-                let (reader, writer) = tokio::io::split(ours);
-                Ok(Pipe::new(reader, writer))
+        let make_dialer = || -> Dialer {
+            Box::new(|| {
+                Box::pin(async {
+                    let (ours, theirs) = tokio::io::duplex(64 * 1024);
+                    tokio::spawn(async move {
+                        let (reader, mut writer) = tokio::io::split(theirs);
+                        let mut reader = BufReader::new(reader);
+                        let mut line = vec![];
+                        while let Ok(true) = read_line(&mut reader, &mut line).await {
+                            let msg: Value = serde_json::from_slice(&line).unwrap();
+                            let (Some(method), Some(id)) = (msg["method"].as_str(), msg.get("id"))
+                            else {
+                                continue;
+                            };
+                            let result = match method {
+                                "initialize" => json!({
+                                    "protocolVersion": PROTOCOL_VERSION,
+                                    "capabilities": { "tools": {} }
+                                }),
+                                "tools/list" => json!({
+                                    "tools": [
+                                        {
+                                            "name": "read_docs",
+                                            "description": "读取文档",
+                                            "inputSchema": { "type": "object" },
+                                            "annotations": { "title": "查文档", "readOnlyHint": true }
+                                        },
+                                        {
+                                            "name": "drop_table",
+                                            "description": "删表",
+                                            "inputSchema": { "type": "object" },
+                                            "annotations": { "readOnlyHint": true, "destructiveHint": true }
+                                        }
+                                    ]
+                                }),
+                                "tools/call" => {
+                                    json!({ "content": [{ "type": "text", "text": "ok" }] })
+                                }
+                                _ => json!({}),
+                            };
+                            let reply = json!({ "jsonrpc": "2.0", "id": id, "result": result });
+                            writer
+                                .write_all(format!("{reply}\n").as_bytes())
+                                .await
+                                .unwrap();
+                        }
+                    });
+                    let (reader, writer) = tokio::io::split(ours);
+                    Ok(Pipe::new(reader, writer))
+                })
             })
-        });
-        let server = Arc::new(McpServer::with_dialer("wiki", vec![], dialer));
-        let infos = server.connect().await.unwrap();
-        let tools = server.tools(&infos);
+        };
         let ctx = ctx();
 
-        // readOnlyHint=true 且非破坏性 -> 自动免审批且标记只读/可并发。
+        // 默认不信任远端服务自报的 readOnlyHint：必须走审批，不能绕过授权。
+        let untrusted = Arc::new(McpServer::with_dialer("wiki", vec![], make_dialer()));
+        let infos = untrusted.connect().await.unwrap();
+        let tools = untrusted.tools(&infos);
+        assert!(!tools[0].is_read_only(&json!({})));
+        let Permission::Ask(hint) = tools[0].check_permission(&json!({}), &ctx).await else {
+            panic!("未显式信任注解时必须走审批");
+        };
+        assert!(hint.contains("trust_annotations"), "{hint}");
+
+        // 显式开启 trust_annotations 后：readOnlyHint=true 且非破坏性自动免审批并标记只读；
+        // 同时标 destructiveHint=true 依然强制走审批并警示破坏性操作。
+        let trusted = Arc::new(
+            McpServer::with_dialer("wiki", vec![], make_dialer()).with_trusted_annotations(true),
+        );
+        let infos = trusted.connect().await.unwrap();
+        let tools = trusted.tools(&infos);
         assert!(tools[0].is_read_only(&json!({})));
         assert!(tools[0].is_concurrency_safe(&json!({})));
         assert_eq!(tools[0].title(&json!({})), "调用 wiki：查文档");
@@ -1318,11 +1385,15 @@ mod tests {
             Permission::Allow
         );
 
-        // 同时标 destructiveHint=true 时绝不按只读放行，审批提示明确警示破坏性操作。
         assert!(!tools[1].is_read_only(&json!({})));
         let Permission::Ask(reason) = tools[1].check_permission(&json!({}), &ctx).await else {
             panic!("破坏性工具必须走审批");
         };
         assert!(reason.contains("破坏性操作"), "{reason}");
+
+        // 退役后旧工具引用不得偷偷重连。
+        trusted.retire().await;
+        let retired_err = tools[0].call(json!({}), &ctx).await.unwrap_err();
+        assert!(retired_err.0.contains("已热重载或停用"), "{retired_err}");
     }
 }

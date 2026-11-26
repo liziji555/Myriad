@@ -89,7 +89,7 @@ export function ExtensionsPanel() {
         </h3>
         {found.mcp.length === 0 ? (
           <p className="sa-panel-empty">
-            还没有接外部 MCP 服务。在 config.toml 里加一节 [mcp.名字] 后点下方「热重载」即可生效（只读工具将自动放行，写操作仍需批准）。
+            还没有接外部 MCP 服务。在 config.toml 里加一节 [mcp.名字] 后点下方「刷新 / 热重载」即可生效（受信任服务可配 trust_annotations = true 自动放行只读工具）。
           </p>
         ) : (
           <ul className="sa-list" aria-label="MCP 服务">
