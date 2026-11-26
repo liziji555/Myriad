@@ -29,6 +29,12 @@ describe("stepIcon", () => {
     expect(stepIcon("bash")).toBe("command");
     expect(stepIcon("shell")).toBe("command");
     expect(stepIcon("web_fetch")).toBe("web");
+    expect(stepIcon("web_search")).toBe("web");
+    expect(stepIcon("multi_edit")).toBe("edit");
+    expect(stepIcon("shell_bg")).toBe("command");
+    expect(stepIcon("memory_read")).toBe("read");
+    expect(stepIcon("submit_plan")).toBe("tasks");
+    expect(stepIcon("create_bot")).toBe("users");
     expect(stepIcon("git_push")).toBe("git");
     expect(stepIcon("open_pr")).toBe("git");
   });

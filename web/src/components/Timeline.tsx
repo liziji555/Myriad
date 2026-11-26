@@ -1,5 +1,6 @@
 import { approvalChoices, type ApprovalChoice } from "../api/approvals";
 import { chainParts, type ChainPart } from "../api/chain";
+import { formatRewindSummary, isRewindConflict } from "../api/checkpoints";
 import { taskDecision } from "../api/taskNotes";
 import { outputPreview, STEP_LABEL, stepIcon, stepKinds } from "../api/steps";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
@@ -15,7 +16,9 @@ import type {
   ApprovalDecision,
   ApprovalId,
   Bot,
+  CheckpointInfo,
   Message,
+  RewindReport,
   Task,
   TaskId,
   ToolStep,
@@ -49,6 +52,10 @@ interface Props {
   onLoadOlder(): Promise<void>;
   /** 答复一张审批卡。 */
   onDecide: Decide;
+  /** 按消息 ID 索引的轮次级文件检查点（用于消息下方挂载回滚按钮）。 */
+  checkpoints?: ReadonlyMap<string, CheckpointInfo>;
+  /** 回滚指定轮次检查点改动。 */
+  onRewindCheckpoint?(checkpointId: string, force: boolean): Promise<RewindReport>;
   /** 空房间里点了一句示例：把它填进输入框，由人自己决定发不发。 */
   onExample(text: string): void;
   /** 切到协作视图时主线藏起来；藏着的时候滚不动，回来时补滚一次。 */
@@ -77,6 +84,8 @@ export function Timeline({
   onRetry,
   onLoadOlder,
   onDecide,
+  checkpoints,
+  onRewindCheckpoint,
   onExample,
   hidden = false,
 }: Props) {
@@ -257,6 +266,8 @@ export function Timeline({
               message={message}
               bots={bots}
               onDecide={onDecide}
+              checkpoint={checkpoints?.get(message.id)}
+              onRewindCheckpoint={onRewindCheckpoint}
               chain={chain.get(message.id)}
               steer={steers.get(message.id)}
               reply={replies.get(message.id)}
@@ -506,6 +517,8 @@ function MessageItem({
   message,
   bots,
   onDecide,
+  checkpoint,
+  onRewindCheckpoint,
   work,
   chain,
   steer,
@@ -514,6 +527,8 @@ function MessageItem({
   message: Message;
   bots: readonly Bot[];
   onDecide: Decide;
+  checkpoint?: CheckpointInfo;
+  onRewindCheckpoint?(checkpointId: string, force: boolean): Promise<RewindReport>;
   work?: Work;
   chain?: ChainPart;
   /** 这句话是在 Bot 回复的中途插进去的。 */
@@ -663,7 +678,133 @@ function MessageItem({
           出错了：{message.error ?? "原因不明"}
         </p>
       )}
+      {checkpoint && state !== "streaming" && onRewindCheckpoint && (
+        <CheckpointBar checkpoint={checkpoint} onRewind={onRewindCheckpoint} />
+      )}
     </li>
+  );
+}
+
+/** 挂载在单轮 Bot 回复下方的文件检查点与安全回滚条。 */
+function CheckpointBar({
+  checkpoint,
+  onRewind,
+}: {
+  checkpoint: CheckpointInfo;
+  onRewind(checkpointId: string, force: boolean): Promise<RewindReport>;
+}) {
+  const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [conflict, setConflict] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [summary, setSummary] = useState<string | null>(null);
+
+  const runRewind = async (force: boolean) => {
+    setBusy(true);
+    setError(null);
+    setConflict(null);
+    try {
+      const report = await onRewind(checkpoint.id, force);
+      setSummary(formatRewindSummary(report));
+      setConfirming(false);
+    } catch (cause) {
+      const msg = cause instanceof Error ? cause.message : String(cause);
+      if (!force && isRewindConflict(cause)) {
+        setConflict(msg);
+      } else {
+        setError(msg);
+      }
+    }
+    setBusy(false);
+  };
+
+  const fileListTitle = checkpoint.files.join("\n");
+
+  return (
+    <div className="sa-checkpoint-bar" data-open={confirming || Boolean(conflict)}>
+      <div className="sa-checkpoint-row">
+        <span className="sa-checkpoint-meta" title={fileListTitle}>
+          <Icon name="undo" size={13} />
+          已快照 {checkpoint.files.length} 个文件
+        </span>
+        {summary ? (
+          <span className="sa-checkpoint-ok" role="status">
+            {summary}
+          </span>
+        ) : (
+          <button
+            type="button"
+            className="sa-link"
+            disabled={busy}
+            onClick={() => {
+              setConfirming((open) => !open);
+              setConflict(null);
+              setError(null);
+            }}
+          >
+            {confirming ? "取消" : "回滚本轮改动"}
+          </button>
+        )}
+      </div>
+
+      {confirming && !summary && (
+        <div className="sa-checkpoint-confirm">
+          <p className="sa-checkpoint-desc">
+            将以下 {checkpoint.files.length} 个文件恢复到本轮对话修改之前的状态（本轮新建的文件会被删除）：
+          </p>
+          <ul className="sa-checkpoint-files">
+            {checkpoint.files.map((file) => (
+              <li key={file}>
+                <code>{file}</code>
+              </li>
+            ))}
+          </ul>
+          {conflict && (
+            <p className="sa-msg-error" role="alert">
+              {conflict}
+            </p>
+          )}
+          {error && (
+            <p className="sa-msg-error" role="alert">
+              {error}
+            </p>
+          )}
+          <div className="sa-checkpoint-actions">
+            {conflict ? (
+              <button
+                type="button"
+                className="sa-button sa-button-danger"
+                disabled={busy}
+                onClick={() => void runRewind(true)}
+              >
+                {busy ? "正在强制回滚…" : "确认强制覆盖回滚"}
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="sa-button"
+                disabled={busy}
+                onClick={() => void runRewind(false)}
+              >
+                {busy ? "正在回滚…" : "确认回滚"}
+              </button>
+            )}
+            <button
+              type="button"
+              className="sa-button sa-button-quiet"
+              disabled={busy}
+              onClick={() => {
+                setConfirming(false);
+                setConflict(null);
+                setError(null);
+              }}
+            >
+              取消
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -769,9 +910,10 @@ function StepItem({ step, onDecide }: { step: ToolStep; onDecide: Decide }) {
       {step.state === "waiting" && step.approval && (
         <ApprovalCard
           id={step.approval.id}
+          tool={step.tool}
           reason={step.approval.reason}
           expiresAt={step.approval.expires_at}
-          choices={approvalChoices(step.approval)}
+          choices={approvalChoices(step.approval, step.tool)}
           onDecide={onDecide}
         />
       )}
@@ -781,12 +923,14 @@ function StepItem({ step, onDecide }: { step: ToolStep; onDecide: Decide }) {
 
 function ApprovalCard({
   id,
+  tool,
   reason,
   expiresAt,
   choices,
   onDecide,
 }: {
   id: ApprovalId;
+  tool: string;
   reason: string;
   expiresAt: number;
   choices: ApprovalChoice[];
@@ -794,6 +938,7 @@ function ApprovalCard({
 }) {
   const [sending, setSending] = useState<ApprovalDecision | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const isPlan = tool === "submit_plan";
 
   const decide = async (decision: ApprovalDecision) => {
     setSending(decision);
@@ -808,15 +953,24 @@ function ApprovalCard({
   };
 
   return (
-    <div className="sa-approval" role="group" aria-label="需要你批准">
+    <div
+      className="sa-approval"
+      data-plan={isPlan || undefined}
+      role="group"
+      aria-label={isPlan ? "实施方案待批准" : "需要你批准"}
+    >
       <div className="sa-approval-head">
-        <Icon name="alert" />
-        <span className="sa-approval-title">需要你批准</span>
+        <Icon name={isPlan ? "tasks" : "alert"} />
+        <span className="sa-approval-title">
+          {isPlan ? "实施方案待批准（规划模式）" : "需要你批准"}
+        </span>
         <span className="sa-approval-expiry">
           {formatTime(expiresAt)} 前不处理按拒绝算
         </span>
       </div>
-      <p className="sa-approval-reason">{reason}</p>
+      <p className="sa-approval-reason" data-plan={isPlan || undefined}>
+        {reason}
+      </p>
       <div className="sa-approval-actions">
         {choices.map(({ decision, label, hint }) => (
           <button

@@ -1,11 +1,13 @@
-import { useEffect, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
 import { loadLayout, saveLayout, type Layout } from "./api/layout";
+import { CHECKPOINTS_CHANGED, checkpointsByMessage } from "./api/checkpoints";
+import { EXTENSIONS_CHANGED } from "./api/extensions";
 import { skillPrompt, type SlashCommand } from "./api/slash";
 import { presenceOf, speakersOf, type Presence } from "./api/presence";
 import { executionOf } from "./api/execution";
 import { STATE_LABEL } from "./api/tasks";
 import { api } from "./api/client";
-import type { RoomId, SkillInfo, TaskId, UpdateStatus } from "./api/types";
+import type { CheckpointInfo, RoomId, SkillInfo, TaskId, UpdateStatus } from "./api/types";
 import { useWorkspace } from "./api/useWorkspace";
 import {
   DESKTOP_CHANGED,
@@ -96,9 +98,11 @@ function Shell() {
     };
     load();
     window.addEventListener("focus", load);
+    window.addEventListener(EXTENSIONS_CHANGED, load);
     return () => {
       stale = true;
       window.removeEventListener("focus", load);
+      window.removeEventListener(EXTENSIONS_CHANGED, load);
     };
   }, [ready]);
   // 连上后静默查一次更新：有新版就在左栏版本号旁亮起「有更新」，失败不打扰人。
@@ -154,6 +158,10 @@ function Shell() {
   const [theme, setTheme] = useState(loadTheme);
   const [trajectoryOpen, setTrajectoryOpen] = useState(true);
   const [flowExpanded, setFlowExpanded] = useState(false);
+  const [checkpoints, setCheckpoints] = useState<CheckpointInfo[]>([]);
+  const [checkpointRefresh, setCheckpointRefresh] = useState(0);
+  const [extensionsReloadPending, setExtensionsReloadPending] = useState(false);
+  const consumeExtensionsReload = useCallback(() => setExtensionsReloadPending(false), []);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -194,6 +202,41 @@ function Shell() {
       stale = true;
     };
   }, [roomId, epoch, retry, openRoom]);
+
+  // 房间内已完成消息数变化、切换房间或回滚完成后，自动刷新轮次级文件检查点。
+  const settledBotTurns = useMemo(() => {
+    const msgs = roomId ? workspace.chat.rooms[roomId]?.messages ?? [] : [];
+    return msgs.filter((m) => m.sender.kind === "bot" && m.state !== "streaming").length;
+  }, [roomId, workspace.chat.rooms]);
+  useEffect(() => {
+    const bump = () => setCheckpointRefresh((n) => n + 1);
+    window.addEventListener(CHECKPOINTS_CHANGED, bump);
+    return () => window.removeEventListener(CHECKPOINTS_CHANGED, bump);
+  }, []);
+  useEffect(() => {
+    if (!ready || !roomId) {
+      setCheckpoints([]);
+      return;
+    }
+    let stale = false;
+    void api.listCheckpoints(roomId).then(
+      (list) => !stale && setCheckpoints(list),
+      () => !stale && setCheckpoints([]),
+    );
+    return () => {
+      stale = true;
+    };
+  }, [ready, roomId, epoch, settledBotTurns, checkpointRefresh]);
+  const checkpointMap = useMemo(() => checkpointsByMessage(checkpoints), [checkpoints]);
+  const handleRewindCheckpoint = useCallback(
+    async (checkpointId: string, force: boolean) => {
+      if (!roomId) throw new Error("当前没有选中的房间");
+      const report = await api.rewindCheckpoint(roomId, checkpointId, { force });
+      window.dispatchEvent(new Event(CHECKPOINTS_CHANGED));
+      return report;
+    },
+    [roomId],
+  );
 
   if (workspace.phase === "unauthorized") {
     return (
@@ -313,16 +356,21 @@ function Shell() {
         (edge) => edge.kind === "dispatch" || edge.kind === "peer",
       ).length
     : 0;
-  // 从协作视图或工作树轨迹点一个节点：确保对话可见，滚到那条消息闪一下。
-  const openMessage = (messageId: string) => {
+  // 从协作视图、工作树轨迹或检查点面板点一个节点：若在更早分页里先自动补拉，再滚过去闪一下。
+  const openMessage = async (messageId: string): Promise<boolean> => {
     if (flowExpanded) setFlowExpanded(false);
+    if (roomId) {
+      const found = await workspace.findMessage(roomId, messageId);
+      if (!found) return false;
+    }
     window.setTimeout(() => {
-      const target = document.querySelector(`[data-message-id="${messageId}"]`);
+      const target = document.querySelector(`[data-message-id="${CSS.escape(messageId)}"]`);
       if (!target) return;
       target.scrollIntoView({ block: "center", behavior: "smooth" });
       target.setAttribute("data-flash", "true");
       window.setTimeout(() => target.removeAttribute("data-flash"), 1600);
     }, 60);
+    return true;
   };
   const pendingTasks = roomTasks.filter((task) =>
     ["review", "waiting", "blocked"].includes(task.state),
@@ -505,6 +553,27 @@ function Shell() {
           tabAction("usage", "看用量和花费"),
           tabAction("audit", "看审计日志：谁批准了什么、做了什么"),
           tabAction("activity", "看任务图"),
+          {
+            id: "action:toggle-plan",
+            group: "action" as const,
+            title:
+              room.permission === "plan"
+                ? "退出规划模式（切回每次都问）"
+                : "进入规划模式（Plan Mode：先出方案再执行）",
+            run: () =>
+              void workspace.team.updateRoom(room.id, {
+                permission: room.permission === "plan" ? "ask" : "plan",
+              }),
+          },
+          {
+            id: "action:reload-extensions",
+            group: "action" as const,
+            title: "热重载 MCP 与钩子配置",
+            run: () => {
+              showPanel("extensions");
+              setExtensionsReloadPending(true);
+            },
+          },
           {
             id: "action:toggle-sidebar",
             group: "action" as const,
@@ -760,6 +829,8 @@ function Shell() {
                     onRetry={() => setRetry((n) => n + 1)}
                     onLoadOlder={() => workspace.loadOlder(room.id)}
                     onDecide={workspace.decideApproval}
+                    checkpoints={checkpointMap}
+                    onRewindCheckpoint={handleRewindCheckpoint}
                     onExample={setPrefill}
                     hidden={flowExpanded && !!flow}
                   />
@@ -856,6 +927,11 @@ function Shell() {
             execution={execution}
             onJump={jumpTo}
             onStopBot={(botId) => void workspace.stopBot(room.id, botId)}
+            checkpoints={checkpoints}
+            onRewindCheckpoint={handleRewindCheckpoint}
+            onJumpMessage={openMessage}
+            extensionsReloadPending={extensionsReloadPending}
+            onConsumeExtensionsReload={consumeExtensionsReload}
           />
         )}
       </div>

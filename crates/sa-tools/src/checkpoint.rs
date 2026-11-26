@@ -76,6 +76,8 @@ pub struct RewindOutcome {
 pub struct CheckpointStore {
     root: PathBuf,
     lock: Mutex<()>,
+    /// 正在流式执行中的对话轮次 ID（未落定前不对外暴露也不允许回滚，防止回滚半成品文件集合）。
+    active_turns: Mutex<HashSet<String>>,
 }
 
 impl CheckpointStore {
@@ -83,6 +85,7 @@ impl CheckpointStore {
         Self {
             root,
             lock: Mutex::new(()),
+            active_turns: Mutex::new(HashSet::new()),
         }
     }
 
@@ -103,6 +106,7 @@ impl CheckpointStore {
     }
 
     /// 为一轮对话创建一个检查点记录器；只有真的改动了文件时才会在写入时落盘。
+    /// 该记录器存活期间对应检查点处于「进行中」状态，不会出现在列表中也拒绝回滚，Drop 时自动定稿。
     pub fn begin_turn(
         self: &Arc<Self>,
         room_id: impl Into<String>,
@@ -110,30 +114,37 @@ impl CheckpointStore {
         bot_name: impl Into<String>,
         created_at: i64,
     ) -> Arc<TurnCheckpoint> {
+        let id = checkpoint_id.into();
+        self.active_turns
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(id.clone());
         Arc::new(TurnCheckpoint {
             store: self.clone(),
             room_id: room_id.into(),
-            id: checkpoint_id.into(),
+            id,
             bot_name: bot_name.into(),
             created_at,
             files: Mutex::new(BTreeMap::new()),
         })
     }
 
-    /// 列出某个房间在当前工作目录下产生的所有检查点（最新的在前）。
+    /// 列出某个房间在当前工作目录下产生的所有已定稿检查点（最新的在前）。
     pub fn list(&self, room_id: &str, fence: &Fence) -> Vec<CheckpointRecord> {
         let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        let active = self.active_turns.lock().unwrap_or_else(|e| e.into_inner());
         let active_ws = fence.root().to_string_lossy();
         let mut records: Vec<CheckpointRecord> = self
             .read_room_unlocked(room_id)
             .into_iter()
-            .filter(|r| r.workspace == active_ws.as_ref())
+            .filter(|r| r.workspace == active_ws.as_ref() && !active.contains(&r.id))
             .collect();
         records.reverse();
         records
     }
 
     /// 回滚指定检查点所做的全部文件改动。
+    /// - 仍在流式执行中的轮次严禁回滚（避免漏列后续新写文件）；
     /// - 切换工作区后即使 `force == true` 也严格拒绝；
     /// - 逐组件校验符号链接与目录替换，防符号链接劫持与部分回滚残留；
     /// - `force == false` 时若检测到轮次内或轮次后的外部修改，拒绝覆盖并列出冲突文件。
@@ -146,6 +157,14 @@ impl CheckpointStore {
     ) -> Result<RewindOutcome, String> {
         let _file_guard = file_lock();
         let _store_guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        if self
+            .active_turns
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(checkpoint_id)
+        {
+            return Err("这轮对话还在进行中，请等 Bot 回复结束后再回滚。".into());
+        }
 
         let records = self.read_room_unlocked(room_id);
         let record = records
@@ -513,6 +532,16 @@ pub struct TurnCheckpoint {
     files: Mutex<BTreeMap<String, FileSnapshot>>,
 }
 
+impl Drop for TurnCheckpoint {
+    fn drop(&mut self) {
+        self.store
+            .active_turns
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.id);
+    }
+}
+
 impl TurnCheckpoint {
     /// 在 `file_lock()` 下调用：先快照改动前的原始字节，写入完成后更新 `after_sha256` 并落盘索引。
     pub(crate) fn record_write(
@@ -712,6 +741,14 @@ mod tests {
             .await
             .unwrap();
 
+        // 轮次未结束时，检查点不暴露在列表里且拒绝回滚（避免漏列后续新写文件）。
+        assert!(store.list("room_1", &fence_a).is_empty());
+        let active_err = store
+            .rewind("room_1", "msg_1", &fence_a, false)
+            .unwrap_err();
+        assert!(active_err.contains("还在进行中"), "{active_err}");
+        drop(ctx);
+
         let list_a = store.list("room_1", &fence_a);
         assert_eq!(list_a.len(), 1);
         assert_eq!(list_a[0].files.len(), 2);
@@ -766,6 +803,7 @@ mod tests {
             )
             .await
             .unwrap();
+        drop(ctx);
 
         let err = store.rewind("room_1", "msg_2", &fence, false).unwrap_err();
         assert!(err.contains("doc.txt"), "{err}");
@@ -792,6 +830,7 @@ mod tests {
             )
             .await
             .unwrap();
+        drop(ctx_b);
         let b_hash = store.list("room_b", &fence)[0].files[0]
             .before_sha256
             .clone()
@@ -845,6 +884,7 @@ mod tests {
             .call(json!({"path": "fixture.bin", "content": "updated"}), &ctx)
             .await
             .unwrap();
+        drop(ctx);
 
         // 外部把文件写大，非 force 应直接通过 after_size 判定冲突；force=true 应顺利恢复且不留临时备份文件。
         fs::write(work.join("fixture.bin"), "x".repeat(128 * 1024)).unwrap();
@@ -901,6 +941,7 @@ mod tests {
             )
             .await
             .unwrap();
+        drop(ctx);
 
         let report = store.rewind("room_1", "msg_perm", &fence, false).unwrap();
         assert_eq!(report.restored.len(), 2);

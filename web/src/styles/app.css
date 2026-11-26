@@ -4867,3 +4867,128 @@ button.sa-row:hover {
     --sa-glass-blur: none;
   }
 }
+
+/* ── v0.6.1: 规划模式（Plan Mode）高亮、方案审批卡、检查点安全回滚条 ── */
+.sa-chip[data-plan="true"] {
+  border-color: color-mix(in srgb, var(--sa-accent) 45%, transparent);
+  background: color-mix(in srgb, var(--sa-accent) 12%, transparent);
+  color: var(--sa-accent);
+  font-weight: 500;
+}
+
+.sa-approval[data-plan="true"] {
+  border-color: color-mix(in srgb, var(--sa-accent) 52%, transparent);
+}
+.sa-approval[data-plan="true"] .sa-approval-head {
+  background: color-mix(in srgb, var(--sa-accent) 13%, transparent);
+  color: var(--sa-accent);
+}
+.sa-approval-reason[data-plan="true"] {
+  font-family: var(--sa-font);
+  font-size: var(--sa-text-sm);
+  line-height: 1.6;
+  max-height: 24em;
+}
+
+.sa-checkpoint-bar {
+  margin-top: var(--sa-space-2);
+  padding: 6px var(--sa-space-3);
+  border: 1px solid var(--sa-border);
+  border-radius: var(--sa-radius-md);
+  background: var(--sa-bg-subtle);
+  font-size: var(--sa-text-xs);
+}
+.sa-checkpoint-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sa-space-2);
+  flex-wrap: wrap;
+}
+.sa-checkpoint-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--sa-fg-muted);
+}
+.sa-checkpoint-ok {
+  color: var(--sa-ok);
+  font-size: var(--sa-text-xs);
+  margin: 0;
+}
+.sa-checkpoint-confirm {
+  display: grid;
+  gap: var(--sa-space-2);
+  margin-top: var(--sa-space-2);
+  padding-top: var(--sa-space-2);
+  border-top: 1px solid var(--sa-border);
+}
+.sa-checkpoint-desc {
+  margin: 0;
+  color: var(--sa-fg-muted);
+  font-size: var(--sa-text-xs);
+}
+.sa-checkpoint-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.sa-checkpoint-files code {
+  padding: 2px 6px;
+  border-radius: var(--sa-radius-sm);
+  background: var(--sa-hover);
+  font-family: var(--sa-font-mono);
+  font-size: 11px;
+  color: var(--sa-fg);
+}
+.sa-checkpoint-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sa-space-2);
+  flex-wrap: wrap;
+}
+.sa-button-danger {
+  border-color: color-mix(in srgb, var(--sa-danger) 55%, transparent);
+  background: var(--sa-danger);
+  color: #ffffff;
+}
+.sa-button-danger:hover:not(:disabled) {
+  filter: brightness(1.06);
+}
+
+.sa-checkpoint-list {
+  display: grid;
+  gap: var(--sa-space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.sa-checkpoint-card {
+  display: grid;
+  gap: var(--sa-space-2);
+  padding: var(--sa-space-3);
+  border: 1px solid var(--sa-border);
+  border-radius: var(--sa-radius-md);
+  background: var(--sa-bg-raised);
+}
+.sa-checkpoint-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sa-space-2);
+}
+.sa-checkpoint-card-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sa-space-2);
+}
+.sa-ext-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sa-space-2);
+  flex-wrap: wrap;
+}

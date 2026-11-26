@@ -17,8 +17,24 @@ const CHOICES: ApprovalChoice[] = [
   { decision: "deny", label: "拒绝", hint: "不执行，Bot 会被告知" },
 ];
 
+const PLAN_CHOICES: ApprovalChoice[] = [
+  {
+    decision: "once",
+    label: "批准并开始执行",
+    hint: "批准这份方案，自动切出规划模式并在本轮直接开始修改代码",
+  },
+  {
+    decision: "deny",
+    label: "退回修改方案",
+    hint: "不执行，继续停留在规划模式里调整方案",
+  },
+];
+
 /** 这张审批卡上有哪几个按钮。「总是允许」和「这个任务里的命令都允许」由服务端说了算。 */
-export function approvalChoices(approval: StepApproval): ApprovalChoice[] {
+export function approvalChoices(approval: StepApproval, tool?: string): ApprovalChoice[] {
+  if (tool === "submit_plan") {
+    return PLAN_CHOICES;
+  }
   return CHOICES.filter(({ decision }) => {
     if (decision === "always") return approval.can_allow_always;
     if (decision === "task") return approval.can_allow_task;
