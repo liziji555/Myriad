@@ -418,6 +418,13 @@ impl Engine {
             .write(|tx| sessions::ensure_front(tx, room_id, bot_id, now_ms()))?)
     }
 
+    /// 某个 Bot 在某个房间里的入口会话；还没有就是 `None`。只读：看一眼不会建出会话来。
+    pub fn front_session(&self, room_id: &RoomId, bot_id: &BotId) -> Result<Option<SessionId>> {
+        Ok(self
+            .store
+            .read(|c| sessions::find_front(c, room_id, bot_id))?)
+    }
+
     pub fn record_usage(&self, record: UsageRecord) -> Result<()> {
         let row = usage::UsageRow {
             room_id: Some(record.room_id),

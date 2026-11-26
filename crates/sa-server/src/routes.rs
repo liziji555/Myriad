@@ -271,6 +271,14 @@ pub async fn list_desks(
     Ok(Json(state.orchestrator.room_desks(&room_id).await?))
 }
 
+/// 入口 Bot 在这个房间里的对话占了上下文窗口多少。
+pub async fn room_context(
+    State(state): State<AppState>,
+    Path(room_id): Path<RoomId>,
+) -> Result<Json<Option<sa_protocol::ContextUsage>>, AppError> {
+    Ok(Json(state.orchestrator.room_context(&room_id).await?))
+}
+
 /// 把 harness 工位里的改动带回工作目录。带不回去时返回 409，工位留着。
 pub async fn accept_desk(
     State(state): State<AppState>,

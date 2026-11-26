@@ -110,6 +110,7 @@ pub fn router(state: AppState) -> Router {
             "/rooms/{room_id}/bots/{bot_id}/stop",
             post(routes::stop_bot),
         )
+        .route("/rooms/{room_id}/context", get(routes::room_context))
         .route("/rooms/{room_id}/desks", get(routes::list_desks))
         .route(
             "/rooms/{room_id}/desks/{bot_id}/accept",

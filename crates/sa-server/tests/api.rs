@@ -1353,3 +1353,52 @@ async fn extensions_list_skills_from_disk_each_time() {
     let response = app.oneshot(anonymous).await.unwrap();
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
+
+#[tokio::test]
+async fn context_usage_grows_with_the_conversation() {
+    let (app, engine) = app();
+    let room = engine.list_rooms().unwrap().pop().unwrap();
+    let path = format!("/api/rooms/{}/context", room.id);
+
+    let host = room.host_bot_id.as_ref().expect("默认房间有入口 Bot");
+    let before: Option<sa_protocol::ContextUsage> =
+        json(app.clone().oneshot(get(&path)).await.unwrap()).await;
+    let before = before.expect("默认房间有内置的入口 Bot");
+    assert_eq!(before.used, 0);
+    assert!(before.compact_at > 0 && before.compact_at < before.window);
+    assert!(
+        engine.front_session(&room.id, host).unwrap().is_none(),
+        "只读 GET 不应新建会话"
+    );
+
+    let said = post(
+        &format!("/api/rooms/{}/messages", room.id),
+        r#"{"content":"你好"}"#,
+    );
+    app.clone().oneshot(said).await.unwrap();
+    settled(&app, &room, 2).await;
+    let after: Option<sa_protocol::ContextUsage> =
+        json(app.clone().oneshot(get(&path)).await.unwrap()).await;
+    assert!(after.unwrap().used > 0);
+
+    // 停用入口 Bot 后不再显示上下文用量。
+    engine
+        .update_bot(
+            host,
+            sa_engine::BotPatch {
+                enabled: Some(false),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let disabled: Option<sa_protocol::ContextUsage> =
+        json(app.clone().oneshot(get(&path)).await.unwrap()).await;
+    assert!(disabled.is_none());
+
+    let missing = app
+        .clone()
+        .oneshot(get("/api/rooms/nope/context"))
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+}

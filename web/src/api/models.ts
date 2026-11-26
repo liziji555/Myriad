@@ -1,4 +1,7 @@
-import type { ModelSettings, ModelTier, ProviderKind, SaveModelsRequest, TierChoice } from "./types";
+import type { ContextUsage, ModelSettings, ModelTier, ProviderKind, SaveModelsRequest, TierChoice } from "./types";
+
+/** 模型页保存成功后在 `window` 上发的事件：输入框下面的模型名、上下文用量跟着重新读。 */
+export const MODELS_CHANGED = "sa:models-changed";
 
 export const KINDS: readonly { id: ProviderKind; label: string; hint: string }[] = [
   { id: "openai_compat", label: "OpenAI 兼容", hint: "https://api.deepseek.com" },
@@ -94,4 +97,14 @@ export function draftProblem(draft: ModelsDraft): string | null {
     }
   }
   return null;
+}
+
+/** 对话离自动压缩还有多远：占了百分之几，和一句给人看的说明。 */
+export function contextMeter(usage: ContextUsage): { percent: number; note: string } {
+  const percent = usage.compact_at > 0 ? Math.min(100, Math.round((usage.used / usage.compact_at) * 100)) : 0;
+  const k = (tokens: number) => (tokens < 1000 ? String(tokens) : `${Math.round(tokens / 1000)}k`);
+  return {
+    percent,
+    note: `约 ${k(usage.used)} token（含系统提示词和工具说明），到 ${k(usage.compact_at)} 会自动压缩前面的内容（模型窗口 ${k(usage.window)}）。数字是估算的`,
+  };
 }

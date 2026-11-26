@@ -9,8 +9,9 @@ mod compact;
 mod transcript;
 mod turn;
 
+pub use compact::compact_threshold;
 pub use transcript::{Entry, EntryBody, Transcript, TranscriptError};
 pub use turn::{
-    run_turn, ApprovalRequest, Inbox, Observer, StepEnd, TurnConfig, TurnEnd, TurnOutcome,
-    UserInput,
+    fixed_context, run_turn, ApprovalRequest, Inbox, Observer, StepEnd, TurnConfig, TurnEnd,
+    TurnOutcome, UserInput,
 };

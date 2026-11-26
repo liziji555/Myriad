@@ -1056,6 +1056,19 @@ pub struct DeskChange {
     pub label: String,
 }
 
+/// 入口 Bot 在这个房间里的对话占了模型上下文窗口的多少。单位是估算的 token。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ContextUsage {
+    /// 现在每次调用模型要带的有多大：对话，加上这个会话上一轮带的系统提示词和工具说明
+    /// （服务重启后、说第一句之前不知道这部分，只算对话）。和内核判断要不要压缩时算的是同一个数。
+    pub used: u32,
+    /// 到这么大就自动压缩前面的部分。
+    pub compact_at: u32,
+    /// 模型的上下文窗口。
+    pub window: u32,
+}
+
 /// 一个 harness Bot 在房间里的工位：它在自己的独立目录里干活，改动由人决定带不带回去。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]

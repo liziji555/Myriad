@@ -19,6 +19,7 @@ import type {
   TestModelRequest,
   TestModelResult,
   CreateTaskRequest,
+  ContextUsage,
   HarnessDesk,
   Health,
   ImportReport,
@@ -105,6 +106,8 @@ export const api = {
     request<Room>(memberPath(roomId, botId), { method: "PUT" }),
   removeMember: (roomId: RoomId, botId: BotId) =>
     request<Room>(memberPath(roomId, botId), { method: "DELETE" }),
+  roomContext: (roomId: RoomId) =>
+    request<ContextUsage | null>(`/api/rooms/${encodeURIComponent(roomId)}/context`),
   listDesks: (roomId: RoomId) =>
     request<HarnessDesk[]>(`/api/rooms/${encodeURIComponent(roomId)}/desks`),
   closeDesk: (roomId: RoomId, botId: BotId, how: "accept" | "discard") =>

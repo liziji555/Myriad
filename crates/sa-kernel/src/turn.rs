@@ -156,6 +156,28 @@ pub async fn run_turn(
     }
 }
 
+fn tool_specs(tools: &ToolRegistry) -> Vec<ToolSpec> {
+    tools
+        .iter()
+        .map(|tool| ToolSpec {
+            name: tool.name().to_string(),
+            description: tool.description(),
+            parameters: tool.input_schema(),
+        })
+        .collect()
+}
+
+/// 每次调用模型都要带、压缩不掉的那部分（系统提示词和工具说明）有多大，估算的 token。
+///
+/// 和 [`run_turn`] 判断要不要压缩时用的是同一个算法。
+pub fn fixed_context(system_prompt: &str, tools: &ToolRegistry) -> usize {
+    fixed_of(system_prompt, &tool_specs(tools))
+}
+
+fn fixed_of(system_prompt: &str, specs: &[ToolSpec]) -> usize {
+    compact::estimate(system_prompt) + compact::estimate_tools(specs)
+}
+
 struct Turn {
     steps: usize,
     usage: Usage,
@@ -181,14 +203,7 @@ impl Turn {
         observer: &dyn Observer,
         cancel: &CancellationToken,
     ) -> Result<TurnEnd, TranscriptError> {
-        let specs: Vec<ToolSpec> = tools
-            .iter()
-            .map(|tool| ToolSpec {
-                name: tool.name().to_string(),
-                description: tool.description(),
-                parameters: tool.input_schema(),
-            })
-            .collect();
+        let specs = tool_specs(tools);
 
         // 头一批是叫它起来的那几句，上层已经取走了，总要记下；之后停下了就先收手：
         // 停下之后进来的话留在收件箱里，下一轮再答，不能在这里读掉。
@@ -214,8 +229,7 @@ impl Turn {
             if let Some(window) = config.context_window {
                 let limits = Limits::new(window, config.max_tokens);
                 // 系统提示词和工具说明每次都要带，压缩不掉。
-                let fixed =
-                    compact::estimate(&config.system_prompt) + compact::estimate_tools(&specs);
+                let fixed = fixed_of(&config.system_prompt, &specs);
                 if let Some(end) = self
                     .fit_context(
                         transcript, provider, config, limits, fixed, observer, cancel,

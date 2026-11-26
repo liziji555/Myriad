@@ -1282,6 +1282,21 @@ button.sa-row:hover {
 .sa-chip-wrap-end {
   margin-left: auto;
 }
+/* 上下文用了多少：紧挨在模型左边。 */
+.sa-context {
+  flex: none;
+  margin-left: auto;
+  color: var(--sa-fg-muted);
+  font-size: var(--sa-text-xs);
+  white-space: nowrap;
+  cursor: default;
+}
+.sa-context[data-warn="true"] {
+  color: var(--sa-warn);
+}
+.sa-context + .sa-chip-wrap-end {
+  margin-left: 0;
+}
 .sa-chip {
   display: flex;
   align-items: center;
@@ -1296,6 +1311,10 @@ button.sa-row:hover {
   font-size: var(--sa-text-sm);
   white-space: nowrap;
   transition: background var(--sa-motion);
+}
+.sa-add {
+  flex: none;
+  padding: 0 7px;
 }
 .sa-chip:hover:not(:disabled),
 .sa-chip[aria-expanded="true"] {
@@ -1804,6 +1823,11 @@ button.sa-row:hover {
   border-radius: var(--sa-radius-sm);
   cursor: pointer;
   overflow-wrap: anywhere;
+}
+.sa-menu-hint {
+  margin-left: var(--sa-space-2);
+  color: var(--sa-fg-muted);
+  font-size: var(--sa-text-xs);
 }
 .sa-menu-item[aria-selected="true"] {
   background: var(--sa-active);

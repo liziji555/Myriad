@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { draftOf, draftProblem, saveRequest } from "./models";
+import { contextMeter, draftOf, draftProblem, saveRequest } from "./models";
 import type { ModelSettings } from "./types";
 
 const choice = (model: string) => ({ provider: "deepseek", model, thinking: null, context_window: null });
@@ -52,5 +52,19 @@ describe("models", () => {
     draft.providers[1].api_key = "k";
     draft.mid = { ...draft.mid, model: " " };
     expect(draftProblem(draft)).toContain("「中」档还没有填模型的名字");
+  });
+});
+
+describe("contextMeter", () => {
+  it("按离自动压缩多远算百分比，超了也只到 100", () => {
+    expect(contextMeter({ used: 0, compact_at: 100_000, window: 128_000 }).percent).toBe(0);
+    expect(contextMeter({ used: 25_400, compact_at: 100_000, window: 128_000 }).percent).toBe(25);
+    expect(contextMeter({ used: 150_000, compact_at: 100_000, window: 128_000 }).percent).toBe(100);
+    expect(contextMeter({ used: 5, compact_at: 0, window: 0 }).percent).toBe(0);
+  });
+
+  it("说明里写大概的数", () => {
+    expect(contextMeter({ used: 812, compact_at: 95_000, window: 128_000 }).note).toContain("约 812 token");
+    expect(contextMeter({ used: 812, compact_at: 95_000, window: 128_000 }).note).toContain("到 95k");
   });
 });

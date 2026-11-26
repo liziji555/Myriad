@@ -1,11 +1,11 @@
 import { useEffect, useState, type CSSProperties } from "react";
 import { loadLayout, saveLayout, type Layout } from "./api/layout";
-import type { SlashCommand } from "./api/slash";
+import { skillPrompt, type SlashCommand } from "./api/slash";
 import { presenceOf, speakersOf, type Presence } from "./api/presence";
 import { executionOf } from "./api/execution";
 import { STATE_LABEL } from "./api/tasks";
 import { api } from "./api/client";
-import type { RoomId, TaskId } from "./api/types";
+import type { RoomId, SkillInfo, TaskId } from "./api/types";
 import { useWorkspace } from "./api/useWorkspace";
 import { DESKTOP_CHANGED, DESKTOP_OPEN, desktopInvoke, type DesktopState } from "./api/desktop";
 import { ConnectPanel } from "./components/ConnectPanel";
@@ -61,6 +61,28 @@ function Shell() {
   const [invokeDesktop] = useState(() => desktopInvoke());
   const [desktop, setDesktop] = useState<DesktopState | null>(null);
   const [connectOpen, setConnectOpen] = useState(false);
+  // 输入框的菜单里列的技能。技能是磁盘上的文件，随时会多会少：连上之后读一次，回到窗口时再读。
+  // 没连上（没登录、还在加载）时不读：读了也是 401。技能不分房间，换房间不用重读。
+  const [skills, setSkills] = useState<SkillInfo[]>([]);
+  const ready = workspace.phase === "ready";
+  useEffect(() => {
+    if (!ready) return;
+    let stale = false;
+    let asked = 0;
+    const load = () => {
+      const mine = ++asked;
+      void api.extensions().then(
+        (found) => !stale && mine === asked && setSkills(found.skills),
+        () => {},
+      );
+    };
+    load();
+    window.addEventListener("focus", load);
+    return () => {
+      stale = true;
+      window.removeEventListener("focus", load);
+    };
+  }, [ready]);
   useEffect(() => {
     if (!invokeDesktop) return;
     const refresh = () =>
@@ -420,6 +442,20 @@ function Shell() {
       run: entry.run,
     }))
     .sort((a, b) => Number(b.group === "面板") - Number(a.group === "面板"));
+  // 技能排在最前面：这个房间里有 Bot 能用的才列出来。停用的 Bot 不说话，harness 用的是它自己的技能。
+  const skilled = members.filter((bot) => bot.enabled && bot.harness === "builtin");
+  const skillCommands: SlashCommand[] = skills
+    .filter((skill) =>
+      skill.bots.length === 0 ? skilled.length > 0 : skilled.some((bot) => skill.bots.includes(bot.name)),
+    )
+    .map((skill) => ({
+      id: `skill:${skill.name}`,
+      group: "技能",
+      title: skill.name,
+      hint: skill.description,
+      insert: skillPrompt(skill.name),
+      run: () => {},
+    }));
 
   return (
     <div
@@ -591,11 +627,12 @@ function Shell() {
               roomId={room.id}
               prefill={prefill}
               onPrefilled={() => setPrefill(null)}
-              commands={slashCommands}
+              commands={[...skillCommands, ...slashCommands]}
               controls={
                 <ComposerControls
                   room={room}
                   host={members.find((bot) => bot.id === room.host_bot_id) ?? null}
+                  busy={replying}
                   onPermission={(permission) => workspace.team.updateRoom(room.id, { permission })}
                   onTier={(tier) =>
                     room.host_bot_id ? workspace.team.updateBot(room.host_bot_id, { tier }) : Promise.resolve()
