@@ -78,27 +78,22 @@ enum Event {
     Failed(String),
 }
 
-/// 把命令拆成程序和参数：按空白分开，支持双引号、单引号和反斜杠转义。
+/// 把命令拆成程序和参数：按空白分开，支持双引号与单引号（保留 Windows 路径里的反斜杠）。
 pub(crate) fn split_command(text: &str) -> Vec<String> {
     let mut parts = vec![];
     let mut current = String::new();
     let mut quote: Option<char> = None;
-    let mut escaped = false;
     let mut any = false;
-    for c in text.chars() {
-        if escaped {
-            current.push(c);
-            escaped = false;
-            any = true;
-            continue;
-        }
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
         match (quote, c) {
-            (Some(q), c) if c == q => {
-                quote = None;
+            (Some('"'), '\\') if chars.peek() == Some(&'"') => {
+                chars.next();
+                current.push('"');
                 any = true;
             }
-            (Some('"'), '\\') => {
-                escaped = true;
+            (Some(q), c) if c == q => {
+                quote = None;
                 any = true;
             }
             (None, '"' | '\'') => {
@@ -116,9 +111,6 @@ pub(crate) fn split_command(text: &str) -> Vec<String> {
                 any = true;
             }
         }
-    }
-    if escaped {
-        current.push('\\');
     }
     if any || !current.is_empty() {
         parts.push(current);
