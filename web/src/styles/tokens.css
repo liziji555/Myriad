@@ -1,9 +1,6 @@
 /*
- * V3 精工设计令牌（Desk + Floating Sheet 体系）。
- * 灵感融合自 Lancer、Kettu、Linear 与 Orca：
- * - 外层底桌（--sa-bg-side）托起圆角浮纸工作台（--sa-bg）；
- * - 1px / 0.5px 极细语义描边（color-mix 自动随明暗翻转）；
- * - 主按钮采用克制的深墨色（暗色反白），把高饱和颜色严格留给真实运行状态与飞线流光。
+ * 设计变量（图二原版温润通透毛玻璃配色 + V3 工作树扩展令牌）。
+ * 暖白纸面、柔和冷暖微光底斑、24px 磨砂半透三栏与克制的钴蓝强调色（#2f6bd8）。
  */
 :root {
   color-scheme: light dark;
@@ -17,65 +14,60 @@
 
   --sa-radius-sm: 6px;
   --sa-radius-md: 8px;
-  --sa-radius-lg: 11px;
-  --sa-radius-xl: 14px;
+  --sa-radius-lg: 12px;
+  --sa-radius-xl: 18px;
   --sa-radius-pill: 999px;
 
   --sa-text-xs: 11px;
   --sa-text-sm: 12px;
-  --sa-text-base: 13.5px;
-  --sa-text-lg: 15px;
+  --sa-text-base: 14px;
+  --sa-text-lg: 16px;
   --sa-text-xl: 20px;
-  --sa-font: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
-  --sa-font-mono: "JetBrains Mono", ui-monospace, "SF Mono", "Cascadia Code", Consolas, monospace;
+  --sa-font: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --sa-font-mono: ui-monospace, "Cascadia Code", Consolas, monospace;
 
-  /* 浅色模式：温润暖灰底桌 + 纯白浮纸工作台 */
-  --sa-bg-side: #f3f2ef;
-  --sa-bg: #ffffff;
-  --sa-bg-subtle: #f8f8f7;
+  /* 原版三层底色与柔和钴蓝主色 */
+  --sa-bg: #fbfaf8;
+  --sa-bg-side: #f3f1ed;
+  --sa-bg-subtle: color-mix(in srgb, var(--sa-fg) 4%, var(--sa-bg-raised));
   --sa-bg-raised: #ffffff;
-  --sa-bg-user: #f4f3f0;
-  --sa-fg: #18181b;
-
-  /* 主操作按钮：克制深墨色；强调色与飞线：纯粹克制的蓝/青/紫 */
-  --sa-btn-bg: #18181b;
-  --sa-btn-fg: #ffffff;
-  --sa-accent: #2563eb;
+  --sa-fg: #1f1d1a;
+  --sa-accent: #2f6bd8;
   --sa-on-accent: #ffffff;
-  --sa-ok: #15803d;
-  --sa-warn: #b45309;
-  --sa-danger: #c8322b;
-  --sa-handoff: #7c3aed;
-  --sa-focus-curve: #0d9488;
-  --sa-queue-back: #ecebe7;
+  --sa-ok: #2b9a5a;
+  --sa-warn: #c07f0a;
+  --sa-danger: #cc4334;
+  --sa-handoff: #7a6be0;
+  --sa-focus-curve: #21a19b;
+  --sa-queue-back: color-mix(in srgb, var(--sa-bg-side) 82%, var(--sa-bg-raised));
+  --sa-shadow: 0 1px 2px rgb(31 29 26 / 6%), 0 8px 24px rgb(31 29 26 / 8%);
+  --sa-avatar-mix: 18%;
 
-  --sa-shadow: 0 0 0 1px rgb(24 24 27 / 8%), 0 2px 8px rgb(24 24 27 / 5%);
-  --sa-sheet-shadow: 0 0 0 1px rgb(24 24 27 / 8%), 0 4px 16px rgb(24 24 27 / 4%);
-  --sa-composer-shadow: 0 0 0 1px rgb(24 24 27 / 11%), 0 8px 26px -6px rgb(24 24 27 / 8%);
-  --sa-modal-shadow: 0 0 0 1px rgb(24 24 27 / 12%), 0 24px 60px -12px rgb(24 24 27 / 22%);
-  --sa-avatar-mix: 16%;
+  --sa-fg-muted: color-mix(in srgb, var(--sa-fg) 62%, transparent);
+  --sa-fg-faint: color-mix(in srgb, var(--sa-fg) 50%, transparent);
+  --sa-border: color-mix(in srgb, var(--sa-fg) 12%, transparent);
+  --sa-border-strong: color-mix(in srgb, var(--sa-fg) 22%, transparent);
+  --sa-hover: color-mix(in srgb, var(--sa-fg) 6%, transparent);
+  --sa-active: color-mix(in srgb, var(--sa-fg) 10%, transparent);
 
-  --sa-fg-muted: color-mix(in srgb, var(--sa-fg) 64%, transparent);
-  --sa-fg-faint: color-mix(in srgb, var(--sa-fg) 45%, transparent);
-  --sa-border: color-mix(in srgb, var(--sa-fg) 9%, transparent);
-  --sa-border-strong: color-mix(in srgb, var(--sa-fg) 16%, transparent);
-  --sa-hover: color-mix(in srgb, var(--sa-fg) 4.8%, transparent);
-  --sa-active: color-mix(in srgb, var(--sa-fg) 8%, transparent);
-
-  /* 轻雾化顶栏与浮层（克制半透，不染花哨彩虹斑） */
-  --sa-glass: color-mix(in srgb, var(--sa-bg) 86%, transparent);
-  --sa-glass-strong: color-mix(in srgb, var(--sa-bg-raised) 94%, transparent);
-  --sa-glass-blur: blur(16px) saturate(140%);
+  /* 图二原版玻璃态：半透明磨砂面 + 上沿高光 + 柔和三色微光底斑 */
+  --sa-glass: color-mix(in srgb, var(--sa-bg-raised) 56%, transparent);
+  --sa-glass-strong: color-mix(in srgb, var(--sa-bg-raised) 78%, transparent);
+  --sa-glass-blur: blur(24px) saturate(170%);
   --sa-glass-edge: inset 0 1px 0 color-mix(in srgb, #fff var(--sa-glass-shine), transparent);
-  --sa-glass-shine: 65%;
-  --sa-backdrop: var(--sa-bg-side);
+  --sa-glass-shine: 70%;
+  --sa-backdrop:
+    radial-gradient(55% 50% at 8% 0%, color-mix(in srgb, var(--sa-accent) 36%, transparent), transparent 72%),
+    radial-gradient(45% 45% at 100% 8%, color-mix(in srgb, #b46be0 28%, transparent), transparent 72%),
+    radial-gradient(60% 55% at 72% 100%, color-mix(in srgb, #2bb5a0 26%, transparent), transparent 72%),
+    var(--sa-bg-side);
 
-  --sa-sidebar-width: 236px;
-  --sa-rail-width: 54px;
-  --sa-panel-width: 360px;
-  --sa-trajectory-width: 416px;
-  --sa-line-width: 760px;
-  --sa-motion: 0.14s cubic-bezier(0, 0, 0.2, 1);
+  --sa-sidebar-width: 248px;
+  --sa-rail-width: 56px;
+  --sa-panel-width: 356px;
+  --sa-trajectory-width: 408px;
+  --sa-line-width: 820px;
+  --sa-motion: 0.15s ease-out;
 
   --light-color: var(--sa-accent);
 }
@@ -86,57 +78,39 @@
 
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --sa-bg-side: #0e0e11;
-  --sa-bg: #16161a;
-  --sa-bg-subtle: #1c1c21;
-  --sa-bg-raised: #1f1f25;
-  --sa-bg-user: #23232a;
-  --sa-fg: #f3f4f6;
-
-  --sa-btn-bg: #f3f4f6;
-  --sa-btn-fg: #111827;
-  --sa-accent: #60a5fa;
-  --sa-on-accent: #0c1425;
-  --sa-ok: #34d399;
-  --sa-warn: #fbbf24;
-  --sa-danger: #f87171;
+  --sa-bg: #181716;
+  --sa-bg-side: #121110;
+  --sa-bg-subtle: color-mix(in srgb, var(--sa-fg) 5%, var(--sa-bg-raised));
+  --sa-bg-raised: #222120;
+  --sa-fg: #ece9e4;
+  --sa-accent: #7fa9f5;
+  --sa-on-accent: #10192b;
+  --sa-ok: #5cc48a;
+  --sa-warn: #e2ad4b;
+  --sa-danger: #ee7a6c;
   --sa-handoff: #a78bfa;
   --sa-focus-curve: #2dd4bf;
-  --sa-queue-back: #1a1a20;
-
-  --sa-shadow: 0 0 0 1px rgb(255 255 255 / 8%), 0 4px 12px rgb(0 0 0 / 32%);
-  --sa-sheet-shadow: 0 0 0 1px rgb(255 255 255 / 8%), 0 8px 28px rgb(0 0 0 / 42%);
-  --sa-composer-shadow: 0 0 0 1px rgb(255 255 255 / 12%), 0 12px 32px -6px rgb(0 0 0 / 50%);
-  --sa-modal-shadow: 0 0 0 1px rgb(255 255 255 / 14%), 0 28px 70px -10px rgb(0 0 0 / 65%);
-  --sa-avatar-mix: 24%;
-  --sa-glass-shine: 7%;
+  --sa-shadow: 0 1px 2px rgb(0 0 0 / 40%), 0 10px 28px rgb(0 0 0 / 36%);
+  --sa-avatar-mix: 26%;
+  --sa-glass-shine: 9%;
 }
 
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    --sa-bg-side: #0e0e11;
-    --sa-bg: #16161a;
-    --sa-bg-subtle: #1c1c21;
-    --sa-bg-raised: #1f1f25;
-    --sa-bg-user: #23232a;
-    --sa-fg: #f3f4f6;
-
-    --sa-btn-bg: #f3f4f6;
-    --sa-btn-fg: #111827;
-    --sa-accent: #60a5fa;
-    --sa-on-accent: #0c1425;
-    --sa-ok: #34d399;
-    --sa-warn: #fbbf24;
-    --sa-danger: #f87171;
+    --sa-bg: #181716;
+    --sa-bg-side: #121110;
+    --sa-bg-subtle: color-mix(in srgb, var(--sa-fg) 5%, var(--sa-bg-raised));
+    --sa-bg-raised: #222120;
+    --sa-fg: #ece9e4;
+    --sa-accent: #7fa9f5;
+    --sa-on-accent: #10192b;
+    --sa-ok: #5cc48a;
+    --sa-warn: #e2ad4b;
+    --sa-danger: #ee7a6c;
     --sa-handoff: #a78bfa;
     --sa-focus-curve: #2dd4bf;
-    --sa-queue-back: #1a1a20;
-
-    --sa-shadow: 0 0 0 1px rgb(255 255 255 / 8%), 0 4px 12px rgb(0 0 0 / 32%);
-    --sa-sheet-shadow: 0 0 0 1px rgb(255 255 255 / 8%), 0 8px 28px rgb(0 0 0 / 42%);
-    --sa-composer-shadow: 0 0 0 1px rgb(255 255 255 / 12%), 0 12px 32px -6px rgb(0 0 0 / 50%);
-    --sa-modal-shadow: 0 0 0 1px rgb(255 255 255 / 14%), 0 28px 70px -10px rgb(0 0 0 / 65%);
-    --sa-avatar-mix: 24%;
-    --sa-glass-shine: 7%;
+    --sa-shadow: 0 1px 2px rgb(0 0 0 / 40%), 0 10px 28px rgb(0 0 0 / 36%);
+    --sa-avatar-mix: 26%;
+    --sa-glass-shine: 9%;
   }
 }
