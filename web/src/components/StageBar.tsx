@@ -8,24 +8,21 @@ import { WindowControls } from "./WindowControls";
 
 const THEME_ICON = { system: "auto", light: "sun", dark: "moon" } as const;
 
-export type MainView = "split" | "chat" | "flow";
-
 interface Props {
   room: Room | undefined;
+  /** 当前会话的性质标签（如「主控」「1v1」「3 人协作」）。 */
+  roomBadge?: string | null;
   presence: readonly Presence[];
   connected: boolean;
   /** 等人处理的任务有几个。 */
   pendingTasks: number;
-  /** 当前主视图：同屏工作树（Lancer 风格双栏）、纯对话、或全屏流线图。 */
-  view: MainView;
-  liveLanes: number;
-  onView(view: MainView): void;
+  /** 工作树轨迹当前是否可见。 */
+  trajectoryShown: boolean;
   /** 宽窗口：左栏常驻，这里只写房间名；窄窗口：点房间名开关抽屉。 */
   docked: boolean;
   roomsOpen: boolean;
-  drawerOpen: boolean;
   onToggleRooms(): void;
-  onToggleDrawer(): void;
+  onToggleTrajectory(): void;
   onShowTasks(): void;
   onOpenPalette(): void;
   theme: Theme;
@@ -36,21 +33,19 @@ interface Props {
 }
 
 /**
- * 顶上的现场栏：现在在哪个房间、主视图分段切换、每个 Bot 此刻在做什么（也是跨栏飞线的顶部锚点）。
+ * 顶上的现场栏：当前对话标题 + 每个 Bot 实时现场胶囊（跨栏飞线锚点）+ 全局快捷操作。
  */
 export function StageBar({
   room,
+  roomBadge,
   presence,
   connected,
   pendingTasks,
-  view,
-  liveLanes,
-  onView,
+  trajectoryShown,
   docked,
   roomsOpen,
-  drawerOpen,
   onToggleRooms,
-  onToggleDrawer,
+  onToggleTrajectory,
   onShowTasks,
   onOpenPalette,
   theme,
@@ -62,14 +57,15 @@ export function StageBar({
     <header className="sa-stage">
       {docked ? (
         <div className="sa-stage-room" data-docked="true">
-          <h1 className="sa-room-title">{room?.name ?? "还没有房间"}</h1>
+          <h1 className="sa-room-title">{room?.name ?? "主控对话"}</h1>
+          {roomBadge && <span className="sa-tag">{roomBadge}</span>}
         </div>
       ) : (
         <button
           type="button"
           className="sa-stage-room"
           aria-expanded={roomsOpen}
-          title="换房间、新建房间"
+          title="展开侧栏"
           onClick={onToggleRooms}
         >
           <span className="sa-brand-mark" aria-hidden="true" />
@@ -77,47 +73,9 @@ export function StageBar({
           <span className="sa-stage-sep" aria-hidden="true">
             /
           </span>
-          <h1 className="sa-room-title">{room?.name ?? "还没有房间"}</h1>
+          <h1 className="sa-room-title">{room?.name ?? "主控对话"}</h1>
           <span className="sa-stage-caret" aria-hidden="true" />
         </button>
-      )}
-
-      {room && (
-        <div className="sa-seg-group" role="tablist" aria-label="主视图模式">
-          <button
-            type="button"
-            role="tab"
-            className="sa-seg-btn"
-            aria-selected={view === "split"}
-            onClick={() => onView("split")}
-            title="左侧对话 + 右侧实时工作树与跨栏飞线"
-          >
-            <Icon name="split" size={13} />
-            <span>同屏工作树</span>
-            {liveLanes > 0 && <i className="sa-seg-live" aria-hidden="true" />}
-          </button>
-          <button
-            type="button"
-            role="tab"
-            className="sa-seg-btn"
-            aria-selected={view === "chat"}
-            onClick={() => onView("chat")}
-            title="宽屏纯对话视图"
-          >
-            <span>对话</span>
-          </button>
-          <button
-            type="button"
-            role="tab"
-            className="sa-seg-btn"
-            aria-selected={view === "flow"}
-            onClick={() => onView("flow")}
-            title="全屏多泳道协作流线图"
-          >
-            <Icon name="graph" size={13} />
-            <span>全屏流线</span>
-          </button>
-        </div>
       )}
 
       <ul className="sa-presence" aria-label={`现场：${presenceSummary(presence)}`}>
@@ -193,12 +151,12 @@ export function StageBar({
           <button
             type="button"
             className="sa-icon-button"
-            aria-label={drawerOpen ? "收起右侧工作台面板" : "打开右侧工作台面板"}
-            aria-pressed={drawerOpen}
-            title={drawerOpen ? "收起右侧工作台面板" : "打开右侧工作台面板"}
-            onClick={onToggleDrawer}
+            aria-label={trajectoryShown ? "收起右侧工作树轨迹" : "显示右侧工作树轨迹"}
+            aria-pressed={trajectoryShown}
+            title={trajectoryShown ? "收起右侧工作树轨迹" : "显示右侧工作树轨迹"}
+            onClick={onToggleTrajectory}
           >
-            <Icon name="panel" />
+            <Icon name="split" />
           </button>
         )}
         <WindowControls />

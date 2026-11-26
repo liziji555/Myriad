@@ -16,6 +16,18 @@ pub struct Health {
 #[ts(export)]
 pub struct CreateRoomRequest {
     pub name: String,
+    /// 可选：建房时直接拉入的 Bot 列表（为空时默认放进第一个启用的主控 Bot）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub member_bot_ids: Option<Vec<crate::BotId>>,
+    /// 可选：指定入口主控 Bot（必须在成员里；为空时取成员里的第一个）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub host_bot_id: Option<crate::BotId>,
+    /// 可选：多 Bot 房间协作模式（为空时按默认规则）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub discussion: Option<crate::Discussion>,
 }
 
 /// 所有失败响应的统一形状。`code` 给程序判断，`message` 给人看。

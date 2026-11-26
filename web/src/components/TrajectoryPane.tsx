@@ -36,6 +36,8 @@ interface Props {
   presence: readonly Presence[];
   onOpen(messageId: MessageId): void;
   onShowDiff(): void;
+  onExpandFlow(): void;
+  onClose(): void;
 }
 
 interface Arc {
@@ -50,7 +52,16 @@ interface Arc {
  * - 新消息、派活、分叉或交回结果时，调用 `light-ui` 从左侧消息头或顶栏胶囊飞出一道三次贝塞尔弧形渐变流光落到右侧工作树节点上；
  * - 鼠标悬停在任意工作树节点上时，画出跨栏关联弧线（Focus Bridge Curve）连回左侧对应消息。
  */
-export function TrajectoryPane({ roomId, flow, bots, presence, onOpen, onShowDiff }: Props) {
+export function TrajectoryPane({
+  roomId,
+  flow,
+  bots,
+  presence,
+  onOpen,
+  onShowDiff,
+  onExpandFlow,
+  onClose,
+}: Props) {
   const emit = useLight();
   const rootRef = useRef<HTMLElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -290,16 +301,36 @@ export function TrajectoryPane({ roomId, flow, bots, presence, onOpen, onShowDif
             +{totalDeskChanges} 改动
           </button>
         )}
-        <button
-          type="button"
-          className="sa-traj-replay"
-          disabled={flow.nodes.every((n) => n.lane === USER_LANE)}
-          onClick={replayFlights}
-          title="重播跨栏飞线流光"
-        >
-          <Icon name="play" size={11} />
-          <span>飞线</span>
-        </button>
+        <div className="sa-traj-actions">
+          <button
+            type="button"
+            className="sa-traj-replay"
+            disabled={flow.nodes.every((n) => n.lane === USER_LANE)}
+            onClick={replayFlights}
+            title="重播跨栏飞线流光"
+          >
+            <Icon name="play" size={11} />
+            <span>飞线</span>
+          </button>
+          <button
+            type="button"
+            className="sa-traj-replay"
+            onClick={onExpandFlow}
+            title="展开全屏协作流线大图"
+          >
+            <Icon name="graph" size={11} />
+            <span>大图</span>
+          </button>
+          <button
+            type="button"
+            className="sa-traj-close"
+            onClick={onClose}
+            aria-label="收起工作树"
+            title="收起工作树"
+          >
+            ×
+          </button>
+        </div>
       </header>
 
       <div

@@ -2,6 +2,7 @@
 
 use crate::ask::AskBotTool;
 use crate::episode::Job;
+use crate::manage_bots::{CreateBotTool, CreateRoomTool, UpdateBotTool};
 use crate::work::CreateTaskTool;
 use crate::{render_prompt, router, RoomLink, Shared};
 use async_trait::async_trait;
@@ -904,18 +905,28 @@ async fn turn(
                     from: bot.clone(),
                 });
             }
-            // 房间里有别的 Bot 时才给它「找别的 Bot」这个工具。
-            if !others.is_empty() {
-                tools.register(AskBotTool {
-                    shared: shared.clone(),
-                    link: link.clone(),
-                    room_id: room_id.clone(),
-                    from: bot.clone(),
-                    hop: live_hop,
-                    blind: job.blind,
-                    said_in: draft.id.clone(),
-                });
-            }
+            // 主控与内置 Bot 均可自主创建/调整子 Bot、组建多 Bot 协作房间，并随时用 ask_bot 派活（即使刚新建子 Bot 也能同轮立刻派活）。
+            tools.register(CreateBotTool {
+                shared: shared.clone(),
+                room_id: room_id.clone(),
+                from: bot.clone(),
+            });
+            tools.register(UpdateBotTool {
+                shared: shared.clone(),
+            });
+            tools.register(CreateRoomTool {
+                shared: shared.clone(),
+                from: bot.clone(),
+            });
+            tools.register(AskBotTool {
+                shared: shared.clone(),
+                link: link.clone(),
+                room_id: room_id.clone(),
+                from: bot.clone(),
+                hop: live_hop,
+                blind: job.blind,
+                said_in: draft.id.clone(),
+            });
             let provider = crate::budget::guard(shared, model.provider.clone(), None);
             // 页面上「上下文 N%」要和内核判断压缩时一样，把每次都要带的这部分也算上。
             shared.context.note_fixed(

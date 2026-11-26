@@ -19,10 +19,14 @@ pub fn insert(conn: &Connection, room: &Room) -> Result<()> {
             room.permission.as_str()
         ],
     )?;
-    for bot_id in &room.member_bot_ids {
+    for (idx, bot_id) in room.member_bot_ids.iter().enumerate() {
         conn.execute(
             "INSERT INTO room_members (room_id, bot_id, joined_at) VALUES (?1, ?2, ?3)",
-            params![room.id.as_str(), bot_id.as_str(), room.created_at],
+            params![
+                room.id.as_str(),
+                bot_id.as_str(),
+                room.created_at + idx as i64
+            ],
         )?;
     }
     Ok(())
