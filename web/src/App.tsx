@@ -160,6 +160,7 @@ function Shell() {
   const [flowExpanded, setFlowExpanded] = useState(false);
   const [checkpoints, setCheckpoints] = useState<CheckpointInfo[]>([]);
   const [checkpointRefresh, setCheckpointRefresh] = useState(0);
+  const [extensionsReloadTrigger, setExtensionsReloadTrigger] = useState(0);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -354,16 +355,21 @@ function Shell() {
         (edge) => edge.kind === "dispatch" || edge.kind === "peer",
       ).length
     : 0;
-  // 从协作视图或工作树轨迹点一个节点：确保对话可见，滚到那条消息闪一下。
-  const openMessage = (messageId: string) => {
+  // 从协作视图、工作树轨迹或检查点面板点一个节点：若在更早分页里先自动补拉，再滚过去闪一下。
+  const openMessage = async (messageId: string): Promise<boolean> => {
     if (flowExpanded) setFlowExpanded(false);
+    if (roomId) {
+      const found = await workspace.findMessage(roomId, messageId);
+      if (!found) return false;
+    }
     window.setTimeout(() => {
-      const target = document.querySelector(`[data-message-id="${messageId}"]`);
+      const target = document.querySelector(`[data-message-id="${CSS.escape(messageId)}"]`);
       if (!target) return;
       target.scrollIntoView({ block: "center", behavior: "smooth" });
       target.setAttribute("data-flash", "true");
       window.setTimeout(() => target.removeAttribute("data-flash"), 1600);
     }, 60);
+    return true;
   };
   const pendingTasks = roomTasks.filter((task) =>
     ["review", "waiting", "blocked"].includes(task.state),
@@ -564,10 +570,7 @@ function Shell() {
             title: "热重载 MCP 与钩子配置",
             run: () => {
               showPanel("extensions");
-              void api
-                .reloadExtensions()
-                .then(() => window.dispatchEvent(new Event(EXTENSIONS_CHANGED)))
-                .catch(() => {});
+              setExtensionsReloadTrigger((n) => n + 1);
             },
           },
           {
@@ -926,6 +929,7 @@ function Shell() {
             checkpoints={checkpoints}
             onRewindCheckpoint={handleRewindCheckpoint}
             onJumpMessage={openMessage}
+            extensionsReloadTrigger={extensionsReloadTrigger}
           />
         )}
       </div>

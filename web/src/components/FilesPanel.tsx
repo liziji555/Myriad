@@ -19,7 +19,7 @@ interface Props {
   members: readonly Bot[];
   checkpoints?: readonly CheckpointInfo[];
   onRewindCheckpoint?(checkpointId: string, force: boolean): Promise<RewindReport>;
-  onJumpMessage?(messageId: string): void;
+  onJumpMessage?(messageId: string): Promise<boolean> | boolean | void;
 }
 
 interface ParsedDiffLine {
@@ -181,7 +181,11 @@ export function FilesPanel({ room, members, checkpoints = [], onRewindCheckpoint
             setDir("");
             setSelectedFile(null);
             setSelectedDiff(null);
-            if (next === "workspace") setMode("all");
+            if (next === "workspace") {
+              setMode("all");
+            } else if (mode === "checkpoints") {
+              setMode("changes");
+            }
           }}
         >
           <option value="workspace">主工作目录 (main)</option>
@@ -308,7 +312,18 @@ export function FilesPanel({ room, members, checkpoints = [], onRewindCheckpoint
                   </ul>
                   <div className="sa-checkpoint-card-actions">
                     {onJumpMessage && (
-                      <button type="button" className="sa-link" onClick={() => onJumpMessage(cp.id)}>
+                      <button
+                        type="button"
+                        className="sa-link"
+                        onClick={() => {
+                          setError(null);
+                          void Promise.resolve(onJumpMessage(cp.id)).then((found) => {
+                            if (found === false) {
+                              setError("这条检查点对应的消息已超出当前可定位的历史范围或已被清理。");
+                            }
+                          });
+                        }}
+                      >
                         定位消息
                       </button>
                     )}

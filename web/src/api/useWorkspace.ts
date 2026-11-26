@@ -117,6 +117,7 @@ export interface WorkspaceView extends Workspace {
   openRoom(roomId: RoomId): Promise<void>;
   /** 再往前拉一页。 */
   loadOlder(roomId: RoomId): Promise<void>;
+  findMessage(roomId: RoomId, messageId: string): Promise<boolean>;
   sendMessage(roomId: RoomId, content: string): Promise<void>;
   stopReply(roomId: RoomId): Promise<void>;
   /** 只停房间里的一个 Bot。 */
@@ -436,6 +437,25 @@ export function useWorkspace(): WorkspaceView {
     setChat((current) => mergePage(current, roomId, page, true));
   }, []);
 
+  /** 若目标消息在已加载的更早分页之前，自动向前翻页直到找到该消息或无更早消息为止。 */
+  const findMessage = useCallback(async (roomId: RoomId, messageId: string): Promise<boolean> => {
+    const myReset = resetGen.current;
+    const myGen = roomLoadGen.current[roomId] ?? 0;
+    let room = chatRef.current.rooms[roomId];
+    if (room?.messages.some((m) => m.id === messageId)) return true;
+    let cursor = room?.messages[0]?.seq;
+    let hasMore = room?.hasMore ?? false;
+    for (let step = 0; step < 20 && hasMore && cursor !== undefined; step++) {
+      const page = await api.listMessages(roomId, cursor);
+      if (resetGen.current !== myReset || (roomLoadGen.current[roomId] ?? 0) !== myGen) return false;
+      setChat((current) => mergePage(current, roomId, page, true));
+      if (page.messages.some((m) => m.id === messageId)) return true;
+      hasMore = page.has_more;
+      cursor = page.messages[0]?.seq;
+    }
+    return false;
+  }, []);
+
   const sendMessage = useCallback(async (roomId: RoomId, content: string) => {
     const message = await api.postMessage(roomId, content);
     // 事件流也会送来同一条；先放进去，发送的人不用等。
@@ -499,6 +519,7 @@ export function useWorkspace(): WorkspaceView {
     team,
     openRoom,
     loadOlder,
+    findMessage,
     sendMessage,
     queueMessage,
     editQueued,

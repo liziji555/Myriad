@@ -76,7 +76,9 @@ interface Props {
   /** 房间内内置 Bot 的轮次级文件检查点。 */
   checkpoints?: readonly CheckpointInfo[];
   onRewindCheckpoint?(checkpointId: string, force: boolean): Promise<RewindReport>;
-  onJumpMessage?(messageId: string): void;
+  onJumpMessage?(messageId: string): Promise<boolean> | boolean | void;
+  /** 命令面板触发扩展热重载的递增值。 */
+  extensionsReloadTrigger?: number;
 }
 
 export function ContextPanel({
@@ -104,6 +106,7 @@ export function ContextPanel({
   checkpoints,
   onRewindCheckpoint,
   onJumpMessage,
+  extensionsReloadTrigger,
 }: Props) {
   const [menuOpen, setMenuOpen] = useState(false);
   const pickerRef = useRef<HTMLDivElement>(null);
@@ -263,7 +266,7 @@ export function ContextPanel({
         )}
         {tab === "links" && <LinksPanel key={room.id} room={room} links={links} actions={linkActions} />}
         {tab === "models" && <ModelsPanel />}
-        {tab === "extensions" && <ExtensionsPanel />}
+        {tab === "extensions" && <ExtensionsPanel reloadTrigger={extensionsReloadTrigger} />}
         {tab === "usage" && <UsagePanel refreshKey={usageKey} />}
         {tab === "audit" && (
           <AuditPanel
