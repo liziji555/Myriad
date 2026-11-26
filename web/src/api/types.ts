@@ -98,3 +98,6 @@ export type { UpdateStatus } from "./generated/UpdateStatus";
 export type { UsageSummary } from "./generated/UsageSummary";
 export type { WorkspaceEntry } from "./generated/WorkspaceEntry";
 export type { WorkspaceFile } from "./generated/WorkspaceFile";
+export type { CheckpointInfo } from "./generated/CheckpointInfo";
+export type { RewindRequest } from "./generated/RewindRequest";
+export type { RewindReport } from "./generated/RewindReport";

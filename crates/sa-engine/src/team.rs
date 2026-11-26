@@ -224,6 +224,7 @@ impl Engine {
             let summary = match permission {
                 PermissionMode::Ask => "改成了每次都问",
                 PermissionMode::Full => "改成了完全权限：Bot 改文件、执行命令不再问",
+                PermissionMode::Plan => "改成了规划模式：只读调研，方案批准后再执行",
             };
             self.audit(Audit::user("room.permission", summary).room(&room.id));
         }

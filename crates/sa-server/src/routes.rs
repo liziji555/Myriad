@@ -7,14 +7,15 @@ use axum::http::StatusCode;
 use axum::Json;
 use sa_engine::{AuditFilter, BotPatch, Engine, EngineError, RoutinePatch};
 use sa_protocol::{
-    ApprovalId, AuditPage, Bot, BotId, CreateBotRequest, CreateLinkRequest, CreateRoomRequest,
-    CreateRoutineRequest, CreateTaskRequest, DecideApprovalRequest, EditQueuedRequest, Extensions,
-    HarnessDesk, Health, ImportReport, ImportTemplateRequest, Link, LinkId, Message, MessagePage,
-    ModelSettings, ModelTier, Notice, NoticeId, Pairing, PermissionRule, PostMessageRequest,
-    QueuedId, Room, RoomId, RoomQueue, Routine, RoutineId, RuleId, SaveModelsRequest, Share,
-    ShareCall, SharePoll, ShareReply, StopResponse, Task, TaskActionRequest, TaskDetail, TaskId,
-    TeamTemplate, TemplateFile, TestModelRequest, TestModelResult, UpdateBotRequest,
-    UpdateRoomRequest, UpdateRoutineRequest, UsageSummary,
+    ApprovalId, AuditPage, Bot, BotId, CheckpointInfo, CreateBotRequest, CreateLinkRequest,
+    CreateRoomRequest, CreateRoutineRequest, CreateTaskRequest, DecideApprovalRequest,
+    EditQueuedRequest, Extensions, HarnessDesk, Health, ImportReport, ImportTemplateRequest, Link,
+    LinkId, Message, MessagePage, ModelSettings, ModelTier, Notice, NoticeId, Pairing,
+    PermissionRule, PostMessageRequest, QueuedId, RewindReport, RewindRequest, Room, RoomId,
+    RoomQueue, Routine, RoutineId, RuleId, SaveModelsRequest, Share, ShareCall, SharePoll,
+    ShareReply, StopResponse, Task, TaskActionRequest, TaskDetail, TaskId, TeamTemplate,
+    TemplateFile, TestModelRequest, TestModelResult, UpdateBotRequest, UpdateRoomRequest,
+    UpdateRoutineRequest, UsageSummary,
 };
 use serde::Deserialize;
 
@@ -804,6 +805,27 @@ pub async fn reply_share(
         .reply(body)
         .map_err(|e| AppError::new(StatusCode::CONFLICT, "share_taken", e))?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn list_checkpoints(
+    State(state): State<AppState>,
+    Path(room_id): Path<RoomId>,
+) -> Result<Json<Vec<CheckpointInfo>>, AppError> {
+    Ok(Json(state.orchestrator.list_checkpoints(&room_id).await?))
+}
+
+pub async fn rewind_checkpoint(
+    State(state): State<AppState>,
+    Path((room_id, checkpoint_id)): Path<(RoomId, String)>,
+    body: Option<Json<RewindRequest>>,
+) -> Result<Json<RewindReport>, AppError> {
+    let force = body.and_then(|Json(req)| req.force).unwrap_or(false);
+    Ok(Json(
+        state
+            .orchestrator
+            .rewind_checkpoint(&room_id, &checkpoint_id, force)
+            .await?,
+    ))
 }
 
 pub async fn api_not_found() -> AppError {

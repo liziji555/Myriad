@@ -5,6 +5,7 @@ import type {
   ApiError,
   ApprovalDecision,
   ApprovalId,
+  CheckpointInfo,
   Share,
   AuditPage,
   Bot,
@@ -35,6 +36,8 @@ import type {
   Link,
   LinkId,
   Pairing,
+  RewindReport,
+  RewindRequest,
   Routine,
   RoutineId,
   StopResponse,
@@ -238,4 +241,13 @@ export const api = {
     if (desk) q.set("desk", desk);
     return request<WorkspaceFile>(`/api/rooms/${encodeURIComponent(roomId)}/files/content?${q.toString()}`);
   },
+  /** 列出房间内置 Bot 产生的轮次级文件检查点（最新在前）。 */
+  listCheckpoints: (roomId: RoomId) =>
+    request<CheckpointInfo[]>(`/api/rooms/${encodeURIComponent(roomId)}/checkpoints`),
+  /** 回滚到指定检查点（还原修改前文件、删除新建文件）。 */
+  rewindCheckpoint: (roomId: RoomId, checkpointId: string, body: RewindRequest = {}) =>
+    postJson<RewindReport>(
+      `/api/rooms/${encodeURIComponent(roomId)}/checkpoints/${encodeURIComponent(checkpointId)}/rewind`,
+      body,
+    ),
 };

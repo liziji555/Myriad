@@ -71,6 +71,8 @@ impl Tool for EditTool {
         let (path, _) = ctx.fence.resolve_for_write(&input.path)?;
         let shown = input.path.trim().to_string();
         let cancel = ctx.cancel.clone();
+        let fence = ctx.fence.clone();
+        let checkpoint = ctx.checkpoint.clone();
         blocking(move || {
             // 从读到写回都拿着锁：别的写入不会夹在中间。
             let _lock = file_lock();
@@ -109,6 +111,14 @@ impl Tool for EditTool {
                 return Err(ToolError::new(STOPPED));
             }
             write_atomically(&path, updated.as_bytes()).map_err(io_error)?;
+            if let Some(cp) = checkpoint {
+                cp.record_write(
+                    &fence,
+                    &path,
+                    crate::checkpoint::BeforeState::Bytes(text.as_bytes()),
+                    updated.as_bytes(),
+                );
+            }
             Ok(format!("已修改 {shown}（替换了 {count} 处）。"))
         })
         .await

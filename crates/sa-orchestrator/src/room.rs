@@ -807,10 +807,11 @@ async fn turn(
     let leading = lead.as_ref() == Some(&bot.id);
     let engine = shared.engine.clone();
     let this_room = room_id.clone();
-    let share = db(move || engine.get_room(&this_room))
+    let room_meta = db(move || engine.get_room(&this_room))
         .await
-        .map_err(|e| e.to_string())?
-        .share;
+        .map_err(|e| e.to_string())?;
+    let share = room_meta.share;
+    let room_permission = room_meta.permission;
 
     link.speaking.lock().unwrap().push(bot.id.clone());
     announce(shared, room_id, link).await;
@@ -880,7 +881,7 @@ async fn turn(
                 }
                 None => String::new(),
             };
-            let mut system_prompt = render_prompt(
+            let mut base_system_prompt = render_prompt(
                 &workspace(shared, share.as_deref()),
                 &shared.settings,
                 bot,
@@ -889,19 +890,25 @@ async fn turn(
             ) + &crate::lead_rules(bot, others, lead.as_ref())
                 + &share_rules(shared, share.as_deref());
             if !project_docs.is_empty() {
-                system_prompt.push_str("\n\n");
-                system_prompt.push_str(&project_docs);
+                base_system_prompt.push_str("\n\n");
+                base_system_prompt.push_str(&project_docs);
             }
             if !memory_block.is_empty() {
-                system_prompt.push_str("\n\n");
-                system_prompt.push_str(&memory_block);
+                base_system_prompt.push_str("\n\n");
+                base_system_prompt.push_str(&memory_block);
             }
             let hooks = if share.is_none() {
                 shared.hooks.lock().unwrap().clone()
             } else {
                 None
             };
-            let config = TurnConfig {
+            let planning = room_permission == PermissionMode::Plan && !leading;
+            let system_prompt = if planning {
+                format!("{base_system_prompt}{}", crate::plan::PLAN_RULES)
+            } else {
+                base_system_prompt.clone()
+            };
+            let mut config = TurnConfig {
                 model: model.model.clone(),
                 system_prompt,
                 max_steps: shared.settings.max_steps,
@@ -923,114 +930,230 @@ async fn turn(
             let mut ctx = ToolCtx::new(shared.settings.fence.clone());
             ctx.cancel = cancel.clone();
             ctx.allow_private_network = shared.settings.allow_private_network;
-            // 别的 Bot 可能同时在这个工作目录里干活（包括这一轮中途才进房间的）：改文件、执行命令一个一个来。
-            // 主 Agent 只看不动手：改文件、执行命令都派给成员。
-            // 用的是共享目录：文件工具交给那台电脑去做。
-            let base = if leading {
-                ToolRegistry::read_only()
-            } else {
-                shared.tools()
-            };
-            let base = match &share {
-                Some(name) => crate::shares::tools(&shared.shares, name, &base),
-                None => base,
-            };
-            let mut tools = if leading {
-                base
-            } else {
-                crate::serial::one_writer_at_a_time(base, link.clone())
-            };
-            if let Some(tool) = skills.tool {
-                tools.register(tool);
+            if share.is_none() && !leading {
+                if let Some(store) = shared.checkpoints.lock().unwrap().clone() {
+                    ctx.checkpoint = Some(store.begin_turn(
+                        room_id.to_string(),
+                        draft.id.to_string(),
+                        bot.name.clone(),
+                        sa_engine::now_ms(),
+                    ));
+                }
             }
-            // 持久记忆工具（仅在本地非外链房间且启用记忆目录时提供）。
-            if let Some(store) = memory_store {
-                let bid = bot.id.to_string();
-                tools.register(sa_tools::MemoryListTool {
-                    store: store.clone(),
-                    bot_id: bid.clone(),
-                });
-                tools.register(sa_tools::MemoryReadTool {
-                    store: store.clone(),
-                    bot_id: bid.clone(),
-                });
-                tools.register(sa_tools::MemoryWriteTool {
-                    store,
-                    bot_id: bid,
-                    require_approval: false,
-                });
-            }
-            // 本地工作目录：支持后台命令（按房间隔离）、独立任务以及只读探索子代理（避免大型目录排查打爆主对话上下文和步数上限）。
-            if share.is_none() {
-                if !leading {
-                    let scope = room_id.to_string();
-                    tools.register(sa_tools::BgShellStartTool {
-                        manager: shared.bg_shell.clone(),
-                        scope: scope.clone(),
+
+            let build_exec_tools = |skill_tool: Option<sa_tools::SkillTool>| {
+                // 别的 Bot 可能同时在这个工作目录里干活（包括这一轮中途才进房间的）：改文件、执行命令一个一个来。
+                // 主 Agent 只看不动手：改文件、执行命令都派给成员。
+                // 用的是共享目录：文件工具交给那台电脑去做。
+                let base = if leading {
+                    ToolRegistry::read_only()
+                } else {
+                    shared.tools()
+                };
+                let base = match &share {
+                    Some(name) => crate::shares::tools(&shared.shares, name, &base),
+                    None => base,
+                };
+                let mut tools = if leading {
+                    base
+                } else {
+                    crate::serial::one_writer_at_a_time(base, link.clone())
+                };
+                if let Some(tool) = skill_tool {
+                    tools.register(tool);
+                }
+                // 持久记忆工具（仅在本地非外链房间且启用记忆目录时提供）。
+                if let Some(store) = memory_store.clone() {
+                    let bid = bot.id.to_string();
+                    tools.register(sa_tools::MemoryListTool {
+                        store: store.clone(),
+                        bot_id: bid.clone(),
                     });
-                    tools.register(sa_tools::BgShellOutputTool {
-                        manager: shared.bg_shell.clone(),
-                        scope: scope.clone(),
+                    tools.register(sa_tools::MemoryReadTool {
+                        store: store.clone(),
+                        bot_id: bid.clone(),
                     });
-                    tools.register(sa_tools::BgShellKillTool {
-                        manager: shared.bg_shell.clone(),
-                        scope,
+                    tools.register(sa_tools::MemoryWriteTool {
+                        store,
+                        bot_id: bid,
+                        require_approval: false,
                     });
                 }
-                tools.register(AgentTool {
-                    shared: shared.clone(),
-                    room_id: room_id.clone(),
-                    bot_id: bot.id.clone(),
-                    session_id: session_id.clone(),
-                    task_id: None,
-                    pulse: None,
-                });
-                tools.register(CreateTaskTool {
+                // 本地工作目录：支持后台命令（按房间隔离）、独立任务以及只读探索子代理（避免大型目录排查打爆主对话上下文和步数上限）。
+                if share.is_none() {
+                    if !leading {
+                        let scope = room_id.to_string();
+                        tools.register(sa_tools::BgShellStartTool {
+                            manager: shared.bg_shell.clone(),
+                            scope: scope.clone(),
+                        });
+                        tools.register(sa_tools::BgShellOutputTool {
+                            manager: shared.bg_shell.clone(),
+                            scope: scope.clone(),
+                        });
+                        tools.register(sa_tools::BgShellKillTool {
+                            manager: shared.bg_shell.clone(),
+                            scope,
+                        });
+                    }
+                    tools.register(AgentTool {
+                        shared: shared.clone(),
+                        room_id: room_id.clone(),
+                        bot_id: bot.id.clone(),
+                        session_id: session_id.clone(),
+                        task_id: None,
+                        pulse: None,
+                    });
+                    tools.register(CreateTaskTool {
+                        shared: shared.clone(),
+                        room_id: room_id.clone(),
+                        from: bot.clone(),
+                    });
+                }
+                // 主控与内置 Bot 均可自主创建/调整子 Bot、组建多 Bot 协作房间，并随时用 ask_bot 派活（即使刚新建子 Bot 也能同轮立刻派活）。
+                tools.register(CreateBotTool {
                     shared: shared.clone(),
                     room_id: room_id.clone(),
                     from: bot.clone(),
                 });
-            }
-            // 主控与内置 Bot 均可自主创建/调整子 Bot、组建多 Bot 协作房间，并随时用 ask_bot 派活（即使刚新建子 Bot 也能同轮立刻派活）。
-            tools.register(CreateBotTool {
-                shared: shared.clone(),
-                room_id: room_id.clone(),
-                from: bot.clone(),
-            });
-            tools.register(UpdateBotTool {
-                shared: shared.clone(),
-            });
-            tools.register(CreateRoomTool {
-                shared: shared.clone(),
-                from: bot.clone(),
-            });
-            tools.register(AskBotTool {
-                shared: shared.clone(),
-                link: link.clone(),
-                room_id: room_id.clone(),
-                from: bot.clone(),
-                hop: live_hop,
-                blind: job.blind,
-                said_in: draft.id.clone(),
-            });
+                tools.register(UpdateBotTool {
+                    shared: shared.clone(),
+                });
+                tools.register(CreateRoomTool {
+                    shared: shared.clone(),
+                    from: bot.clone(),
+                });
+                tools.register(AskBotTool {
+                    shared: shared.clone(),
+                    link: link.clone(),
+                    room_id: room_id.clone(),
+                    from: bot.clone(),
+                    hop: live_hop.clone(),
+                    blind: job.blind,
+                    said_in: draft.id.clone(),
+                });
+                tools
+            };
+
             let provider = crate::budget::guard(shared, model.provider.clone(), None);
-            // 页面上「上下文 N%」要和内核判断压缩时一样，把每次都要带的这部分也算上。
-            shared.context.note_fixed(
-                &session_id,
-                sa_kernel::fixed_context(&config.system_prompt, &tools),
-            );
-            let outcome = run_turn(
-                transcript,
-                provider.as_ref(),
-                &tools,
-                &ctx,
-                &config,
-                &mut inbox,
-                &observer,
-                &cancel,
-            )
-            .await;
-            Ok(outcome.end)
+            if planning {
+                let approved_plan = Arc::new(Mutex::new(None));
+                let mut plan_tools = match &share {
+                    Some(name) => {
+                        crate::shares::tools(&shared.shares, name, &ToolRegistry::read_only())
+                    }
+                    None => ToolRegistry::read_only(),
+                };
+                plan_tools.register(sa_tools::TodoTool);
+                if let Some(tool) = skills.tool.clone() {
+                    plan_tools.register(tool);
+                }
+                if let Some(store) = memory_store.clone() {
+                    let bid = bot.id.to_string();
+                    plan_tools.register(sa_tools::MemoryListTool {
+                        store: store.clone(),
+                        bot_id: bid.clone(),
+                    });
+                    plan_tools.register(sa_tools::MemoryReadTool { store, bot_id: bid });
+                }
+                if share.is_none() {
+                    plan_tools.register(AgentTool {
+                        shared: shared.clone(),
+                        room_id: room_id.clone(),
+                        bot_id: bot.id.clone(),
+                        session_id: session_id.clone(),
+                        task_id: None,
+                        pulse: None,
+                    });
+                }
+                plan_tools.register(crate::plan::SubmitPlanTool {
+                    shared: shared.clone(),
+                    room_id: room_id.clone(),
+                    approved: approved_plan.clone(),
+                });
+                plan_tools.register(AskBotTool {
+                    shared: shared.clone(),
+                    link: link.clone(),
+                    room_id: room_id.clone(),
+                    from: bot.clone(),
+                    hop: live_hop.clone(),
+                    blind: job.blind,
+                    said_in: draft.id.clone(),
+                });
+                shared.context.note_fixed(
+                    &session_id,
+                    sa_kernel::fixed_context(&config.system_prompt, &plan_tools),
+                );
+                let plan_outcome = run_turn(
+                    transcript,
+                    provider.as_ref(),
+                    &plan_tools,
+                    &ctx,
+                    &config,
+                    &mut inbox,
+                    &observer,
+                    &cancel,
+                )
+                .await;
+                // 用户点「允许」批准方案后，房间已自动退出规划模式：紧接着在同一轮内无缝解锁完整工具开始实施。
+                if plan_outcome.end == TurnEnd::Completed {
+                    let approved = approved_plan.lock().unwrap().take();
+                    if let Some(plan_text) = approved {
+                        config.system_prompt = base_system_prompt;
+                        let exec_tools = build_exec_tools(skills.tool);
+                        shared.context.note_fixed(
+                            &session_id,
+                            sa_kernel::fixed_context(&config.system_prompt, &exec_tools),
+                        );
+                        let mut exec_inbox = Primed {
+                            first: Some(vec![UserInput {
+                                content: format!(
+                                    "[方案已批准] 房间已切换为执行模式，请严格按照刚才批准的方案立即开始实施并验证：\n{plan_text}"
+                                ),
+                                message_id: None,
+                                message_seq: None,
+                            }]),
+                            rest: inbox.rest,
+                        };
+                        let exec_outcome = run_turn(
+                            transcript,
+                            provider.as_ref(),
+                            &exec_tools,
+                            &ctx,
+                            &config,
+                            &mut exec_inbox,
+                            &observer,
+                            &cancel,
+                        )
+                        .await;
+                        inbox.rest = exec_inbox.rest;
+                        Ok(exec_outcome.end)
+                    } else {
+                        Ok(plan_outcome.end)
+                    }
+                } else {
+                    Ok(plan_outcome.end)
+                }
+            } else {
+                let tools = build_exec_tools(skills.tool);
+                // 页面上「上下文 N%」要和内核判断压缩时一样，把每次都要带的这部分也算上。
+                shared.context.note_fixed(
+                    &session_id,
+                    sa_kernel::fixed_context(&config.system_prompt, &tools),
+                );
+                let outcome = run_turn(
+                    transcript,
+                    provider.as_ref(),
+                    &tools,
+                    &ctx,
+                    &config,
+                    &mut inbox,
+                    &observer,
+                    &cancel,
+                )
+                .await;
+                Ok(outcome.end)
+            }
         }
     };
     // 内置 Bot 与 harness 共用收尾：把任何还停在 Running / Waiting 的步骤落盘收口。
@@ -1264,16 +1387,16 @@ async fn harness_turn(
     }
     let summary = format!("{}：{}", bot.name, said.last().map_or("", |s| s.as_str()));
     let summary: String = summary.chars().take(72).collect();
-    // 读房间权限档位（连了外部 GitHub/Telegram 的房间照旧按 Ask 处理，避免外人触发免审批执行）。
+    // 读房间权限档位（连了外部 GitHub/Telegram 的房间照旧禁止 Full，避免外人触发免审批执行；保留 Plan 只读模式）。
     let engine = shared.engine.clone();
     let r = room_id.clone();
     let permission = db(move || {
-        let full = engine.get_room(&r)?.permission == PermissionMode::Full
-            && !engine.list_links()?.iter().any(|link| link.room_id == r);
-        Ok(if full {
-            PermissionMode::Full
-        } else {
-            PermissionMode::Ask
+        let mode = engine.get_room(&r)?.permission;
+        let linked = engine.list_links()?.iter().any(|link| link.room_id == r);
+        Ok(match mode {
+            PermissionMode::Full if !linked => PermissionMode::Full,
+            PermissionMode::Plan => PermissionMode::Plan,
+            _ => PermissionMode::Ask,
         })
     })
     .await

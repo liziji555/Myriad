@@ -4,8 +4,8 @@ use crate::room::db;
 use crate::{share_desk, workdir, Orchestrator, OrchestratorError, Shared};
 use sa_engine::{Desk, Workdir};
 use sa_protocol::{
-    BotId, DeskDiff, HarnessDesk, HarnessProbe, RoomId, SessionId, TaskId, WorkspaceEntry,
-    WorkspaceFile,
+    BotId, CheckpointInfo, DeskDiff, HarnessDesk, HarnessProbe, RewindReport, RoomId, SessionId,
+    TaskId, WorkspaceEntry, WorkspaceFile,
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -136,6 +136,78 @@ impl Orchestrator {
     /// 探测本机已安装的外部 Agent CLI（claude / codex / opencode / gemini / kimi / cursor-agent）。
     pub async fn probe_harnesses(&self) -> Vec<HarnessProbe> {
         crate::harness::probe_harnesses(self.shared.settings.fence.root()).await
+    }
+
+    /// 列出房间中内置 Bot 产生的文件检查点（最新在前）。
+    pub async fn list_checkpoints(
+        &self,
+        room: &RoomId,
+    ) -> Result<Vec<CheckpointInfo>, OrchestratorError> {
+        let (engine, r) = (self.shared.engine.clone(), room.clone());
+        db(move || engine.get_room(&r)).await?;
+        let Some(store) = self.shared.checkpoints.lock().unwrap().clone() else {
+            return Ok(vec![]);
+        };
+        let room_key = room.to_string();
+        let fence = self.shared.settings.fence.clone();
+        let records = tokio::task::spawn_blocking(move || store.list(&room_key, &fence))
+            .await
+            .map_err(|e| OrchestratorError::Internal(e.to_string()))?;
+        Ok(records
+            .into_iter()
+            .map(|r| CheckpointInfo {
+                id: r.id,
+                bot_name: r.bot_name,
+                created_at: r.created_at,
+                files: r.files.into_iter().map(|f| f.path).collect(),
+            })
+            .collect())
+    }
+
+    /// 将指定检查点所改动的全部文件恢复到该轮对话之前的快照状态。
+    pub async fn rewind_checkpoint(
+        &self,
+        room: &RoomId,
+        checkpoint_id: &str,
+        force: bool,
+    ) -> Result<RewindReport, OrchestratorError> {
+        if self.shared.shutdown.is_cancelled() {
+            return Err(OrchestratorError::ShuttingDown);
+        }
+        let (engine, r) = (self.shared.engine.clone(), room.clone());
+        let room_meta = db(move || engine.get_room(&r)).await?;
+        if room_meta.share.is_some() {
+            return Err(OrchestratorError::Conflict(
+                "共享目录房间暂不支持本地检查点回滚".into(),
+            ));
+        }
+        let Some(store) = self.shared.checkpoints.lock().unwrap().clone() else {
+            return Err(OrchestratorError::Conflict("检查点功能未启用".into()));
+        };
+        // 与任务/工位验收共用同一把写入锁，避免并发合并与回滚互相踩踏。
+        let _one_at_a_time = self.shared.works.accepting.lock().await;
+        let room_key = room.to_string();
+        let cp_id = checkpoint_id.to_string();
+        let fence = self.shared.settings.fence.clone();
+        let outcome =
+            tokio::task::spawn_blocking(move || store.rewind(&room_key, &cp_id, &fence, force))
+                .await
+                .map_err(|e| OrchestratorError::Internal(e.to_string()))?
+                .map_err(OrchestratorError::Conflict)?;
+        let summary = format!(
+            "回滚检查点 {}（恢复 {} 个、删除 {} 个新建文件）",
+            outcome.checkpoint_id,
+            outcome.restored.len(),
+            outcome.removed.len()
+        );
+        self.shared
+            .engine
+            .audit(sa_engine::Audit::user("checkpoint.rewound", summary).room(room));
+        Ok(RewindReport {
+            checkpoint_id: outcome.checkpoint_id,
+            restored: outcome.restored,
+            removed: outcome.removed,
+        })
     }
 
     /// 房间里开着独立目录的 harness 工位。

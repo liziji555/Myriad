@@ -84,6 +84,12 @@ impl Orchestrator {
         *self.shared.memory.lock().unwrap() = Some(Arc::new(sa_tools::MemoryStore::new(dir)));
     }
 
+    /// 启用轮次级文件检查点（`checkpoints/`），自动快照内置 Bot 修改前的文件内容并支持安全回滚。
+    pub fn use_checkpoints(&self, dir: PathBuf) {
+        *self.shared.checkpoints.lock().unwrap() =
+            Some(Arc::new(sa_tools::CheckpointStore::new(dir)));
+    }
+
     /// 启用生命周期钩子（`PreToolUse` / `PostToolUse` / `Stop`）。
     pub fn use_hooks(&self, rules: Vec<sa_tools::HookRule>) {
         if rules.is_empty() {

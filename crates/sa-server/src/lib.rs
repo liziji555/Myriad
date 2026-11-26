@@ -148,6 +148,14 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/rooms/{room_id}/files", get(routes::list_files))
         .route("/rooms/{room_id}/files/content", get(routes::read_file))
+        .route(
+            "/rooms/{room_id}/checkpoints",
+            get(routes::list_checkpoints),
+        )
+        .route(
+            "/rooms/{room_id}/checkpoints/{checkpoint_id}/rewind",
+            post(routes::rewind_checkpoint),
+        )
         .route("/harnesses", get(routes::list_harnesses))
         .route("/rooms/{room_id}/rules", get(routes::list_rules))
         .route("/rules/{rule_id}", delete(routes::delete_rule))

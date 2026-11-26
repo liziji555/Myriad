@@ -109,6 +109,8 @@ impl Tool for MultiEditTool {
         let (path, _) = ctx.fence.resolve_for_write(&input.path)?;
         let shown = input.path.trim().to_string();
         let cancel = ctx.cancel.clone();
+        let fence = ctx.fence.clone();
+        let checkpoint = ctx.checkpoint.clone();
         blocking(move || {
             let _lock = file_lock();
             let io_error = |e: std::io::Error| match e.kind() {
@@ -125,9 +127,10 @@ impl Tool for MultiEditTool {
                 return Err(ToolError(format!("{shown} 超过 20 MB，太大了改不了。")));
             }
             let bytes = std::fs::read(&path).map_err(io_error)?;
-            let Ok(mut current) = String::from_utf8(bytes) else {
+            let Ok(original) = String::from_utf8(bytes) else {
                 return Err(ToolError(format!("{shown} 不是 UTF-8 文本文件，改不了。")));
             };
+            let mut current = original.clone();
             let before_lines = current.lines().count();
             let mut total_replacements = 0usize;
             for (idx, op) in input.edits.iter().enumerate() {
@@ -151,6 +154,14 @@ impl Tool for MultiEditTool {
             }
             let after_lines = current.lines().count();
             write_atomically(&path, current.as_bytes()).map_err(io_error)?;
+            if let Some(cp) = checkpoint {
+                cp.record_write(
+                    &fence,
+                    &path,
+                    crate::checkpoint::BeforeState::Bytes(original.as_bytes()),
+                    current.as_bytes(),
+                );
+            }
             Ok(format!(
                 "已批量修改 {shown}（{} 组编辑、共替换 {total_replacements} 处，行数 {before_lines} → {after_lines}）。",
                 input.edits.len()

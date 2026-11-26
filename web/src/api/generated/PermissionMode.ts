@@ -3,4 +3,4 @@
 /**
  * 房间里的 Bot 要做需要批准的事时怎么办。
  */
-export type PermissionMode = "ask" | "full";
+export type PermissionMode = "ask" | "full" | "plan";
