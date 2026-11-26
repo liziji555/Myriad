@@ -79,6 +79,34 @@ impl Orchestrator {
         *self.shared.skills_dir.lock().unwrap() = Some(dir);
     }
 
+    /// 跨会话持久记忆目录（`memory/`）。启用后自动为每个 Bot 注入记忆索引并注册记忆工具。
+    pub fn use_memory(&self, dir: PathBuf) {
+        *self.shared.memory.lock().unwrap() = Some(Arc::new(sa_tools::MemoryStore::new(dir)));
+    }
+
+    /// 启用生命周期钩子（`PreToolUse` / `PostToolUse` / `Stop`）。
+    pub fn use_hooks(&self, rules: Vec<sa_tools::HookRule>) {
+        if rules.is_empty() {
+            *self.shared.hooks.lock().unwrap() = None;
+        } else {
+            let workdir = self.shared.settings.fence.root().to_path_buf();
+            *self.shared.hooks.lock().unwrap() =
+                Some(Arc::new(sa_tools::HookRunner::new(rules, workdir)));
+        }
+    }
+
+    /// 设置回复因 `MaxTokens` 截断时的自动续写次数上限。
+    pub fn use_truncated_recoveries(&self, count: usize) {
+        self.shared
+            .max_truncated_recoveries
+            .store(count, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// 记录当前配置的 MCP 服务规格（透传注入到 Claude Code / Codex / ACP 等外部 CLI Harness）。
+    pub fn set_mcp_specs(&self, specs: Vec<McpSpec>) {
+        *self.shared.mcp_specs.lock().unwrap() = specs;
+    }
+
     /// 给每个 Bot 多加一个工具。已经有同名的就不加，返回 `false`。
     pub fn add_tool(&self, tool: impl Tool + 'static) -> bool {
         let mut tools = self.shared.tools.write().unwrap();
@@ -141,6 +169,7 @@ impl Orchestrator {
 
     /// 在后台把配置里的 MCP 服务都连上。马上返回；哪个没连上只记下原因，不耽误别的。
     pub fn start_mcp(self: &Arc<Self>, specs: Vec<McpSpec>) {
+        self.set_mcp_specs(specs.clone());
         for spec in specs {
             let this = self.clone();
             tokio::spawn(async move {

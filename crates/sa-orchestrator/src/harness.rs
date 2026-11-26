@@ -7,11 +7,13 @@
 use sa_kernel::{ApprovalRequest, Observer, StepEnd, TurnEnd};
 use sa_llm::Usage;
 use sa_protocol::{Harness, HarnessProbe, PermissionMode};
+use sa_tools::mcp::McpSpec;
 use sa_tools::process::Tree;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
@@ -37,6 +39,21 @@ pub(crate) struct Launch<'a> {
     pub session: Option<&'a str>,
     /// 房间的权限档位：完全权限时透传给支持的 CLI（跳过二次审批）。
     pub permission: PermissionMode,
+    /// Myriad 已配置的 MCP 服务：按各 CLI 支持的格式自动注入（Claude `--mcp-config`、Codex `-c`、ACP `mcpServers`）。
+    pub mcp_servers: &'a [McpSpec],
+}
+
+static TEMP_MCP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// 临时文件守卫：单轮 CLI 执行结束后自动清理临时 `--mcp-config` JSON 文件。
+struct TempFileGuard(Option<PathBuf>);
+
+impl Drop for TempFileGuard {
+    fn drop(&mut self) {
+        if let Some(path) = self.0.take() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
 }
 
 pub(crate) struct Finished {
@@ -221,8 +238,8 @@ fn build_command(program: &Path, args: &[String]) -> Command {
     cmd
 }
 
-/// 这种 harness 用哪个程序、哪些参数，提示词从哪给。
-fn plan(launch: &Launch<'_>) -> Result<(PathBuf, Vec<String>, bool), String> {
+/// 这种 harness 用哪个程序、哪些参数，提示词从哪给，以及需要随本轮结束清理的临时配置文件。
+fn plan(launch: &Launch<'_>) -> Result<(PathBuf, Vec<String>, bool, TempFileGuard), String> {
     let mut words = split_command(launch.command);
     if words.is_empty() {
         match launch.harness.default_program() {
@@ -240,6 +257,7 @@ fn plan(launch: &Launch<'_>) -> Result<(PathBuf, Vec<String>, bool), String> {
     let full = launch.permission == PermissionMode::Full;
     let mut args = vec![];
     let mut stdin = true;
+    let mut temp_file = TempFileGuard(None);
     match launch.harness {
         Harness::ClaudeCode => {
             args.extend(extra.iter().cloned());
@@ -258,6 +276,12 @@ fn plan(launch: &Launch<'_>) -> Result<(PathBuf, Vec<String>, bool), String> {
                     args.push("--dangerously-skip-permissions".into());
                 } else {
                     args.extend(["--permission-mode", "acceptEdits"].map(String::from));
+                }
+            }
+            if !launch.mcp_servers.is_empty() && !has("--mcp-config") {
+                if let Some(path) = write_claude_mcp_config(launch.mcp_servers) {
+                    args.extend(["--mcp-config".to_string(), path.display().to_string()]);
+                    temp_file = TempFileGuard(Some(path));
                 }
             }
             if let Some(session) = launch.session {
@@ -291,6 +315,14 @@ fn plan(launch: &Launch<'_>) -> Result<(PathBuf, Vec<String>, bool), String> {
                         ]
                         .map(String::from),
                     );
+                }
+            }
+            for spec in launch.mcp_servers {
+                if let Some(overrides) = codex_mcp_overrides(spec) {
+                    for kv in overrides {
+                        args.push("-c".into());
+                        args.push(kv);
+                    }
                 }
             }
             args.extend(extra.iter().cloned());
@@ -341,7 +373,125 @@ fn plan(launch: &Launch<'_>) -> Result<(PathBuf, Vec<String>, bool), String> {
             launch.harness.label()
         )
     })?;
-    Ok((resolved, args, stdin))
+    Ok((resolved, args, stdin, temp_file))
+}
+
+fn write_claude_mcp_config(specs: &[McpSpec]) -> Option<PathBuf> {
+    let mut servers = serde_json::Map::new();
+    for spec in specs {
+        let entry = if let Some(url) = &spec.url {
+            let headers: serde_json::Map<String, Value> = spec
+                .headers
+                .iter()
+                .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+                .collect();
+            let mut obj = serde_json::Map::new();
+            obj.insert("type".into(), Value::String("http".into()));
+            obj.insert("url".into(), Value::String(url.clone()));
+            if !headers.is_empty() {
+                obj.insert("headers".into(), Value::Object(headers));
+            }
+            Value::Object(obj)
+        } else if !spec.command.trim().is_empty() {
+            let env: serde_json::Map<String, Value> = spec
+                .env
+                .iter()
+                .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+                .collect();
+            let mut obj = serde_json::Map::new();
+            obj.insert("command".into(), Value::String(spec.command.clone()));
+            obj.insert("args".into(), json!(spec.args));
+            if !env.is_empty() {
+                obj.insert("env".into(), Value::Object(env));
+            }
+            Value::Object(obj)
+        } else {
+            continue;
+        };
+        servers.insert(spec.name.clone(), entry);
+    }
+    if servers.is_empty() {
+        return None;
+    }
+    let payload = json!({ "mcpServers": servers });
+    let seq = TEMP_MCP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!("myriad-mcp-{}-{seq}.json", std::process::id()));
+    let bytes = serde_json::to_vec(&payload).ok()?;
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .open(&path)
+            .ok()?;
+        file.write_all(&bytes).ok()?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(&path, &bytes).ok()?;
+    }
+    Some(path)
+}
+
+fn codex_mcp_overrides(spec: &McpSpec) -> Option<Vec<String>> {
+    if spec.name.is_empty()
+        || !spec
+            .name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+    {
+        return None;
+    }
+    let mut out = Vec::new();
+    if let Some(url) = &spec.url {
+        let encoded = serde_json::to_string(url).ok()?;
+        out.push(format!("mcp_servers.{}.url={encoded}", spec.name));
+    } else if !spec.command.trim().is_empty() {
+        let cmd = serde_json::to_string(&spec.command).ok()?;
+        out.push(format!("mcp_servers.{}.command={cmd}", spec.name));
+        if !spec.args.is_empty() {
+            let args = serde_json::to_string(&spec.args).ok()?;
+            out.push(format!("mcp_servers.{}.args={args}", spec.name));
+        }
+    } else {
+        return None;
+    }
+    Some(out)
+}
+
+fn acp_mcp_servers(specs: &[McpSpec]) -> Vec<Value> {
+    let mut out = Vec::new();
+    for spec in specs {
+        if let Some(url) = &spec.url {
+            let headers: Vec<Value> = spec
+                .headers
+                .iter()
+                .map(|(k, v)| json!({ "name": k, "value": v }))
+                .collect();
+            out.push(json!({
+                "type": "http",
+                "name": spec.name,
+                "url": url,
+                "headers": headers,
+            }));
+        } else if !spec.command.trim().is_empty() {
+            let env: Vec<Value> = spec
+                .env
+                .iter()
+                .map(|(k, v)| json!({ "name": k, "value": v }))
+                .collect();
+            out.push(json!({
+                "name": spec.name,
+                "command": spec.command,
+                "args": spec.args,
+                "env": env,
+            }));
+        }
+    }
+    out
 }
 
 /// 探测本机常见的 Agent CLI 是否已安装以及版本号。
@@ -500,7 +650,7 @@ pub(crate) async fn run(
         text: String::new(),
         reasoning: None,
     };
-    let (program, args, use_stdin) = match plan(launch) {
+    let (program, args, use_stdin, _temp_file) = match plan(launch) {
         Ok(plan) => plan,
         Err(reason) => return failed(reason, session),
     };
@@ -778,7 +928,7 @@ async fn run_acp(
         text: String::new(),
         reasoning: None,
     };
-    let (program, args, _) = match plan(launch) {
+    let (program, args, _, _temp_file) = match plan(launch) {
         Ok(plan) => plan,
         Err(reason) => return failed(reason, session),
     };
@@ -826,8 +976,11 @@ async fn run_acp(
     let mut reasoning = String::new();
     let mut open: HashMap<String, (String, String)> = HashMap::new();
     let mut stage = 1u8; // 1 = wait init, 2 = wait session, 3 = wait prompt
+    let mut tried_load = false;
+    let mut perm_seq = 0u64;
     let mut failure: Option<String> = None;
     let cwd = launch.dir.display().to_string();
+    let acp_mcps = acp_mcp_servers(launch.mcp_servers);
 
     let stopped = loop {
         let line = tokio::select! {
@@ -849,10 +1002,26 @@ async fn run_acp(
             continue;
         };
 
-        // 响应我方发出的请求（id = 1 / 2 / 3）。
+        // 响应我方发出的请求（id = 1 / 2 / 20 / 3）。
         if msg.get("method").is_none() {
             let id = msg["id"].as_u64();
             if let Some(err) = msg.get("error").filter(|v| !v.is_null()) {
+                // `session/load` 不被支持或旧会话已过期时，自动回退到 `session/new` 新建会话。
+                if id == Some(2) && stage == 2 && tried_load {
+                    tried_load = false;
+                    session = None;
+                    let fallback = json!({
+                        "jsonrpc": "2.0",
+                        "id": 20,
+                        "method": "session/new",
+                        "params": { "cwd": cwd, "mcpServers": acp_mcps }
+                    });
+                    if let Err(error) = send_acp(&mut stdin, &fallback).await {
+                        failure = Some(format!("ACP 创建新会话失败：{error}"));
+                        break false;
+                    }
+                    continue;
+                }
                 let reason = str_of(err, "message");
                 failure = Some(if reason.is_empty() {
                     format!("ACP Agent 报错：{err}")
@@ -864,24 +1033,27 @@ async fn run_acp(
             if id == Some(1) && stage == 1 {
                 stage = 2;
                 let req = match &session {
-                    Some(sid) => json!({
-                        "jsonrpc": "2.0",
-                        "id": 2,
-                        "method": "session/load",
-                        "params": { "sessionId": sid, "cwd": cwd, "mcpServers": [] }
-                    }),
+                    Some(sid) => {
+                        tried_load = true;
+                        json!({
+                            "jsonrpc": "2.0",
+                            "id": 2,
+                            "method": "session/load",
+                            "params": { "sessionId": sid, "cwd": cwd, "mcpServers": acp_mcps }
+                        })
+                    }
                     None => json!({
                         "jsonrpc": "2.0",
                         "id": 2,
                         "method": "session/new",
-                        "params": { "cwd": cwd, "mcpServers": [] }
+                        "params": { "cwd": cwd, "mcpServers": acp_mcps }
                     }),
                 };
                 if let Err(error) = send_acp(&mut stdin, &req).await {
                     failure = Some(format!("ACP 创建会话失败：{error}"));
                     break false;
                 }
-            } else if id == Some(2) && stage == 2 {
+            } else if matches!(id, Some(2) | Some(20)) && stage == 2 {
                 if let Some(sid) = msg["result"]["sessionId"]
                     .as_str()
                     .filter(|s| !s.is_empty())
@@ -1011,17 +1183,48 @@ async fn run_acp(
                         "" => "ACP Agent 请求执行操作",
                         t => t,
                     };
+                    // 绑定到已打开的 `acp-{toolCallId}` 步骤，若尚未建步骤则先登记临时审批步骤，
+                    // 确保前端界面能真实渲染出审批卡，而不是找不到步骤导致干等超时。
+                    let raw_call_id = str_of(&params["toolCall"], "toolCallId");
+                    let existing_key =
+                        (!raw_call_id.is_empty()).then(|| format!("acp-{raw_call_id}"));
+                    let (step_key, created_temp) = match existing_key {
+                        Some(key) if open.contains_key(&key) => (key, false),
+                        _ => {
+                            perm_seq += 1;
+                            let key = format!("acp-perm-{perm_seq}");
+                            observer
+                                .tool_started(
+                                    &key,
+                                    "harness",
+                                    title,
+                                    &params["toolCall"].to_string(),
+                                )
+                                .await;
+                            (key, true)
+                        }
+                    };
                     let req = ApprovalRequest {
-                        call_id: "acp-perm",
+                        call_id: &step_key,
                         tool: "harness",
                         title,
                         reason: "ACP Agent 请求你批准这一步操作。",
                         input: &params["toolCall"],
                     };
-                    tokio::select! {
+                    let ok = tokio::select! {
                         ok = observer.request_approval(req) => ok,
                         _ = cancel.cancelled() => false,
+                    };
+                    if created_temp {
+                        observer
+                            .tool_finished(
+                                &step_key,
+                                if ok { StepEnd::Ok } else { StepEnd::Stopped },
+                                if ok { "已批准" } else { "已拒绝" },
+                            )
+                            .await;
                     }
+                    ok
                 };
                 let outcome = match (approved, allow_id, deny_id) {
                     (true, Some(id), _) => json!({ "outcome": "selected", "optionId": id }),
@@ -1038,6 +1241,22 @@ async fn run_acp(
             _ => {}
         }
     };
+
+    // 取消时先按 ACP 协议发 `session/cancel` 通知，让外部 Agent 有机会体面收尾再结束进程树。
+    if stopped {
+        if let Some(sid) = session.as_deref() {
+            let cancel_note = json!({
+                "jsonrpc": "2.0",
+                "method": "session/cancel",
+                "params": { "sessionId": sid }
+            });
+            let _ = tokio::time::timeout(
+                Duration::from_millis(300),
+                send_acp(&mut stdin, &cancel_note),
+            )
+            .await;
+        }
+    }
 
     drop(stdin);
     child.kill();
@@ -1640,8 +1859,9 @@ mod tests {
             prompt: "hi",
             session: Some("thr_123"),
             permission: PermissionMode::Full,
+            mcp_servers: &[],
         };
-        let (_, args, stdin) = plan(&launch).unwrap();
+        let (_, args, stdin, _guard) = plan(&launch).unwrap();
         assert!(stdin);
         assert_eq!(args[0], "exec");
         assert_eq!(args[1], "resume");
@@ -1652,10 +1872,16 @@ mod tests {
     }
 
     #[test]
-    fn claude_full_permission_passes_skip_permissions() {
+    fn claude_full_permission_passes_skip_permissions_and_mcp_config() {
         let desk = tempfile::tempdir().unwrap();
         let fake = desk.path().join("claude-bin");
         std::fs::write(&fake, "").unwrap();
+        let specs = vec![McpSpec {
+            name: "wiki".into(),
+            url: Some("https://wiki.example.com/mcp".into()),
+            headers: vec![("Authorization".into(), "Bearer tok".into())],
+            ..Default::default()
+        }];
         let launch = Launch {
             harness: Harness::ClaudeCode,
             command: &fake.display().to_string(),
@@ -1663,10 +1889,21 @@ mod tests {
             prompt: "hi",
             session: None,
             permission: PermissionMode::Full,
+            mcp_servers: &specs,
         };
-        let (_, args, _) = plan(&launch).unwrap();
+        let (_, args, _, guard) = plan(&launch).unwrap();
         assert!(args.contains(&"--dangerously-skip-permissions".to_string()));
         assert!(args.contains(&"--include-partial-messages".to_string()));
+        let idx = args.iter().position(|a| a == "--mcp-config").unwrap();
+        let cfg_path = PathBuf::from(&args[idx + 1]);
+        let content = std::fs::read_to_string(&cfg_path).unwrap();
+        assert!(content.contains("wiki.example.com/mcp"), "{content}");
+        drop(guard);
+        assert!(!cfg_path.exists());
+
+        let acp_list = acp_mcp_servers(&specs);
+        assert_eq!(acp_list.len(), 1);
+        assert_eq!(acp_list[0]["name"], "wiki");
     }
 
     #[test]
@@ -1803,6 +2040,7 @@ mod tests {
             prompt: "hi",
             session: None,
             permission: PermissionMode::Ask,
+            mcp_servers: &[],
         };
         let done = run(&launch, &Null, &CancellationToken::new()).await;
         assert!(matches!(done.end, TurnEnd::Failed(msg) if msg.contains("找不到")));
@@ -1814,6 +2052,7 @@ mod tests {
             prompt: "hi",
             session: None,
             permission: PermissionMode::Ask,
+            mcp_servers: &[],
         };
         let done = run(&codex, &Null, &CancellationToken::new()).await;
         assert!(matches!(done.end, TurnEnd::Failed(msg) if msg.contains("Codex")));

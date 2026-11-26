@@ -3,12 +3,16 @@
 //! 文件类工具只能看工作目录里面的东西，见 [`fence`]。
 //! 技能（写在文件里的做事套路）见 [`skills`]，外部 MCP 服务提供的工具见 [`mcp`]。
 
+pub mod bg_shell;
 mod edit;
 mod fence;
 mod glob;
 mod grep;
+pub mod hooks;
 mod list_dir;
 pub mod mcp;
+pub mod memory;
+mod multi_edit;
 pub mod process;
 mod read;
 mod shell;
@@ -18,11 +22,15 @@ mod walk;
 mod web_fetch;
 mod write;
 
+pub use bg_shell::{BgShellKillTool, BgShellManager, BgShellOutputTool, BgShellStartTool};
 pub use edit::EditTool;
 pub use fence::Fence;
 pub use glob::GlobTool;
 pub use grep::GrepTool;
+pub use hooks::{HookEvent, HookOutcome, HookRule, HookRunner};
 pub use list_dir::ListDirTool;
+pub use memory::{MemoryListTool, MemoryReadTool, MemoryStore, MemoryWriteTool};
+pub use multi_edit::MultiEditTool;
 pub use read::ReadTool;
 pub use shell::{
     description as shell_description, hidden_env, hide_env_from_commands, local_shell, ShellTool,
@@ -147,11 +155,12 @@ impl ToolRegistry {
         registry
     }
 
-    /// 只读工具加上写文件、改文件、执行命令、待办清单。
+    /// 只读工具加上写文件、改文件、批量改文件、执行命令、待办清单。
     pub fn standard() -> Self {
         let mut registry = Self::read_only();
         registry.register(WriteTool);
         registry.register(EditTool);
+        registry.register(MultiEditTool);
         registry.register(ShellTool);
         registry.register(TodoTool);
         registry

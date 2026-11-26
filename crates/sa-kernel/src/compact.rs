@@ -212,6 +212,34 @@ fn render(body: &EntryBody, out: &mut String) {
     }
 }
 
+/// 零 LLM 成本微压缩：保留最近 4 条工具结果原文，把更早的大块工具输出折叠成轻量占位符，
+/// 尽量避免在还能省出空间时过早触发昂贵的全量 LLM 摘要压缩。
+pub(crate) fn micro_compact_messages(mut messages: Vec<ChatMessage>) -> (Vec<ChatMessage>, bool) {
+    const KEEP_RECENT_TOOL_RESULTS: usize = 4;
+    const FOLD_THRESHOLD_CHARS: usize = 600;
+
+    let tool_indices: Vec<usize> = messages
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, m)| (m.role == sa_llm::Role::Tool).then_some(idx))
+        .collect();
+    if tool_indices.len() <= KEEP_RECENT_TOOL_RESULTS {
+        return (messages, false);
+    }
+    let fold_end = tool_indices.len() - KEEP_RECENT_TOOL_RESULTS;
+    let mut folded = false;
+    for &idx in &tool_indices[..fold_end] {
+        let len = messages[idx].content.chars().count();
+        if len > FOLD_THRESHOLD_CHARS {
+            let preview: String = messages[idx].content.chars().take(120).collect();
+            messages[idx].content =
+                format!("[已微压缩早期工具输出（原长 {len} 字），开头摘要：{preview}…]");
+            folded = true;
+        }
+    }
+    (messages, folded)
+}
+
 /// 要总结的内容本身也放不进窗口时，丢掉最早的部分，留下最近的。
 fn fit_tail(text: String, budget: usize) -> String {
     if estimate(&text) <= budget {

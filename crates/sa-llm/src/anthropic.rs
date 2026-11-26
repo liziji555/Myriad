@@ -163,7 +163,8 @@ impl Provider for Anthropic {
     }
 }
 
-/// 请求体。思考模式不开：带工具接着聊时要原样交回思考内容的签名，这里没有记。
+/// 请求体。启用 Anthropic Ephemeral Prompt Caching（系统提示词、工具表末尾、对话尾块）。
+/// 思考模式不开：带工具接着聊时要原样交回思考内容的签名，这里没有记。
 fn request_body(request: &ChatRequest) -> Value {
     let system: Vec<&str> = request
         .messages
@@ -171,17 +172,33 @@ fn request_body(request: &ChatRequest) -> Value {
         .filter(|m| m.role == Role::System && !m.content.is_empty())
         .map(|m| m.content.as_str())
         .collect();
+    let mut messages = messages_json(&request.messages);
+    // 在最后一条消息的最后一个内容块挂上 ephemeral 缓存断点，多步工具循环中命中前面整段对话前缀。
+    if let Some(last_msg) = messages.last_mut() {
+        if let Some(last_block) = last_msg
+            .get_mut("content")
+            .and_then(Value::as_array_mut)
+            .and_then(|arr| arr.last_mut())
+            .and_then(Value::as_object_mut)
+        {
+            last_block.insert("cache_control".into(), json!({ "type": "ephemeral" }));
+        }
+    }
     let mut body = json!({
         "model": request.model,
         "max_tokens": request.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
-        "messages": messages_json(&request.messages),
+        "messages": messages,
         "stream": true,
     });
     if !system.is_empty() {
-        body["system"] = json!(system.join("\n\n"));
+        body["system"] = json!([{
+            "type": "text",
+            "text": system.join("\n\n"),
+            "cache_control": { "type": "ephemeral" },
+        }]);
     }
     if !request.tools.is_empty() {
-        body["tools"] = request
+        let mut tools: Vec<Value> = request
             .tools
             .iter()
             .map(|tool| {
@@ -192,6 +209,10 @@ fn request_body(request: &ChatRequest) -> Value {
                 })
             })
             .collect();
+        if let Some(last_tool) = tools.last_mut().and_then(Value::as_object_mut) {
+            last_tool.insert("cache_control".into(), json!({ "type": "ephemeral" }));
+        }
+        body["tools"] = Value::Array(tools);
     }
     body
 }
@@ -606,12 +627,15 @@ mod tests {
         let (headers, body) = server.seen.lock().unwrap()[0].clone();
         assert_eq!(headers["x-api-key"], "sk-ant-test");
         assert_eq!(headers["anthropic-version"], VERSION);
-        assert_eq!(body["system"], "你是助手");
+        assert_eq!(
+            body["system"],
+            json!([{"type": "text", "text": "你是助手", "cache_control": {"type": "ephemeral"}}])
+        );
         assert_eq!(body["max_tokens"], DEFAULT_MAX_TOKENS);
         assert_eq!(body["stream"], true);
         assert_eq!(
             body["messages"],
-            json!([{"role": "user", "content": [{"type": "text", "text": "你好"}]}])
+            json!([{"role": "user", "content": [{"type": "text", "text": "你好", "cache_control": {"type": "ephemeral"}}]}])
         );
         assert!(body.get("thinking").is_none() && body.get("tools").is_none());
     }
@@ -697,7 +721,7 @@ mod tests {
             body["messages"][2],
             json!({"role": "user", "content": [
                 {"type": "tool_result", "tool_use_id": "toolu_0", "content": "内容"},
-                {"type": "tool_result", "tool_use_id": "toolu_1", "content": "没找到"},
+                {"type": "tool_result", "tool_use_id": "toolu_1", "content": "没找到", "cache_control": {"type": "ephemeral"}},
             ]})
         );
     }

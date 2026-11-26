@@ -8,8 +8,9 @@ use sa_llm::{
     open_with_retry, Accumulator, ChatMessage, ChatRequest, LlmError, Provider, RetryPolicy,
     StopReason, StreamEvent, ToolCall, ToolSpec, Usage,
 };
-use sa_tools::{Permission, ToolCtx, ToolRegistry};
+use sa_tools::{HookOutcome, HookRunner, Permission, ToolCtx, ToolRegistry};
 use serde_json::Value;
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 /// 同时最多跑几个工具。
@@ -37,6 +38,10 @@ pub struct TurnConfig {
     /// 工具结果太长被截断时，完整内容存到这个目录里。`None` 表示不存。
     pub spill_dir: Option<std::path::PathBuf>,
     pub retry: RetryPolicy,
+    /// 回复因单次输出长度上限被截断时，自动让模型续写的最大次数（0 表示不续写直接报截断）。
+    pub max_truncated_recoveries: usize,
+    /// 可选的生命周期钩子（PreToolUse / PostToolUse / Stop）。
+    pub hooks: Option<Arc<HookRunner>>,
 }
 
 /// 人发来的一条输入。
@@ -139,6 +144,12 @@ pub async fn run_turn(
         said_something: false,
         compactions: 0,
         compact_failures: 0,
+        micro_compacted: false,
+        reactive_compacted: false,
+        truncated_recoveries: 0,
+        stop_hook_retries: 0,
+        last_batch_sig: None,
+        repeat_streak: 0,
     };
     let end = match state
         .run(
@@ -188,6 +199,18 @@ struct Turn {
     compactions: u32,
     /// 压缩连续失败了几次。
     compact_failures: u32,
+    /// 是否通过零成本微压缩折叠了旧工具结果。
+    micro_compacted: bool,
+    /// 是否已触发过 413 / 上下文超限应急压缩重试（每轮最多 1 次）。
+    reactive_compacted: bool,
+    /// 连续因 MaxTokens 截断自动续写的次数。
+    truncated_recoveries: usize,
+    /// Stop 钩子拦截重试次数（最多 2 次）。
+    stop_hook_retries: usize,
+    /// 上一步工具调用批次指纹，用于检测死循环重试。
+    last_batch_sig: Option<String>,
+    /// 连续重复同一工具调用的次数。
+    repeat_streak: usize,
 }
 
 impl Turn {
@@ -242,7 +265,18 @@ impl Turn {
             self.steps += 1;
 
             let mut messages = vec![ChatMessage::system(config.system_prompt.clone())];
-            messages.extend(transcript.to_chat_messages());
+            let history = if self.micro_compacted {
+                compact::micro_compact_messages(transcript.to_chat_messages()).0
+            } else {
+                transcript.to_chat_messages()
+            };
+            messages.extend(history);
+            // 快到步数上限时温柔提醒收尾，避免模型还在探索时突然被硬切。
+            if config.max_steps >= 6 && self.steps == config.max_steps {
+                messages.push(ChatMessage::user(
+                    "[系统提示] 这是本轮的最后一步模型调用，请直接总结已完成的工作、结论和下一步建议，不要再发起新的工具调用。",
+                ));
+            }
             let request = ChatRequest {
                 model: config.model.clone(),
                 messages,
@@ -260,6 +294,23 @@ impl Turn {
                 observer.usage(&config.model, usage).await;
             }
             if let Some(error) = failure {
+                // 应急恢复：如果估算偏乐观导致模型服务报上下文超限，主动压缩一次再重试，不直接失败。
+                if reply.text.is_empty() && !self.reactive_compacted && is_context_overflow(&error)
+                {
+                    if let Some(window) = config.context_window {
+                        self.reactive_compacted = true;
+                        let limits = Limits::new(window, config.max_tokens);
+                        let fixed = fixed_of(&config.system_prompt, &specs);
+                        if self
+                            .force_compact(
+                                transcript, provider, config, limits, fixed, observer, cancel,
+                            )
+                            .await?
+                        {
+                            continue;
+                        }
+                    }
+                }
                 // 人已经看到的那部分文字留在记录里，下次接着聊时模型知道自己说到哪了。
                 // 没收完整的工具调用丢掉：参数不全，执行不了。
                 if !reply.text.is_empty() {
@@ -277,6 +328,7 @@ impl Turn {
 
             let truncated = reply.stop == Some(StopReason::MaxTokens);
             let calls = reply.tool_calls;
+            let reply_text = reply.text.clone();
             transcript.append(EntryBody::Assistant {
                 content: reply.text,
                 reasoning: none_if_empty(reply.reasoning),
@@ -284,6 +336,34 @@ impl Turn {
             })?;
             // 要不要继续只看有没有工具调用，不看模型自己报的结束原因。
             if calls.is_empty() {
+                if truncated && self.truncated_recoveries < config.max_truncated_recoveries {
+                    self.truncated_recoveries += 1;
+                    transcript.append(EntryBody::User {
+                        content: "刚才的回复因单次输出长度上限被截断，请紧接着上一句继续写完，不要重复已输出的内容。".into(),
+                        message_id: None,
+                        message_seq: None,
+                    })?;
+                    continue;
+                }
+                if !truncated {
+                    if let Some(hooks) = config.hooks.as_deref() {
+                        if self.stop_hook_retries < 2 {
+                            if let HookOutcome::Block(feedback) =
+                                hooks.run_stop(&reply_text, cancel).await
+                            {
+                                self.stop_hook_retries += 1;
+                                transcript.append(EntryBody::User {
+                                    content: format!(
+                                        "[Stop 钩子验证未通过，请根据以下反馈修正后再完成回复]\n{feedback}"
+                                    ),
+                                    message_id: None,
+                                    message_seq: None,
+                                })?;
+                                continue;
+                            }
+                        }
+                    }
+                }
                 return Ok(if truncated {
                     TurnEnd::Truncated
                 } else {
@@ -291,22 +371,38 @@ impl Turn {
                 });
             }
 
+            self.truncated_recoveries = 0;
+            let batch_sig = batch_fingerprint(&calls);
+            if self.last_batch_sig.as_deref() == Some(batch_sig.as_str()) {
+                self.repeat_streak += 1;
+            } else {
+                self.last_batch_sig = Some(batch_sig);
+                self.repeat_streak = 1;
+            }
+
             let results = run_tools(
                 &calls,
                 tools,
                 tool_ctx,
                 config.spill_dir.as_deref(),
+                config.hooks.as_deref(),
                 observer,
                 cancel,
             )
             .await;
             let cancelled = results.iter().any(Option::is_none);
-            for (call, result) in calls.iter().zip(results) {
-                let (content, is_error) = match result {
+            let last_idx = calls.len().saturating_sub(1);
+            for (idx, (call, result)) in calls.iter().zip(results).enumerate() {
+                let (mut content, is_error) = match result {
                     Some(Ok(text)) => (text, false),
                     Some(Err(text)) => (text, true),
                     None => (CANCELLED_RESULT.to_string(), true),
                 };
+                if idx == last_idx && self.repeat_streak >= 3 && !cancelled {
+                    content.push_str(
+                        "\n\n[系统提醒] 你已经连续 3 次执行了完全相同的工具调用。请不要继续原地重复，先分析卡点、换一种方案，或直接向用户说明当前进展与问题。",
+                    );
+                }
                 transcript.append(EntryBody::ToolResult {
                     tool_call_id: call.id.clone(),
                     content,
@@ -331,11 +427,26 @@ impl Turn {
         observer: &dyn Observer,
         cancel: &CancellationToken,
     ) -> Result<Option<TurnEnd>, TranscriptError> {
-        let size = |transcript: &Transcript| {
-            fixed + compact::estimate_messages(&transcript.to_chat_messages())
+        let size = |transcript: &Transcript, micro: bool| {
+            let msgs = transcript.to_chat_messages();
+            let msgs = if micro {
+                compact::micro_compact_messages(msgs).0
+            } else {
+                msgs
+            };
+            fixed + compact::estimate_messages(&msgs)
         };
-        if size(transcript) <= limits.threshold {
+        if size(transcript, self.micro_compacted) <= limits.threshold {
             return Ok(None);
+        }
+        // 先尝试零成本微压缩（只折叠早期大块工具输出，不调模型）；能降到阈值以下就直接继续。
+        if !self.micro_compacted {
+            let (folded_msgs, changed) =
+                compact::micro_compact_messages(transcript.to_chat_messages());
+            if changed && fixed + compact::estimate_messages(&folded_msgs) <= limits.threshold {
+                self.micro_compacted = true;
+                return Ok(None);
+            }
         }
         let plan = (self.compact_failures < MAX_COMPACT_FAILURES)
             .then(|| {
@@ -377,13 +488,67 @@ impl Turn {
                         kept: plan.kept,
                     })?;
                     self.compact_failures = 0;
+                    self.micro_compacted = false;
                 }
                 Err(LlmError::Cancelled) => return Ok(Some(TurnEnd::Cancelled)),
                 Err(_) => self.compact_failures += 1,
             }
         }
         // 没压下来但还放得下：照常继续，下一步再试。真的放不下了才停。
-        Ok((size(transcript) > limits.hard).then_some(TurnEnd::ContextLimit))
+        Ok((size(transcript, self.micro_compacted) > limits.hard).then_some(TurnEnd::ContextLimit))
+    }
+
+    /// 遇到模型服务 413 / context_length_exceeded 报错时强制触发一次摘要压缩。
+    #[allow(clippy::too_many_arguments)]
+    async fn force_compact(
+        &mut self,
+        transcript: &mut Transcript,
+        provider: &dyn Provider,
+        config: &TurnConfig,
+        limits: Limits,
+        fixed: usize,
+        observer: &dyn Observer,
+        cancel: &CancellationToken,
+    ) -> Result<bool, TranscriptError> {
+        let Some(plan) = compact::plan(
+            transcript,
+            limits.keep() / 2,
+            limits.threshold.saturating_sub(fixed),
+            limits
+                .hard
+                .saturating_sub(compact::estimate(COMPACT_PROMPT)),
+        ) else {
+            return Ok(false);
+        };
+        self.compactions += 1;
+        let step = format!(
+            "compact-{}-{}",
+            transcript.entries().len(),
+            self.compactions
+        );
+        observer
+            .tool_started(&step, "compact", "上下文超限，应急压缩历史对话", "")
+            .await;
+        let summary = self
+            .summarise(provider, config, plan.text, observer, cancel)
+            .await;
+        let end = match &summary {
+            Ok(_) => StepEnd::Ok,
+            Err(LlmError::Cancelled) => StepEnd::Stopped,
+            Err(_) => StepEnd::Failed,
+        };
+        observer.tool_finished(&step, end, "").await;
+        match summary {
+            Ok(content) => {
+                transcript.append(EntryBody::Summary {
+                    content,
+                    kept: plan.kept,
+                })?;
+                self.micro_compacted = false;
+                Ok(true)
+            }
+            Err(_) => Ok(false),
+        }
     }
 
     /// 让模型把一段对话写成摘要。不带工具，文字不报给人看。
@@ -511,6 +676,24 @@ fn none_if_empty(text: String) -> Option<String> {
     (!text.is_empty()).then_some(text)
 }
 
+fn is_context_overflow(error: &LlmError) -> bool {
+    let text = error.to_string().to_ascii_lowercase();
+    text.contains("context_length")
+        || text.contains("maximum context")
+        || text.contains("prompt is too long")
+        || text.contains("too many tokens")
+        || text.contains("context window")
+        || text.contains("token limit")
+}
+
+fn batch_fingerprint(calls: &[ToolCall]) -> String {
+    calls
+        .iter()
+        .map(|c| format!("{}:{}", c.name, c.arguments.trim()))
+        .collect::<Vec<_>>()
+        .join("|")
+}
+
 /// 执行一批工具调用，结果和 `calls` 一一对应。`None` 表示还没返回就被取消了。
 ///
 /// 相邻的、可以并发的调用一起跑，其余的一个一个来，保持模型给出的先后顺序。
@@ -519,6 +702,7 @@ async fn run_tools(
     tools: &ToolRegistry,
     ctx: &ToolCtx,
     spill_dir: Option<&std::path::Path>,
+    hooks: Option<&HookRunner>,
     observer: &dyn Observer,
     cancel: &CancellationToken,
 ) -> Vec<Option<Result<String, String>>> {
@@ -543,6 +727,7 @@ async fn run_tools(
                     &prepared[index],
                     &ctx,
                     spill_dir,
+                    hooks,
                     observer,
                     cancel,
                 )
@@ -603,6 +788,7 @@ async fn run_one(
     prepared: &Prepared,
     ctx: &ToolCtx,
     spill_dir: Option<&std::path::Path>,
+    hooks: Option<&HookRunner>,
     observer: &dyn Observer,
     cancel: &CancellationToken,
 ) -> Option<Result<String, String>> {
@@ -616,6 +802,13 @@ async fn run_one(
         Err(message) => Some(Err(message.clone())),
         Ok((tool, input)) => {
             let allowed = async {
+                if let Some(hooks) = hooks {
+                    if let HookOutcome::Block(reason) =
+                        hooks.run_pre_tool(&call.name, input, cancel).await
+                    {
+                        return Err(format!("[PreToolUse 钩子拦截] {reason}"));
+                    }
+                }
                 match tool.check_permission(input, ctx).await {
                     Permission::Allow => {}
                     Permission::Deny(reason) => return Err(reason),
@@ -650,10 +843,32 @@ async fn run_one(
                 Some(Ok(())) => {
                     let max = tool.max_result_chars();
                     let work = async {
-                        match tool.call(input.clone(), ctx).await {
+                        let res = match tool.call(input.clone(), ctx).await {
                             Ok(text) => Ok(clip_and_spill(text, max, spill_dir, &call.id).await),
                             Err(e) => Err(clip_and_spill(e.0, max, spill_dir, &call.id).await),
+                        };
+                        if let Some(hooks) = hooks {
+                            let (ok, out_ref) = match &res {
+                                Ok(t) => (true, t.as_str()),
+                                Err(t) => (false, t.as_str()),
+                            };
+                            if let Some(note) = hooks
+                                .run_post_tool(&call.name, input, ok, out_ref, cancel)
+                                .await
+                            {
+                                return match res {
+                                    Ok(mut t) => {
+                                        t.push_str(&format!("\n\n[PostToolUse 钩子反馈]\n{note}"));
+                                        Ok(t)
+                                    }
+                                    Err(mut t) => {
+                                        t.push_str(&format!("\n\n[PostToolUse 钩子反馈]\n{note}"));
+                                        Err(t)
+                                    }
+                                };
+                            }
                         }
+                        res
                     };
                     if tool.finishes_once_started() {
                         // 做完了照实报；是因为停止才没做的，算停止。
@@ -936,6 +1151,8 @@ mod tests {
                     max_retries: 2,
                     base_delay: Duration::from_millis(1),
                 },
+                max_truncated_recoveries: 0,
+                hooks: None,
             },
         }
     }
@@ -1879,5 +2096,64 @@ mod tests {
         assert!(clipped.starts_with("abcdefgh\n"));
         assert!(clipped.ends_with("\nyz"));
         assert!(clipped.contains("共 26 字") && clipped.contains("省略了 16 字"));
+    }
+
+    #[tokio::test]
+    async fn auto_continues_on_max_tokens_when_enabled() {
+        let mut rig = rig();
+        rig.config.max_truncated_recoveries = 2;
+        let provider = MockProvider::scripted([
+            MockReply::Events(vec![
+                StreamEvent::TextDelta("前半段".into()),
+                StreamEvent::Done {
+                    stop: StopReason::MaxTokens,
+                },
+            ]),
+            MockReply::text("后半段"),
+        ]);
+        let observer = Recorder::default();
+        let outcome = rig
+            .turn(
+                &provider,
+                vec![vec![says("写长一点", 1)]],
+                &observer,
+                &CancellationToken::new(),
+            )
+            .await;
+        assert_eq!(outcome.end, TurnEnd::Completed);
+        assert_eq!(outcome.steps, 2);
+        assert_eq!(provider.requests().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn loop_guard_nudges_after_three_identical_tool_batches() {
+        let mut rig = rig();
+        let provider = MockProvider::scripted([
+            MockReply::tool_calls("", &[("c1", "probe", r#"{"tag":"same"}"#)]),
+            MockReply::tool_calls("", &[("c2", "probe", r#"{"tag":"same"}"#)]),
+            MockReply::tool_calls("", &[("c3", "probe", r#"{"tag":"same"}"#)]),
+            MockReply::text("我换个方法"),
+        ]);
+        let outcome = rig
+            .turn(
+                &provider,
+                vec![vec![says("查一下", 1)]],
+                &Recorder::default(),
+                &CancellationToken::new(),
+            )
+            .await;
+        assert_eq!(outcome.end, TurnEnd::Completed);
+        let last_req = provider.requests().last().unwrap().clone();
+        let last_tool = last_req
+            .messages
+            .iter()
+            .rev()
+            .find(|m| m.role == Role::Tool)
+            .unwrap();
+        assert!(
+            last_tool.content.contains("连续 3 次"),
+            "{}",
+            last_tool.content
+        );
     }
 }

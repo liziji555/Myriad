@@ -30,6 +30,9 @@ pub struct Config {
     /// 房间里的对话。老的配置文件里没有这一节，用默认值。
     #[serde(default)]
     pub rooms: Rooms,
+    /// 生命周期钩子（PreToolUse / PostToolUse / Stop）。老配置没有这一节，默认空。
+    #[serde(default)]
+    pub hooks: Vec<sa_tools::HookRule>,
 }
 
 /// 房间里的对话怎么跑。
@@ -42,6 +45,9 @@ pub struct Rooms {
     /// 整个服务里最多几个 harness（Claude Code、Codex 这些命令行）同时在跑，多的排队。
     #[serde(default = "default_max_parallel_harness")]
     pub max_parallel_harness: usize,
+    /// 一轮对话最多调用几次模型（防止死循环；复杂项目默认 64 步，可在 config.toml 里调到 1..=500）。
+    #[serde(default = "default_max_steps")]
+    pub max_steps: usize,
 }
 
 impl Default for Rooms {
@@ -49,6 +55,7 @@ impl Default for Rooms {
         Self {
             max_parallel_bots: default_max_parallel_bots(),
             max_parallel_harness: default_max_parallel_harness(),
+            max_steps: default_max_steps(),
         }
     }
 }
@@ -59,6 +66,10 @@ fn default_max_parallel_bots() -> usize {
 
 fn default_max_parallel_harness() -> usize {
     sa_orchestrator::DEFAULT_MAX_PARALLEL_HARNESS
+}
+
+fn default_max_steps() -> usize {
+    64
 }
 
 /// 一个模型的价格：每一百万 token 多少钱，单位是 `[budget]` 的货币。

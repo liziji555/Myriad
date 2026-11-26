@@ -12,9 +12,6 @@ use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-/// 一轮里最多调用几次模型。
-const MAX_STEPS: usize = 24;
-
 #[derive(clap::Args, Clone, Debug, Default)]
 pub struct RunArgs {
     /// Bot 能读取的工作目录，默认是当前目录
@@ -122,7 +119,7 @@ impl App {
             sessions_dir: data_dir.sessions(),
             fence,
             prompt,
-            max_steps: MAX_STEPS,
+            max_steps: config.rooms.max_steps.clamp(1, 500),
             allow_private_network: false,
             approval_timeout: sa_orchestrator::DEFAULT_APPROVAL_TIMEOUT,
             work_dir: data_dir.work(),
@@ -145,6 +142,9 @@ impl App {
         tune(&mut settings);
         let orchestrator = Arc::new(Orchestrator::new(engine.clone(), models, settings));
         orchestrator.use_skills(data_dir.skills());
+        orchestrator.use_memory(data_dir.root().join("memory"));
+        orchestrator.use_hooks(config.hooks.clone());
+        orchestrator.use_truncated_recoveries(2);
         Ok(Self {
             config,
             engine,
