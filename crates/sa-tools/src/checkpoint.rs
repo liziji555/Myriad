@@ -174,6 +174,7 @@ impl CheckpointStore {
             target: PathBuf,
             restore_blob: Option<PathBuf>,
             existed: bool,
+            existing_permissions: Option<std::fs::Permissions>,
         }
 
         let mut plan: Vec<PlannedOp> = Vec::new();
@@ -195,7 +196,7 @@ impl CheckpointStore {
                 return Err(format!("拒绝回滚工作目录之外的路径：{}", snap.path));
             }
 
-            let current_len = match std::fs::symlink_metadata(&target) {
+            let (current_len, existing_permissions) = match std::fs::symlink_metadata(&target) {
                 Ok(meta) => {
                     if meta.file_type().is_symlink() {
                         return Err(format!("拒绝回滚已被替换为符号链接的路径：{}", snap.path));
@@ -206,9 +207,9 @@ impl CheckpointStore {
                             snap.path
                         ));
                     }
-                    Some(meta.len())
+                    (Some(meta.len()), Some(meta.permissions()))
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => (None, None),
                 Err(e) => return Err(format!("检查 {} 状态失败：{e}", snap.path)),
             };
 
@@ -254,6 +255,7 @@ impl CheckpointStore {
                 target,
                 restore_blob,
                 existed: current_len.is_some(),
+                existing_permissions,
             });
         }
 
@@ -280,7 +282,9 @@ impl CheckpointStore {
                         .map_err(|e| format!("创建目录失败（{}）：{e}", op.rel))?;
                     let staged =
                         parent.join(format!(".sa-rewind-new-{}", uuid::Uuid::new_v4().simple()));
-                    if let Err(e) = copy_file_synced(blob_path, &staged) {
+                    if let Err(e) =
+                        copy_file_synced(blob_path, &staged, op.existing_permissions.clone())
+                    {
                         let _ = std::fs::remove_file(&staged);
                         return Err(format!("准备 {} 恢复内容失败：{e}", op.rel));
                     }
@@ -603,14 +607,28 @@ fn sha256_file_stream(path: &Path) -> std::io::Result<String> {
 }
 
 /// 分块流式复制快照 Blob 到同目录临时文件并刷盘，不把整个文件留在内存中。
-fn copy_file_synced(src: &Path, dst: &Path) -> std::io::Result<()> {
+/// Unix 下临时文件以 `0o600` 创建（防止私有快照在暂存期泄露），
+/// 写完刷盘后再按原目标文件权限（如可执行脚本的 `0o755`）恢复权限。
+fn copy_file_synced(
+    src: &Path,
+    dst: &Path,
+    permissions: Option<std::fs::Permissions>,
+) -> std::io::Result<()> {
     let mut reader = std::fs::File::open(src)?;
-    let mut writer = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(dst)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut writer = options.open(dst)?;
     std::io::copy(&mut reader, &mut writer)?;
-    writer.sync_all()
+    writer.sync_all()?;
+    if let Some(perms) = permissions {
+        std::fs::set_permissions(dst, perms)?;
+    }
+    Ok(())
 }
 
 struct AppliedOp {
@@ -845,5 +863,59 @@ mod tests {
             .filter(|e| e.file_name().to_string_lossy().starts_with(".sa-rewind-"))
             .collect();
         assert!(leftovers.is_empty(), "不应遗留临时备份文件: {leftovers:?}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn rewind_preserves_executable_and_private_unix_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let work = dir.path().join("work");
+        fs::create_dir_all(&work).unwrap();
+
+        let script = work.join("build.sh");
+        fs::write(&script, "#!/bin/sh\necho old\n").unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let secret = work.join("secret.env");
+        fs::write(&secret, "TOKEN=old\n").unwrap();
+        fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let fence = Fence::new(&work, &[]).unwrap();
+        let store = Arc::new(CheckpointStore::new(dir.path().join("cp")));
+        let mut ctx = ToolCtx::new(fence.clone());
+        ctx.checkpoint = Some(store.begin_turn("room_1", "msg_perm", "助手", 4000));
+
+        WriteTool
+            .call(
+                json!({"path": "build.sh", "content": "#!/bin/sh\necho new\n"}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        WriteTool
+            .call(
+                json!({"path": "secret.env", "content": "TOKEN=new\n"}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        let report = store.rewind("room_1", "msg_perm", &fence, false).unwrap();
+        assert_eq!(report.restored.len(), 2);
+        assert_eq!(
+            fs::read_to_string(&script).unwrap(),
+            "#!/bin/sh\necho old\n"
+        );
+        assert_eq!(
+            fs::metadata(&script).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        assert_eq!(fs::read_to_string(&secret).unwrap(), "TOKEN=old\n");
+        assert_eq!(
+            fs::metadata(&secret).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 }
