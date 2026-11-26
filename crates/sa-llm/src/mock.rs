@@ -34,6 +34,7 @@ impl MockReply {
             input_tokens: 10,
             output_tokens: text.chars().count() as u64,
             cached_tokens: 0,
+            cache_write_tokens: 0,
         }));
         events.push(StreamEvent::Done {
             stop: StopReason::EndTurn,
@@ -68,6 +69,7 @@ impl MockReply {
             input_tokens: 10,
             output_tokens: 5,
             cached_tokens: 0,
+            cache_write_tokens: 0,
         }));
         events.push(StreamEvent::Done {
             stop: StopReason::ToolUse,

@@ -143,8 +143,10 @@ pub(crate) struct Shared {
     pub tools: std::sync::RwLock<ToolRegistry>,
     /// 技能放在哪个目录。没有设就是没有技能。
     pub skills_dir: Mutex<Option<PathBuf>>,
-    /// 外部 MCP 服务，和它们现在怎么样。
-    pub mcp: Mutex<Vec<extensions::Mcp>>,
+    /// 外部 MCP 服务与当前代际（与工具注册在同一锁边界内同步，防止热重载竞态）。
+    pub mcp: Mutex<extensions::McpRegistry>,
+    /// 串行化 MCP 热重载，防止并发重载产生重复连接或进程泄漏。
+    pub mcp_reload_lock: tokio::sync::Mutex<()>,
     pub settings: Settings,
     /// 触发后所有房间停下手里的事并退出。
     pub shutdown: CancellationToken,
@@ -176,6 +178,8 @@ pub(crate) struct Shared {
     pub hooks: Mutex<Option<Arc<sa_tools::HookRunner>>>,
     /// 后台长耗时命令管理器（服务关闭时统一清理进程树）。
     pub bg_shell: Arc<sa_tools::BgShellManager>,
+    /// 持久 ACP 会话池（保持同工位 ACP 进程常驻，服务关闭或工位重置时自动回收）。
+    pub acp_pool: harness::AcpPool,
     /// 已配置的 MCP 服务规格列表（用于透传注入到外部 CLI Harness / ACP）。
     pub mcp_specs: Mutex<Vec<sa_tools::mcp::McpSpec>>,
     /// 单次输出超限被截断时的自动续写次数上限（生产默认 2，测试默认 0）。
@@ -269,6 +273,7 @@ impl Orchestrator {
                 tools: std::sync::RwLock::new(ToolRegistry::standard()),
                 skills_dir: Mutex::default(),
                 mcp: Mutex::default(),
+                mcp_reload_lock: tokio::sync::Mutex::new(()),
                 settings,
                 shutdown: CancellationToken::new(),
                 approvals: Mutex::new(HashMap::new()),
@@ -285,6 +290,7 @@ impl Orchestrator {
                 checkpoints: Mutex::default(),
                 hooks: Mutex::default(),
                 bg_shell: sa_tools::BgShellManager::new(),
+                acp_pool: harness::AcpPool::default(),
                 mcp_specs: Mutex::default(),
                 max_truncated_recoveries: std::sync::atomic::AtomicUsize::new(0),
             }),
@@ -496,6 +502,7 @@ impl Orchestrator {
             let _ = handle.task.await;
         }
         work::shutdown(&self.shared).await;
+        self.shared.acp_pool.evict_all();
         self.shared.bg_shell.kill_all();
         extensions::shutdown(&self.shared).await;
     }

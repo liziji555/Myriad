@@ -1045,6 +1045,14 @@ async fn turn(
                     None => ToolRegistry::read_only(),
                 };
                 plan_tools.register(sa_tools::TodoTool);
+                // 规划模式下允许调用显式声明 readOnlyHint=true 的外部 MCP 只读工具（如查文档/Wiki）。
+                for tool in shared.tools().iter() {
+                    if tool.name().starts_with("mcp__")
+                        && tool.is_read_only(&serde_json::Value::Null)
+                    {
+                        plan_tools.register_shared(tool.clone());
+                    }
+                }
                 if let Some(tool) = skills.tool.clone() {
                     plan_tools.register(tool);
                 }
@@ -1420,6 +1428,7 @@ async fn harness_turn(
             let resume = resume_of(bot, &desk);
             let prompt = harness_prompt(bot, &said, resume.is_some(), &workdir.path);
             let mcp_servers = shared.mcp_specs.lock().unwrap().clone();
+            let acp_scope = crate::harness::acp_scope(room_id, &bot.id);
             let launch = crate::harness::Launch {
                 harness: bot.harness,
                 command: &bot.harness_command,
@@ -1428,6 +1437,8 @@ async fn harness_turn(
                 session: resume.as_deref(),
                 permission,
                 mcp_servers: &mcp_servers,
+                acp_pool: Some(&shared.acp_pool),
+                acp_scope: Some(&acp_scope),
             };
             if cancel.is_cancelled() {
                 return Ok(TurnEnd::Cancelled);

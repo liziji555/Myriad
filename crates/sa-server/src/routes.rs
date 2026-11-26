@@ -694,6 +694,20 @@ pub async fn extensions(State(state): State<AppState>) -> Result<Json<Extensions
     Ok(Json(found))
 }
 
+/// 热重载 `config.toml` 中的外部 MCP 服务与生命周期钩子，同时重新扫描磁盘技能。
+pub async fn reload_extensions(
+    State(state): State<AppState>,
+) -> Result<Json<Extensions>, AppError> {
+    if let Some(admin) = state.extensions_admin.clone() {
+        let found = admin
+            .reload()
+            .await
+            .map_err(|message| AppError::new(StatusCode::BAD_REQUEST, "reload_failed", message))?;
+        return Ok(Json(found));
+    }
+    extensions(State(state)).await
+}
+
 fn update_admin(state: &AppState) -> Result<std::sync::Arc<dyn crate::UpdateAdmin>, AppError> {
     state.updater.clone().ok_or_else(|| {
         AppError::new(

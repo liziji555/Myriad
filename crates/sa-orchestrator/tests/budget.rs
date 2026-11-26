@@ -53,6 +53,7 @@ fn pricey(daily_limit: f64, task_limit: f64) -> Budget {
         default_price: Price {
             input: 1_000_000.0,
             cached_input: 1_000_000.0,
+            cache_write: 1_250_000.0,
             output: 1_000_000.0,
         },
         ..Budget::default()

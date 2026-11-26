@@ -384,6 +384,7 @@ impl Decoder {
                 input_tokens: usage.prompt_tokens,
                 output_tokens: usage.completion_tokens,
                 cached_tokens: cached,
+                cache_write_tokens: 0,
             })));
         }
     }
@@ -517,7 +518,8 @@ mod tests {
             Some(Usage {
                 input_tokens: 12,
                 output_tokens: 3,
-                cached_tokens: 8
+                cached_tokens: 8,
+                cache_write_tokens: 0,
             })
         );
 

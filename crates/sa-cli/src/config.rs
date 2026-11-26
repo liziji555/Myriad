@@ -77,8 +77,11 @@ fn default_max_steps() -> usize {
 #[serde(deny_unknown_fields)]
 pub struct Price {
     pub input: f64,
-    /// 命中缓存的输入。不写就和 `input` 一样。
+    /// 命中缓存（cache read）的输入。不写就和 `input` 一样。
     pub cached_input: Option<f64>,
+    /// 写入缓存（Anthropic `cache_creation_input_tokens`）的输入。不写默认按 `input * 1.25` 估算。
+    #[serde(default)]
+    pub cache_write: Option<f64>,
     pub output: f64,
 }
 
@@ -86,6 +89,7 @@ pub struct Price {
 pub const FALLBACK_PRICE: Price = Price {
     input: 10.0,
     cached_input: None,
+    cache_write: None,
     output: 30.0,
 };
 
@@ -134,6 +138,9 @@ pub struct McpServer {
     /// 这些工具不用问人，直接执行。别的每次都要批准。
     #[serde(default)]
     pub auto_approve: Vec<String>,
+    /// 是否信任该服务自报的 `annotations.readOnlyHint`（开启后只读工具自动免审批并在规划模式可用）。
+    #[serde(default)]
+    pub trust_annotations: bool,
     #[serde(default = "enabled_by_default")]
     pub enabled: bool,
 }
@@ -289,6 +296,7 @@ impl Config {
                     env: vars,
                     cwd: Some(cwd.to_path_buf()),
                     auto_approve: server.auto_approve.clone(),
+                    trust_annotations: server.trust_annotations,
                 }
             })
             .collect()
@@ -391,7 +399,12 @@ impl Config {
             }
         }
         for (model, price) in &self.prices {
-            let amounts = [price.input, price.cached_input.unwrap_or(0.0), price.output];
+            let amounts = [
+                price.input,
+                price.cached_input.unwrap_or(0.0),
+                price.cache_write.unwrap_or(0.0),
+                price.output,
+            ];
             if amounts.iter().any(|n| !n.is_finite() || *n < 0.0) {
                 bail!("[prices] 里 {model} 的价格必须是不小于 0 的数字");
             }
@@ -406,6 +419,7 @@ impl Config {
         let price = |price: &Price| sa_orchestrator::Price {
             input: price.input,
             cached_input: price.cached_input.unwrap_or(price.input),
+            cache_write: price.cache_write.unwrap_or(price.input * 1.25),
             output: price.output,
         };
         sa_orchestrator::Budget {

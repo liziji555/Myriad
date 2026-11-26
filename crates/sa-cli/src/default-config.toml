@@ -59,7 +59,8 @@ max_steps = 64
 [prices]
 # 算花费用的价格：每一百万 token 多少钱，单位同上。
 # 下面的数不是哪家的真实价格，是故意偏高的占位：请按你用的模型服务的价目表改，
-# 否则算出来的花费偏高，会比实际更早到上限。cached_input 是命中缓存的输入，不写就和 input 一样。
+# 否则算出来的花费偏高，会比实际更早到上限。cached_input 是命中缓存的输入，不写就和 input 一样；
+# cache_write 是写入缓存（Anthropic cache_creation_input_tokens）的价格，不写默认按 input * 1.25 算。
 default = { input = 10.0, cached_input = 10.0, output = 30.0 }
 # 给某个模型单独定价，名字和 [tiers] 里的 model 一样：
 # "deepseek-flash" = { input = 1.0, cached_input = 0.1, output = 2.0 }
@@ -96,6 +97,8 @@ api_base = "https://api.telegram.org"
 # env_from = ["FILES_TOKEN"]
 # # 它的工具每次调用都要你批准；这里列出的不用问：
 # auto_approve = ["read_file", "list_directory"]
+# # 如果信任该服务，设为 true 后凡服务端标注 readOnlyHint=true（非破坏性）的工具将自动放行并在规划模式可用：
+# trust_annotations = false
 # # enabled = false   # 先停用
 #
 # 通过网址连的远程服务写 url，不写 command：
