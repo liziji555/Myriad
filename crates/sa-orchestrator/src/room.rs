@@ -1167,10 +1167,24 @@ async fn harness_turn(
     }
     let summary = format!("{}：{}", bot.name, said.last().map_or("", |s| s.as_str()));
     let summary: String = summary.chars().take(72).collect();
+    // 读房间权限档位（连了外部 GitHub/Telegram 的房间照旧按 Ask 处理，避免外人触发免审批执行）。
+    let engine = shared.engine.clone();
+    let r = room_id.clone();
+    let permission = db(move || {
+        let full = engine.get_room(&r)?.permission == PermissionMode::Full
+            && !engine.list_links()?.iter().any(|link| link.room_id == r);
+        Ok(if full {
+            PermissionMode::Full
+        } else {
+            PermissionMode::Ask
+        })
+    })
+    .await
+    .unwrap_or(PermissionMode::Ask);
     let (finished, changes) = match share {
         Some(name) => {
             match shared_harness(
-                shared, room_id, bot, &mut desk, name, &said, summary, observer, cancel,
+                shared, room_id, bot, &mut desk, name, &said, summary, permission, observer, cancel,
             )
             .await
             {
@@ -1191,6 +1205,7 @@ async fn harness_turn(
                 dir: std::path::Path::new(&workdir.path),
                 prompt: &prompt,
                 session: resume.as_deref(),
+                permission,
             };
             if cancel.is_cancelled() {
                 return Ok(TurnEnd::Cancelled);
@@ -1212,7 +1227,7 @@ async fn harness_turn(
         transcript
             .append(sa_kernel::EntryBody::Assistant {
                 content: finished.text.clone(),
-                reasoning: None,
+                reasoning: finished.reasoning.clone(),
                 tool_calls: vec![],
             })
             .map_err(|e| e.to_string())?;
@@ -1340,6 +1355,7 @@ async fn shared_harness(
     name: &str,
     said: &[String],
     summary: String,
+    permission: PermissionMode,
     observer: &RoomObserver,
     cancel: &CancellationToken,
 ) -> Result<(crate::harness::Finished, Changes), TurnEnd> {
@@ -1403,6 +1419,7 @@ async fn shared_harness(
         prompt,
         session: resume.clone(),
         summary,
+        permission,
     };
     let input = serde_json::to_value(job).expect("只有字符串");
     let (progress, mut shown) = tokio::sync::mpsc::unbounded_channel::<String>();
@@ -1439,6 +1456,7 @@ async fn shared_harness(
         end,
         session: ran.session,
         text: ran.text,
+        reasoning: None,
     };
     Ok((finished, ran.changes))
 }

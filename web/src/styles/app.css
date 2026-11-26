@@ -611,6 +611,131 @@ button.sa-stage-room:hover,
   color: var(--sa-fg);
 }
 
+.sa-files-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sa-space-3);
+}
+.sa-files-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sa-space-2);
+}
+.sa-files-bar select {
+  flex: 1 1 140px;
+  min-width: 0;
+}
+.sa-files-tabs {
+  display: inline-flex;
+  gap: 4px;
+}
+.sa-files-tabs button {
+  padding: 4px 8px;
+  border: 1px solid var(--sa-border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--sa-fg-muted);
+  font-size: var(--sa-text-xs);
+  cursor: pointer;
+}
+.sa-files-tabs button[aria-selected="true"] {
+  background: var(--sa-hover);
+  color: var(--sa-fg);
+  border-color: var(--sa-accent);
+}
+.sa-files-crumb {
+  display: flex;
+  align-items: center;
+  gap: var(--sa-space-2);
+  font-size: var(--sa-text-xs);
+}
+.sa-files-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.sa-file-row {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--sa-fg);
+  text-align: left;
+  font-size: var(--sa-text-xs);
+  cursor: pointer;
+}
+.sa-file-row:hover,
+.sa-file-row[data-active="true"] {
+  background: var(--sa-hover);
+}
+.sa-file-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sa-files-preview {
+  border: 1px solid var(--sa-border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.sa-files-preview-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 10px;
+  background: var(--sa-bg-subtle);
+  border-bottom: 1px solid var(--sa-border);
+  font-size: var(--sa-text-xs);
+}
+.sa-file-content {
+  margin: 0;
+  padding: 10px;
+  max-height: 360px;
+  overflow: auto;
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre;
+}
+.sa-diff {
+  max-height: 360px;
+  overflow: auto;
+  font-family: var(--sa-font-mono, monospace);
+  font-size: 11.5px;
+  line-height: 1.45;
+  padding: 6px 0;
+}
+.sa-diff > div {
+  padding: 0 10px;
+  white-space: pre;
+}
+.sa-diff-hunk {
+  color: var(--sa-accent);
+  background: var(--sa-bg-subtle);
+  padding-top: 2px;
+  padding-bottom: 2px;
+}
+.sa-diff-add {
+  background: rgba(34, 197, 94, 0.14);
+  color: inherit;
+}
+.sa-diff-del {
+  background: rgba(239, 68, 68, 0.14);
+  color: inherit;
+}
+.sa-harness-probes {
+  margin: 6px 0 0;
+  font-size: var(--sa-text-xs);
+  color: var(--sa-fg-muted);
+}
+
 .sa-row {
   display: flex;
   align-items: center;

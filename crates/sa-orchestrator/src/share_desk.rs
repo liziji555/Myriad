@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use sa_engine::Workdir;
 use sa_kernel::{Observer, StepEnd, TurnEnd};
 use sa_llm::Usage;
-use sa_protocol::{DeskChange, Harness, TaskId};
+use sa_protocol::{DeskChange, Harness, PermissionMode, TaskId};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tokio::sync::mpsc::UnboundedSender;
@@ -42,6 +42,9 @@ pub struct Run {
     pub session: Option<String>,
     /// 跑完自动提交时的说明。
     pub summary: String,
+    /// 房间的权限档位。
+    #[serde(default)]
+    pub permission: PermissionMode,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -248,6 +251,7 @@ impl Desks {
             dir: Path::new(&job.workdir.path),
             prompt: &job.prompt,
             session: job.session.as_deref(),
+            permission: job.permission,
         };
         let finished = harness::run(&launch, observer, cancel).await;
         let changes = workdir::commit_and_diff(&job.workdir, &job.summary)

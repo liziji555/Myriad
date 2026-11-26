@@ -3,7 +3,10 @@
 use crate::room::db;
 use crate::{share_desk, workdir, Orchestrator, OrchestratorError, Shared};
 use sa_engine::{Desk, Workdir};
-use sa_protocol::{BotId, HarnessDesk, RoomId, SessionId, TaskId};
+use sa_protocol::{
+    BotId, DeskDiff, HarnessDesk, HarnessProbe, RoomId, SessionId, TaskId, WorkspaceEntry,
+    WorkspaceFile,
+};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -130,10 +133,125 @@ impl Orchestrator {
         }))
     }
 
+    /// 探测本机已安装的外部 Agent CLI（claude / codex / opencode / gemini / kimi / cursor-agent）。
+    pub async fn probe_harnesses(&self) -> Vec<HarnessProbe> {
+        crate::harness::probe_harnesses(self.shared.settings.fence.root()).await
+    }
+
     /// 房间里开着独立目录的 harness 工位。
     pub async fn room_desks(&self, room: &RoomId) -> Result<Vec<HarnessDesk>, OrchestratorError> {
         let (engine, room) = (self.shared.engine.clone(), room.clone());
         Ok(db(move || engine.room_desks(&room)).await?)
+    }
+
+    /// 查看 harness 独立目录里单个文件的 Unified Diff。
+    pub async fn desk_diff(
+        &self,
+        room: &RoomId,
+        bot: &BotId,
+        path: &str,
+    ) -> Result<DeskDiff, OrchestratorError> {
+        let (engine, r, b) = (self.shared.engine.clone(), room.clone(), bot.clone());
+        let desk = db(move || engine.desk(&r, &b)).await?;
+        if desk.share.is_some() {
+            return Err(OrchestratorError::Conflict(
+                "共享目录那台电脑上的工位暂不支持在线预览 Diff".into(),
+            ));
+        }
+        let Some(dir) = desk.workdir else {
+            return Err(OrchestratorError::Conflict("它没有开着的独立目录".into()));
+        };
+        workdir::diff_file(&dir, path)
+            .await
+            .map_err(OrchestratorError::Conflict)
+    }
+
+    /// 只清空 harness 的会话号（重新开始上下文），保留独立目录和里面的全部改动。
+    pub async fn reset_desk_session(
+        &self,
+        room: &RoomId,
+        bot: &BotId,
+    ) -> Result<(), OrchestratorError> {
+        let lock = self.shared.desk_lock(room, bot);
+        let Ok(_held) = lock.try_lock() else {
+            return Err(OrchestratorError::Conflict(
+                "它正在干活，等这一轮做完再重置会话".into(),
+            ));
+        };
+        let (engine, r, b) = (self.shared.engine.clone(), room.clone(), bot.clone());
+        db(move || {
+            let mut desk = engine.desk(&r, &b)?;
+            desk.session = None;
+            engine.put_desk(&r, &b, &desk)
+        })
+        .await?;
+        Ok(())
+    }
+
+    /// 列出房间工作目录（或某个 harness 独立工位）下的文件与子目录。
+    pub async fn list_workspace_files(
+        &self,
+        room: &RoomId,
+        rel_dir: &str,
+        desk_bot: Option<&BotId>,
+    ) -> Result<Vec<WorkspaceEntry>, OrchestratorError> {
+        let root = self.resolve_browse_root(room, desk_bot).await?;
+        let rel = rel_dir.trim().to_string();
+        tokio::task::spawn_blocking(move || list_entries_under(&root, &rel))
+            .await
+            .map_err(|e| OrchestratorError::Internal(e.to_string()))?
+            .map_err(OrchestratorError::Conflict)
+    }
+
+    /// 读取房间工作目录（或某个 harness 独立工位）里的单个文本文件（上限 512 KB）。
+    pub async fn read_workspace_file(
+        &self,
+        room: &RoomId,
+        rel_path: &str,
+        desk_bot: Option<&BotId>,
+    ) -> Result<WorkspaceFile, OrchestratorError> {
+        let root = self.resolve_browse_root(room, desk_bot).await?;
+        let rel = rel_path.trim().to_string();
+        tokio::task::spawn_blocking(move || read_file_under(&root, &rel))
+            .await
+            .map_err(|e| OrchestratorError::Internal(e.to_string()))?
+            .map_err(OrchestratorError::Conflict)
+    }
+
+    async fn resolve_browse_root(
+        &self,
+        room: &RoomId,
+        desk_bot: Option<&BotId>,
+    ) -> Result<PathBuf, OrchestratorError> {
+        let (engine, r) = (self.shared.engine.clone(), room.clone());
+        let bot = desk_bot.cloned();
+        let found = db(move || {
+            let room = engine.get_room(&r)?;
+            if let Some(bot_id) = bot {
+                let desk = engine.desk(&r, &bot_id)?;
+                if desk.share.is_some() {
+                    return Ok(Err("共享目录那台电脑上的工位暂不支持直接浏览文件".into()));
+                }
+                return Ok(desk
+                    .workdir
+                    .map(|w| PathBuf::from(w.path))
+                    .ok_or_else(|| "它没有开着的独立目录".to_string()));
+            }
+            if room.share.is_some() {
+                return Ok(Err(
+                    "这个房间用的是共享目录，请让 Bot 用只读工具查看文件".into()
+                ));
+            }
+            Ok(Ok(PathBuf::new()))
+        })
+        .await?;
+        match found {
+            Ok(path) if path.as_os_str().is_empty() => {
+                Ok(self.shared.settings.fence.root().to_path_buf())
+            }
+            Ok(path) => Ok(path),
+            Err(reason) => Err(OrchestratorError::Conflict(reason)),
+        }
     }
 
     /// 把 harness 工位里的改动带回工作目录，然后收掉工位。带不回去时什么都不动。
@@ -246,3 +364,73 @@ impl Orchestrator {
 
 /// 在共享目录那台电脑上带回、丢掉改动最多等多久。
 const SHARED_CLOSE_WAIT: std::time::Duration = std::time::Duration::from_secs(120);
+
+fn list_entries_under(root: &Path, rel: &str) -> Result<Vec<WorkspaceEntry>, String> {
+    let fence = sa_tools::Fence::new(root, &[]).map_err(|e| format!("工作目录打不开：{e}"))?;
+    let target = if rel.is_empty() || rel == "." {
+        fence.root().to_path_buf()
+    } else {
+        fence.resolve(rel).map_err(|e| e.0)?
+    };
+    let read = std::fs::read_dir(&target).map_err(|e| format!("列不出目录：{e}"))?;
+    let mut entries = Vec::new();
+    for item in read.flatten() {
+        let name = item.file_name().to_string_lossy().into_owned();
+        if matches!(name.as_str(), ".git" | "node_modules" | "target") {
+            continue;
+        }
+        let Ok(meta) = item.metadata() else {
+            continue;
+        };
+        let path = if rel.is_empty() || rel == "." {
+            name.clone()
+        } else {
+            format!("{}/{}", rel.trim_end_matches('/'), name)
+        };
+        entries.push(WorkspaceEntry {
+            name,
+            path,
+            is_dir: meta.is_dir(),
+            size: if meta.is_file() { meta.len() } else { 0 },
+        });
+    }
+    entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.cmp(&b.name)));
+    entries.truncate(500);
+    Ok(entries)
+}
+
+fn read_file_under(root: &Path, rel: &str) -> Result<WorkspaceFile, String> {
+    if rel.is_empty() {
+        return Err("没有指定文件路径".into());
+    }
+    let fence = sa_tools::Fence::new(root, &[]).map_err(|e| format!("工作目录打不开：{e}"))?;
+    let target = fence.resolve(rel).map_err(|e| e.0)?;
+    let meta = std::fs::metadata(&target).map_err(|e| format!("读不了文件：{e}"))?;
+    if !meta.is_file() {
+        return Err("这不是一个普通文件".into());
+    }
+    const MAX_READ_BYTES: usize = 512 * 1024;
+    use std::io::Read;
+    let mut file = std::fs::File::open(&target).map_err(|e| format!("打不开文件：{e}"))?;
+    let mut buf = Vec::with_capacity((meta.len() as usize).min(MAX_READ_BYTES + 1));
+    file.by_ref()
+        .take((MAX_READ_BYTES + 1) as u64)
+        .read_to_end(&mut buf)
+        .map_err(|e| format!("读文件出错：{e}"))?;
+    let truncated = buf.len() > MAX_READ_BYTES;
+    if truncated {
+        buf.truncate(MAX_READ_BYTES);
+    }
+    let binary = buf.iter().take(8192).any(|&b| b == 0);
+    let content = if binary {
+        String::new()
+    } else {
+        String::from_utf8_lossy(&buf).into_owned()
+    };
+    Ok(WorkspaceFile {
+        path: rel.to_string(),
+        binary,
+        truncated,
+        content,
+    })
+}

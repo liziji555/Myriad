@@ -3,4 +3,4 @@
 /**
  * Bot 由谁来干活：内置的（直接调模型），或者本机装好的某个 harness 命令行。
  */
-export type Harness = "builtin" | "claude_code" | "codex" | "open_code" | "command";
+export type Harness = "builtin" | "claude_code" | "codex" | "open_code" | "gemini" | "kimi" | "acp" | "command";

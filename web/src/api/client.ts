@@ -20,7 +20,9 @@ import type {
   TestModelResult,
   CreateTaskRequest,
   ContextUsage,
+  DeskDiff,
   HarnessDesk,
+  HarnessProbe,
   Health,
   ImportReport,
   ImportTemplateRequest,
@@ -47,6 +49,8 @@ import type {
   UpdateStatus,
   UpdateRoutineRequest,
   UsageSummary,
+  WorkspaceEntry,
+  WorkspaceFile,
 } from "./types";
 import { auditSearch, type AuditQuery } from "./audit";
 
@@ -207,4 +211,31 @@ export const api = {
   checkUpdate: () => request<UpdateStatus>("/api/update"),
   /** 下载校验并替换服务端二进制，必要时触发自动重启。 */
   applyUpdate: () => postJson<UpdateApplyResult>("/api/update", {}),
+  /** 探测本机已安装的外部 Agent CLI。 */
+  listHarnesses: () => request<HarnessProbe[]>("/api/harnesses"),
+  /** 查看 harness 独立目录里单个文件的 Unified Diff。 */
+  deskDiff: (roomId: RoomId, botId: BotId, path: string) =>
+    request<DeskDiff>(
+      `/api/rooms/${encodeURIComponent(roomId)}/desks/${encodeURIComponent(botId)}/diff?path=${encodeURIComponent(path)}`,
+    ),
+  /** 只清空 harness 的会话号，保留独立目录和里面的改动。 */
+  resetDeskSession: (roomId: RoomId, botId: BotId) =>
+    request<void>(
+      `/api/rooms/${encodeURIComponent(roomId)}/desks/${encodeURIComponent(botId)}/reset-session`,
+      { method: "POST" },
+    ),
+  /** 列出工作目录（或指定 harness 工位）的文件与子目录。 */
+  listFiles: (roomId: RoomId, dir = "", desk?: BotId) => {
+    const q = new URLSearchParams();
+    if (dir) q.set("dir", dir);
+    if (desk) q.set("desk", desk);
+    const qs = q.toString();
+    return request<WorkspaceEntry[]>(`/api/rooms/${encodeURIComponent(roomId)}/files${qs ? `?${qs}` : ""}`);
+  },
+  /** 读取工作目录（或指定 harness 工位）里的单个文本文件。 */
+  readFile: (roomId: RoomId, path: string, desk?: BotId) => {
+    const q = new URLSearchParams({ path });
+    if (desk) q.set("desk", desk);
+    return request<WorkspaceFile>(`/api/rooms/${encodeURIComponent(roomId)}/files/content?${q.toString()}`);
+  },
 };

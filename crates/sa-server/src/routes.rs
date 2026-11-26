@@ -271,6 +271,83 @@ pub async fn list_desks(
     Ok(Json(state.orchestrator.room_desks(&room_id).await?))
 }
 
+#[derive(Deserialize)]
+pub struct DiffQuery {
+    path: String,
+}
+
+/// 查看 harness 独立目录里单个文件的 Unified Diff。
+pub async fn desk_diff(
+    State(state): State<AppState>,
+    Path((room_id, bot_id)): Path<(RoomId, BotId)>,
+    Query(query): Query<DiffQuery>,
+) -> Result<Json<sa_protocol::DeskDiff>, AppError> {
+    Ok(Json(
+        state
+            .orchestrator
+            .desk_diff(&room_id, &bot_id, &query.path)
+            .await?,
+    ))
+}
+
+/// 只清空 harness 的会话号，保留独立目录和改动。
+pub async fn reset_desk_session(
+    State(state): State<AppState>,
+    Path((room_id, bot_id)): Path<(RoomId, BotId)>,
+) -> Result<StatusCode, AppError> {
+    state
+        .orchestrator
+        .reset_desk_session(&room_id, &bot_id)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+pub struct FilesQuery {
+    #[serde(default)]
+    dir: String,
+    desk: Option<BotId>,
+}
+
+/// 列出工作目录（或指定 harness 工位）的文件与子目录。
+pub async fn list_files(
+    State(state): State<AppState>,
+    Path(room_id): Path<RoomId>,
+    Query(query): Query<FilesQuery>,
+) -> Result<Json<Vec<sa_protocol::WorkspaceEntry>>, AppError> {
+    Ok(Json(
+        state
+            .orchestrator
+            .list_workspace_files(&room_id, &query.dir, query.desk.as_ref())
+            .await?,
+    ))
+}
+
+#[derive(Deserialize)]
+pub struct FileContentQuery {
+    path: String,
+    desk: Option<BotId>,
+}
+
+/// 读取工作目录（或指定 harness 工位）里的单个文本文件。
+pub async fn read_file(
+    State(state): State<AppState>,
+    Path(room_id): Path<RoomId>,
+    Query(query): Query<FileContentQuery>,
+) -> Result<Json<sa_protocol::WorkspaceFile>, AppError> {
+    Ok(Json(
+        state
+            .orchestrator
+            .read_workspace_file(&room_id, &query.path, query.desk.as_ref())
+            .await?,
+    ))
+}
+
+/// 探测本机已安装的外部 Agent CLI。
+pub async fn list_harnesses(State(state): State<AppState>) -> Json<Vec<sa_protocol::HarnessProbe>> {
+    Json(state.orchestrator.probe_harnesses().await)
+}
+
 /// 入口 Bot 在这个房间里的对话占了上下文窗口多少。
 pub async fn room_context(
     State(state): State<AppState>,

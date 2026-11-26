@@ -1,15 +1,18 @@
-//! harness：本机装好的 Agent 命令行（Claude Code、Codex、OpenCode，或者自己写的命令）。
+//! harness：本机装好的 Agent 命令行（Claude Code、Codex、OpenCode、Gemini CLI、Kimi Code、
+//! 通用 ACP Agent，或者自己写的命令）。
 //!
-//! Myriad 在 Bot 的工位目录里启动它，把这一轮的话交给它，一行一行读它的 JSON 输出，
-//! 转成和内置 Bot 一样的文字和步骤。点停止时连它开出来的子进程一起结束。
+//! Myriad 在 Bot 的工位目录里启动它，把这一轮的话交给它，一行一行读它的 JSON / ACP 输出，
+//! 转成和内置 Bot 一样的文字、思考、步骤和用量。点停止时连它开出来的子进程一起结束。
 
-use sa_kernel::{Observer, StepEnd, TurnEnd};
-use sa_protocol::Harness;
+use sa_kernel::{ApprovalRequest, Observer, StepEnd, TurnEnd};
+use sa_llm::Usage;
+use sa_protocol::{Harness, HarnessProbe, PermissionMode};
 use sa_tools::process::Tree;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
@@ -17,7 +20,11 @@ use tokio_util::sync::CancellationToken;
 /// 出错时最多带上这么多字的标准错误输出。
 const STDERR_TAIL: usize = 2000;
 /// harness 退出后，再等它剩下的输出多久。
-const DRAIN: std::time::Duration = std::time::Duration::from_secs(1);
+const DRAIN: Duration = Duration::from_secs(1);
+/// 长时间没有任何输出时自动中止，防止 CLI 卡死在交互提示上。
+const IDLE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+/// 探测本机已安装 CLI 版本时的超时时间。
+const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// 启动一次 harness 要的东西。
 pub(crate) struct Launch<'a> {
@@ -28,6 +35,8 @@ pub(crate) struct Launch<'a> {
     pub prompt: &'a str,
     /// 上次的会话号，有的话接着聊。
     pub session: Option<&'a str>,
+    /// 房间的权限档位：完全权限时透传给支持的 CLI（跳过二次审批）。
+    pub permission: PermissionMode,
 }
 
 pub(crate) struct Finished {
@@ -36,13 +45,20 @@ pub(crate) struct Finished {
     pub session: Option<String>,
     /// 它说的话（不含步骤）。
     pub text: String,
+    /// 它的思考过程（若 CLI 输出了 thinking / reasoning）。
+    pub reasoning: Option<String>,
 }
 
 /// harness 输出里的一件事。
 #[derive(Debug, Clone, PartialEq)]
 enum Event {
     Session(String),
+    /// 完整的段落文字（不同段落之间用空行分隔）。
     Text(String),
+    /// 流式增量片段（直接拼接，不加空行）。
+    TextDelta(String),
+    /// 思考过程（完整或增量）。
+    Reasoning(String),
     Started {
         id: String,
         tool: String,
@@ -55,27 +71,45 @@ enum Event {
         ok: bool,
         output: String,
     },
+    Usage {
+        model: String,
+        usage: Usage,
+    },
     Failed(String),
 }
 
-/// 把命令拆成程序和参数：按空白分开，双引号里的空白不算。
+/// 把命令拆成程序和参数：按空白分开，支持双引号与单引号（保留 Windows 路径里的反斜杠）。
 pub(crate) fn split_command(text: &str) -> Vec<String> {
     let mut parts = vec![];
     let mut current = String::new();
-    let (mut quoted, mut any) = (false, false);
-    for c in text.chars() {
-        match c {
-            '"' => {
-                quoted = !quoted;
+    let mut quote: Option<char> = None;
+    let mut any = false;
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match (quote, c) {
+            (Some('"'), '\\') if chars.peek() == Some(&'"') => {
+                chars.next();
+                current.push('"');
                 any = true;
             }
-            c if c.is_whitespace() && !quoted => {
+            (Some(q), c) if c == q => {
+                quote = None;
+                any = true;
+            }
+            (None, '"' | '\'') => {
+                quote = Some(c);
+                any = true;
+            }
+            (None, c) if c.is_whitespace() => {
                 if any || !current.is_empty() {
                     parts.push(std::mem::take(&mut current));
                 }
                 any = false;
             }
-            c => current.push(c),
+            (_, c) => {
+                current.push(c);
+                any = true;
+            }
         }
     }
     if any || !current.is_empty() {
@@ -84,7 +118,52 @@ pub(crate) fn split_command(text: &str) -> Vec<String> {
     parts
 }
 
-/// 在 PATH 里找程序。Windows 上按 PATHEXT 补后缀（`claude` 其实是 `claude.cmd`）。
+fn is_executable_file(candidate: &Path) -> bool {
+    let Ok(meta) = std::fs::metadata(candidate) else {
+        return false;
+    };
+    if !meta.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        meta.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+/// 常见的用户级 CLI 安装目录（GUI 启动或非登录 shell 下可能不在 PATH 里）。
+fn vendor_bin_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from);
+    if let Some(home) = home {
+        dirs.push(home.join(".local/bin"));
+        dirs.push(home.join(".opencode/bin"));
+        dirs.push(home.join(".kimi-code/bin"));
+        dirs.push(home.join(".pi/agent/bin"));
+        dirs.push(home.join(".cargo/bin"));
+    }
+    #[cfg(windows)]
+    {
+        if let Some(appdata) = std::env::var_os("APPDATA") {
+            dirs.push(PathBuf::from(appdata).join("npm"));
+        }
+        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+            dirs.push(PathBuf::from(local).join("agy/bin"));
+        }
+    }
+    dirs
+}
+
+/// 在 PATH 与常见安装目录里找程序。Windows 上按 PATHEXT 补后缀（`claude` 其实是 `claude.cmd`）。
+///
+/// 安全约束：搜索 PATH 时跳过相对路径项，避免工作目录里的恶意同名文件劫持命令。
 pub fn find_program(program: &str, dir: &Path) -> Option<PathBuf> {
     let path = Path::new(program);
     let exts: Vec<String> = if cfg!(windows) {
@@ -95,16 +174,51 @@ pub fn find_program(program: &str, dir: &Path) -> Option<PathBuf> {
     } else {
         vec![String::new()]
     };
-    let found = |base: &Path| {
+    let find_file = |base: &Path, require_exec: bool| {
         exts.iter()
             .map(|ext| PathBuf::from(format!("{}{ext}", base.display())))
-            .find(|candidate| candidate.is_file())
+            .find(|candidate| {
+                if require_exec {
+                    is_executable_file(candidate)
+                } else {
+                    candidate.is_file()
+                }
+            })
     };
     // `./scripts/harness` 这种带目录的相对路径从 harness 的工作目录算起。
     if path.components().count() > 1 || path.is_absolute() {
-        return found(&dir.join(path));
+        return find_file(&dir.join(path), false);
     }
-    std::env::split_paths(&std::env::var_os("PATH")?).find_map(|dir| found(&dir.join(path)))
+    if let Some(path_env) = std::env::var_os("PATH") {
+        if let Some(found) = std::env::split_paths(&path_env)
+            .filter(|p| p.is_absolute())
+            .find_map(|p| find_file(&p.join(path), true))
+        {
+            return Some(found);
+        }
+    }
+    vendor_bin_dirs()
+        .into_iter()
+        .find_map(|p| find_file(&p.join(path), true))
+}
+
+/// 构造子进程命令：Windows 下 `.cmd`/`.bat` 经 `cmd.exe /d /s /c` 启动，防止 CreateProcess 失败。
+fn build_command(program: &Path, args: &[String]) -> Command {
+    #[cfg(windows)]
+    {
+        let is_batch = program
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("cmd") || e.eq_ignore_ascii_case("bat"));
+        if is_batch {
+            let mut cmd = Command::new("cmd.exe");
+            cmd.args(["/d", "/s", "/c"]).arg(program).args(args);
+            return cmd;
+        }
+    }
+    let mut cmd = Command::new(program);
+    cmd.args(args);
+    cmd
 }
 
 /// 这种 harness 用哪个程序、哪些参数，提示词从哪给。
@@ -123,14 +237,28 @@ fn plan(launch: &Launch<'_>) -> Result<(PathBuf, Vec<String>, bool), String> {
             .iter()
             .any(|w| w == flag || w.starts_with(&format!("{flag}=")))
     };
+    let full = launch.permission == PermissionMode::Full;
     let mut args = vec![];
     let mut stdin = true;
     match launch.harness {
         Harness::ClaudeCode => {
             args.extend(extra.iter().cloned());
-            args.extend(["-p", "--output-format", "stream-json", "--verbose"].map(String::from));
+            args.extend(
+                [
+                    "-p",
+                    "--output-format",
+                    "stream-json",
+                    "--verbose",
+                    "--include-partial-messages",
+                ]
+                .map(String::from),
+            );
             if !has("--permission-mode") && !has("--dangerously-skip-permissions") {
-                args.extend(["--permission-mode", "acceptEdits"].map(String::from));
+                if full {
+                    args.push("--dangerously-skip-permissions".into());
+                } else {
+                    args.extend(["--permission-mode", "acceptEdits"].map(String::from));
+                }
             }
             if let Some(session) = launch.session {
                 args.extend(["--resume".to_string(), session.to_string()]);
@@ -138,13 +266,36 @@ fn plan(launch: &Launch<'_>) -> Result<(PathBuf, Vec<String>, bool), String> {
         }
         Harness::Codex => {
             args.push("exec".into());
-            args.extend(extra.iter().cloned());
-            args.extend(["--json", "--skip-git-repo-check"].map(String::from));
-            if !has("--sandbox") && !has("-s") && !has("--full-auto") {
-                args.extend(["--sandbox", "workspace-write"].map(String::from));
+            // `resume` 是 `codex exec` 的子命令，必须紧跟在 `exec` 后面。
+            if launch.session.is_some() {
+                args.push("resume".into());
             }
+            args.extend(["--json", "--skip-git-repo-check"].map(String::from));
+            if launch.session.is_some() {
+                args.push("--all".into());
+            }
+            if !has("--sandbox")
+                && !has("-s")
+                && !has("--full-auto")
+                && !has("--dangerously-bypass-approvals-and-sandbox")
+            {
+                if full {
+                    args.push("--dangerously-bypass-approvals-and-sandbox".into());
+                } else {
+                    args.extend(
+                        [
+                            "--sandbox",
+                            "workspace-write",
+                            "-c",
+                            "approval_policy=\"never\"",
+                        ]
+                        .map(String::from),
+                    );
+                }
+            }
+            args.extend(extra.iter().cloned());
             if let Some(session) = launch.session {
-                args.extend(["resume".to_string(), session.to_string()]);
+                args.push(session.to_string());
             }
             args.push("-".into());
         }
@@ -159,7 +310,29 @@ fn plan(launch: &Launch<'_>) -> Result<(PathBuf, Vec<String>, bool), String> {
             args.push(launch.prompt.to_string());
             stdin = false;
         }
-        Harness::Command => args.extend(extra.iter().cloned()),
+        Harness::Gemini => {
+            args.extend(extra.iter().cloned());
+            args.extend(["--output-format", "stream-json"].map(String::from));
+            if full && !has("--yolo") && !has("-y") && !has("--approval-mode") {
+                args.push("--yolo".into());
+            }
+            if let Some(session) = launch.session {
+                args.extend(["--resume".to_string(), session.to_string()]);
+            }
+            args.extend(["-p".to_string(), launch.prompt.to_string()]);
+            stdin = false;
+        }
+        Harness::Kimi => {
+            args.extend(extra.iter().cloned());
+            args.extend(["--print", "--output-format", "stream-json"].map(String::from));
+            if full && !has("--yolo") && !has("-y") {
+                args.push("--yolo".into());
+            }
+            if let Some(session) = launch.session {
+                args.extend(["--session".to_string(), session.to_string()]);
+            }
+        }
+        Harness::Acp | Harness::Command => args.extend(extra.iter().cloned()),
         Harness::Builtin => return Err("内置 Bot 不走 harness".into()),
     }
     let resolved = find_program(&program, launch.dir).ok_or_else(|| {
@@ -169,6 +342,78 @@ fn plan(launch: &Launch<'_>) -> Result<(PathBuf, Vec<String>, bool), String> {
         )
     })?;
     Ok((resolved, args, stdin))
+}
+
+/// 探测本机常见的 Agent CLI 是否已安装以及版本号。
+pub async fn probe_harnesses(dir: &Path) -> Vec<HarnessProbe> {
+    let candidates: &[(Harness, &str, &str)] = &[
+        (Harness::ClaudeCode, "claude", "Claude Code"),
+        (Harness::Codex, "codex", "Codex"),
+        (Harness::OpenCode, "opencode", "OpenCode"),
+        (Harness::Gemini, "gemini", "Gemini CLI"),
+        (Harness::Kimi, "kimi", "Kimi Code"),
+        (Harness::Acp, "cursor-agent", "Cursor Agent (ACP)"),
+    ];
+    let dir = dir.to_path_buf();
+    let futs = candidates.iter().map(|&(harness, program, label)| {
+        let dir = dir.clone();
+        async move {
+            let found = find_program(program, &dir);
+            let version = match &found {
+                Some(path) => probe_version(path).await,
+                None => None,
+            };
+            HarnessProbe {
+                harness,
+                program: program.to_string(),
+                label: label.to_string(),
+                available: found.is_some(),
+                path: found.map(|p| p.display().to_string()),
+                version,
+            }
+        }
+    });
+    futures_util::future::join_all(futs).await
+}
+
+async fn probe_version(program: &Path) -> Option<String> {
+    let mut cmd = build_command(program, &["--version".to_string()]);
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let output = tokio::time::timeout(PROBE_TIMEOUT, cmd.output())
+        .await
+        .ok()?
+        .ok()?;
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    extract_semver(&combined)
+}
+
+fn extract_semver(text: &str) -> Option<String> {
+    for token in text.split(|c: char| c.is_whitespace() || matches!(c, '(' | ')' | ',' | ';')) {
+        let t = token.trim_start_matches(['v', 'V']);
+        let core = t.split('-').next().unwrap_or(t);
+        let mut parts = core.split('.');
+        if let (Some(a), Some(b), Some(c), None) =
+            (parts.next(), parts.next(), parts.next(), parts.next())
+        {
+            if !a.is_empty()
+                && !b.is_empty()
+                && !c.is_empty()
+                && a.bytes().all(|x| x.is_ascii_digit())
+                && b.bytes().all(|x| x.is_ascii_digit())
+                && c.bytes().all(|x| x.is_ascii_digit())
+            {
+                return Some(t.to_string());
+            }
+        }
+    }
+    None
 }
 
 /// 「以后都允许」记的是哪个 Bot 用哪个 harness、哪条命令：换了 harness 或命令就要重新问。
@@ -245,19 +490,22 @@ pub(crate) async fn run(
     observer: &dyn Observer,
     cancel: &CancellationToken,
 ) -> Finished {
+    if launch.harness == Harness::Acp {
+        return run_acp(launch, observer, cancel).await;
+    }
     let mut session = launch.session.map(String::from);
     let failed = |reason: String, session: Option<String>| Finished {
         end: TurnEnd::Failed(reason),
         session,
         text: String::new(),
+        reasoning: None,
     };
     let (program, args, use_stdin) = match plan(launch) {
         Ok(plan) => plan,
         Err(reason) => return failed(reason, session),
     };
-    let mut command = Command::new(&program);
+    let mut command = build_command(&program, &args);
     command
-        .args(&args)
         .current_dir(launch.dir)
         .env("SA_HARNESS_DIR", launch.dir)
         .stdin(if use_stdin {
@@ -298,12 +546,17 @@ pub(crate) async fn run(
         .map(|err| tokio::spawn(read_stderr_tail(err)));
     let mut reader = BufReader::new(child.stdout().expect("上面接了管道"));
     let mut text = String::new();
+    let mut reasoning = String::new();
+    // 已经通过流式增量发出过文字时，后续收到的同轮完整 assistant 块不再重复拼接。
+    let mut streamed_block = false;
     let mut open: HashMap<String, ()> = HashMap::new();
     let mut failure: Option<String> = None;
     let mut seen = 0usize;
+    let mut thoughts = 0usize;
 
     // 它自己退出了，开出来的后台进程可能还占着输出：再读一小会儿剩下的就不等了。
     let mut exited = None;
+    let mut timed_out = false;
     let stopped = loop {
         let draining = exited.is_some();
         let line = tokio::select! {
@@ -318,35 +571,80 @@ pub(crate) async fn run(
                         .await
                         .unwrap_or(Ok(None))
                 } else {
-                    read_bounded_line(&mut reader).await
+                    match tokio::time::timeout(IDLE_TIMEOUT, read_bounded_line(&mut reader)).await {
+                        Ok(res) => res,
+                        Err(_) => {
+                            timed_out = true;
+                            Ok(None)
+                        }
+                    }
                 }
             } => line,
         };
         let Ok(Some(line)) = line else { break false };
-        let Ok(value) = serde_json::from_str::<Value>(line.trim()) else {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
+            // 自定义命令直接印出普通文字时照样能看；别的 harness 的杂音（启动横幅之类）跳过。
+            if launch.harness == Harness::Command {
+                let piece = if text.is_empty() {
+                    trimmed.to_string()
+                } else {
+                    format!("\n{trimmed}")
+                };
+                text.push_str(&piece);
+                observer.text_delta(&piece).await;
+            }
             continue;
         };
         for event in parse(launch.harness, &value) {
             match event {
-                Event::Session(id) => session = Some(id),
-                Event::Text(said) => {
-                    let said = said.trim();
-                    if said.is_empty() {
+                Event::Session(id) if !id.is_empty() => session = Some(id),
+                Event::Session(_) => {}
+                Event::TextDelta(delta) if !delta.is_empty() => {
+                    streamed_block = true;
+                    text.push_str(&delta);
+                    observer.text_delta(&delta).await;
+                }
+                Event::TextDelta(_) => {}
+                Event::Text(chunk) if !chunk.is_empty() => {
+                    if streamed_block {
+                        streamed_block = false;
                         continue;
                     }
-                    let chunk = if text.is_empty() {
-                        said.to_string()
+                    let piece = if text.is_empty() {
+                        chunk
                     } else {
-                        format!("\n\n{said}")
+                        format!("\n\n{chunk}")
                     };
-                    observer.text_delta(&chunk).await;
-                    text.push_str(&chunk);
+                    text.push_str(&piece);
+                    observer.text_delta(&piece).await;
                 }
+                Event::Text(_) => {
+                    streamed_block = false;
+                }
+                Event::Reasoning(chunk) if !chunk.is_empty() => {
+                    if !reasoning.is_empty() {
+                        reasoning.push('\n');
+                    }
+                    reasoning.push_str(&chunk);
+                    // 完整思考块折叠成步骤显示在时间线上，方便点开看推理过程。
+                    if chunk.chars().count() >= 12 {
+                        thoughts += 1;
+                        let key = format!("think-{thoughts}");
+                        observer.tool_started(&key, "think", "思考", "").await;
+                        observer.tool_finished(&key, StepEnd::Ok, &chunk).await;
+                    }
+                }
+                Event::Reasoning(_) => {}
                 Event::Started { id, tool, title } => {
+                    streamed_block = false;
                     seen += 1;
-                    let id = format!("h{seen}-{id}");
-                    if open.insert(id.clone(), ()).is_none() {
-                        observer.tool_started(&id, &tool, &title, "").await;
+                    let key = format!("h{seen}-{id}");
+                    if open.insert(key.clone(), ()).is_none() {
+                        observer.tool_started(&key, &tool, &title, "").await;
                     }
                 }
                 Event::Ended {
@@ -374,11 +672,15 @@ pub(crate) async fn run(
                     let end = if ok { StepEnd::Ok } else { StepEnd::Failed };
                     observer.tool_finished(&key, end, &output).await;
                 }
+                Event::Usage { model, usage } => {
+                    observer.usage(&model, usage).await;
+                }
                 Event::Failed(reason) => failure = Some(reason),
             }
         }
     };
 
+    let reasoning_out = (!reasoning.trim().is_empty()).then_some(reasoning);
     if stopped {
         child.kill();
         let _ = child.wait().await;
@@ -386,6 +688,21 @@ pub(crate) async fn run(
             end: TurnEnd::Cancelled,
             session,
             text,
+            reasoning: reasoning_out,
+        };
+    }
+    if timed_out {
+        child.kill();
+        let _ = child.wait().await;
+        return Finished {
+            end: TurnEnd::Failed(format!(
+                "{} 超过 {} 分钟没有任何输出，已自动停止",
+                launch.harness.label(),
+                IDLE_TIMEOUT.as_secs() / 60
+            )),
+            session,
+            text,
+            reasoning: reasoning_out,
         };
     }
     let status = match exited {
@@ -394,7 +711,7 @@ pub(crate) async fn run(
             _ = cancel.cancelled() => {
                 child.kill();
                 let _ = child.wait().await;
-                return Finished { end: TurnEnd::Cancelled, session, text };
+                return Finished { end: TurnEnd::Cancelled, session, text, reasoning: reasoning_out };
             }
             status = child.wait() => status,
         },
@@ -429,7 +746,347 @@ pub(crate) async fn run(
             })
         }
     };
-    Finished { end, session, text }
+    Finished {
+        end,
+        session,
+        text,
+        reasoning: reasoning_out,
+    }
+}
+
+async fn send_acp(stdin: &mut tokio::process::ChildStdin, value: &Value) -> Result<(), String> {
+    let mut line = serde_json::to_string(value).unwrap_or_default();
+    line.push('\n');
+    stdin
+        .write_all(line.as_bytes())
+        .await
+        .map_err(|e| e.to_string())?;
+    stdin.flush().await.map_err(|e| e.to_string())
+}
+
+/// 通用 ACP（Agent Client Protocol）stdio JSON-RPC 驱动：
+/// 支持 `cursor-agent acp`、`gemini --acp`、`kimi acp`、`opencode acp`、`goose acp` 等所有 ACP Agent。
+async fn run_acp(
+    launch: &Launch<'_>,
+    observer: &dyn Observer,
+    cancel: &CancellationToken,
+) -> Finished {
+    let mut session = launch.session.map(String::from);
+    let failed = |reason: String, session: Option<String>| Finished {
+        end: TurnEnd::Failed(reason),
+        session,
+        text: String::new(),
+        reasoning: None,
+    };
+    let (program, args, _) = match plan(launch) {
+        Ok(plan) => plan,
+        Err(reason) => return failed(reason, session),
+    };
+    let mut command = build_command(&program, &args);
+    command
+        .current_dir(launch.dir)
+        .env("SA_HARNESS_DIR", launch.dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    for name in sa_tools::hidden_env() {
+        command.env_remove(name);
+    }
+    let mut child = match Tree::spawn(command) {
+        Ok(child) => child,
+        Err(error) => return failed(format!("ACP Agent 启动不了：{error}"), session),
+    };
+    let mut stdin = match child.stdin() {
+        Some(stdin) => stdin,
+        None => return failed("ACP Agent 标准输入不可用".into(), session),
+    };
+    let stderr = child
+        .stderr()
+        .map(|err| tokio::spawn(read_stderr_tail(err)));
+    let mut reader = BufReader::new(child.stdout().expect("上面接了管道"));
+
+    // 1. initialize
+    let init = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": 1,
+            "clientCapabilities": {},
+            "clientInfo": { "name": "myriad", "version": env!("CARGO_PKG_VERSION") }
+        }
+    });
+    if let Err(error) = send_acp(&mut stdin, &init).await {
+        child.kill();
+        return failed(format!("ACP initialize 发送失败：{error}"), session);
+    }
+
+    let mut text = String::new();
+    let mut reasoning = String::new();
+    let mut open: HashMap<String, (String, String)> = HashMap::new();
+    let mut stage = 1u8; // 1 = wait init, 2 = wait session, 3 = wait prompt
+    let mut failure: Option<String> = None;
+    let cwd = launch.dir.display().to_string();
+
+    let stopped = loop {
+        let line = tokio::select! {
+            _ = cancel.cancelled() => break true,
+            line = tokio::time::timeout(IDLE_TIMEOUT, read_bounded_line(&mut reader)) => match line {
+                Ok(res) => res,
+                Err(_) => {
+                    failure = Some("ACP Agent 长时间无响应，已自动停止".into());
+                    break false;
+                }
+            },
+        };
+        let Ok(Some(line)) = line else { break false };
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(msg) = serde_json::from_str::<Value>(trimmed) else {
+            continue;
+        };
+
+        // 响应我方发出的请求（id = 1 / 2 / 3）。
+        if msg.get("method").is_none() {
+            let id = msg["id"].as_u64();
+            if let Some(err) = msg.get("error").filter(|v| !v.is_null()) {
+                let reason = str_of(err, "message");
+                failure = Some(if reason.is_empty() {
+                    format!("ACP Agent 报错：{err}")
+                } else {
+                    reason.to_string()
+                });
+                break false;
+            }
+            if id == Some(1) && stage == 1 {
+                stage = 2;
+                let req = match &session {
+                    Some(sid) => json!({
+                        "jsonrpc": "2.0",
+                        "id": 2,
+                        "method": "session/load",
+                        "params": { "sessionId": sid, "cwd": cwd, "mcpServers": [] }
+                    }),
+                    None => json!({
+                        "jsonrpc": "2.0",
+                        "id": 2,
+                        "method": "session/new",
+                        "params": { "cwd": cwd, "mcpServers": [] }
+                    }),
+                };
+                if let Err(error) = send_acp(&mut stdin, &req).await {
+                    failure = Some(format!("ACP 创建会话失败：{error}"));
+                    break false;
+                }
+            } else if id == Some(2) && stage == 2 {
+                if let Some(sid) = msg["result"]["sessionId"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                {
+                    session = Some(sid.to_string());
+                }
+                let Some(sid) = session.clone() else {
+                    failure = Some("ACP Agent 没有返回 sessionId".into());
+                    break false;
+                };
+                stage = 3;
+                let req = json!({
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "session/prompt",
+                    "params": {
+                        "sessionId": sid,
+                        "prompt": [{ "type": "text", "text": launch.prompt }]
+                    }
+                });
+                if let Err(error) = send_acp(&mut stdin, &req).await {
+                    failure = Some(format!("ACP 发送提示词失败：{error}"));
+                    break false;
+                }
+            } else if id == Some(3) && stage == 3 {
+                // 本轮 prompt 正常结束。
+                break false;
+            }
+            continue;
+        }
+
+        // Agent 主动发来的通知或请求。
+        match str_of(&msg, "method") {
+            "session/update" => {
+                let update = &msg["params"]["update"];
+                match str_of(update, "sessionUpdate") {
+                    "agent_message_chunk" => {
+                        let chunk = str_of(&update["content"], "text");
+                        if !chunk.is_empty() {
+                            text.push_str(chunk);
+                            observer.text_delta(chunk).await;
+                        }
+                    }
+                    "agent_thought_chunk" => {
+                        let chunk = str_of(&update["content"], "text");
+                        if !chunk.is_empty() {
+                            reasoning.push_str(chunk);
+                        }
+                    }
+                    "tool_call" | "tool_call_update" => {
+                        let call_id = str_of(update, "toolCallId").to_string();
+                        if call_id.is_empty() {
+                            continue;
+                        }
+                        let kind = str_of(update, "kind");
+                        let tool = match kind {
+                            "execute" => "shell",
+                            "read" => "read",
+                            "edit" | "delete" | "move" => "edit",
+                            "search" => "search",
+                            "fetch" => "web_fetch",
+                            other if !other.is_empty() => other,
+                            _ => "tool",
+                        };
+                        let title = match str_of(update, "title") {
+                            "" => tool.to_string(),
+                            t => t.to_string(),
+                        };
+                        let status = str_of(update, "status");
+                        let key = format!("acp-{call_id}");
+                        if !open.contains_key(&key) {
+                            open.insert(key.clone(), (tool.to_string(), title.clone()));
+                            observer.tool_started(&key, tool, &title, "").await;
+                        }
+                        if matches!(status, "completed" | "failed") {
+                            open.remove(&key);
+                            let out = content_text(&update["content"]);
+                            let end = if status == "completed" {
+                                StepEnd::Ok
+                            } else {
+                                StepEnd::Failed
+                            };
+                            observer.tool_finished(&key, end, &out).await;
+                        }
+                    }
+                    "usage_update" => {
+                        let used = update["used"].as_u64().unwrap_or(0);
+                        if used > 0 {
+                            observer
+                                .usage(
+                                    "acp",
+                                    Usage {
+                                        input_tokens: used,
+                                        output_tokens: 0,
+                                        cached_tokens: 0,
+                                    },
+                                )
+                                .await;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            "session/request_permission" => {
+                let req_id = msg["id"].clone();
+                let params = &msg["params"];
+                let options = params["options"].as_array().cloned().unwrap_or_default();
+                let pick = |wanted: &[&str]| {
+                    options
+                        .iter()
+                        .find(|opt| wanted.contains(&str_of(opt, "kind")))
+                        .and_then(|opt| opt["optionId"].as_str())
+                        .map(String::from)
+                };
+                let allow_id = pick(&["allow_once", "allow_always"]).or_else(|| {
+                    options
+                        .first()
+                        .and_then(|o| o["optionId"].as_str())
+                        .map(String::from)
+                });
+                let deny_id = pick(&["reject_once", "reject_always"]);
+
+                let approved = if launch.permission == PermissionMode::Full {
+                    true
+                } else {
+                    let title = match str_of(&params["toolCall"], "title") {
+                        "" => "ACP Agent 请求执行操作",
+                        t => t,
+                    };
+                    let req = ApprovalRequest {
+                        call_id: "acp-perm",
+                        tool: "harness",
+                        title,
+                        reason: "ACP Agent 请求你批准这一步操作。",
+                        input: &params["toolCall"],
+                    };
+                    tokio::select! {
+                        ok = observer.request_approval(req) => ok,
+                        _ = cancel.cancelled() => false,
+                    }
+                };
+                let outcome = match (approved, allow_id, deny_id) {
+                    (true, Some(id), _) => json!({ "outcome": "selected", "optionId": id }),
+                    (false, _, Some(id)) => json!({ "outcome": "selected", "optionId": id }),
+                    _ => json!({ "outcome": "cancelled" }),
+                };
+                let reply = json!({
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "result": { "outcome": outcome }
+                });
+                let _ = send_acp(&mut stdin, &reply).await;
+            }
+            _ => {}
+        }
+    };
+
+    drop(stdin);
+    child.kill();
+    let _ = child.wait().await;
+    if !reasoning.trim().is_empty() {
+        observer
+            .tool_started("acp-think", "think", "思考", "")
+            .await;
+        observer
+            .tool_finished("acp-think", StepEnd::Ok, reasoning.trim())
+            .await;
+    }
+    let reasoning_out = (!reasoning.trim().is_empty()).then_some(reasoning);
+    if stopped {
+        return Finished {
+            end: TurnEnd::Cancelled,
+            session,
+            text,
+            reasoning: reasoning_out,
+        };
+    }
+    let said = match stderr {
+        Some(mut task) => match tokio::time::timeout(DRAIN, &mut task).await {
+            Ok(said) => said.unwrap_or_default(),
+            Err(_) => {
+                task.abort();
+                String::new()
+            }
+        },
+        None => String::new(),
+    };
+    let end = match failure {
+        Some(reason) => TurnEnd::Failed(reason),
+        None if stage == 3 => TurnEnd::Completed,
+        None => {
+            let tail = tail(said.trim(), STDERR_TAIL);
+            TurnEnd::Failed(if tail.is_empty() {
+                "ACP Agent 提前退出了".into()
+            } else {
+                format!("ACP Agent 提前退出了：{tail}")
+            })
+        }
+    };
+    Finished {
+        end,
+        session,
+        text,
+        reasoning: reasoning_out,
+    }
 }
 
 fn tail(text: &str, max: usize) -> String {
@@ -451,7 +1108,9 @@ fn parse(harness: Harness, value: &Value) -> Vec<Event> {
         Harness::ClaudeCode => parse_claude(value),
         Harness::Codex => parse_codex(value),
         Harness::OpenCode => parse_opencode(value),
-        Harness::Command | Harness::Builtin => parse_plain(value),
+        Harness::Gemini => parse_gemini(value),
+        Harness::Kimi => parse_kimi(value),
+        Harness::Command | Harness::Builtin | Harness::Acp => parse_plain(value),
     }
 }
 
@@ -487,7 +1146,11 @@ fn content_text(content: &Value) -> String {
         Value::String(text) => text.clone(),
         Value::Array(parts) => parts
             .iter()
-            .filter_map(|part| part["text"].as_str())
+            .filter_map(|part| {
+                part["text"]
+                    .as_str()
+                    .or_else(|| part["content"]["text"].as_str())
+            })
             .collect::<Vec<_>>()
             .join("\n"),
         _ => String::new(),
@@ -504,9 +1167,60 @@ fn parse_claude(value: &Value) -> Vec<Event> {
         .cloned()
         .unwrap_or_default();
     match str_of(value, "type") {
+        // `--include-partial-messages` 带来的实时文字/思考增量。
+        "stream_event" => {
+            let ev = &value["event"];
+            if str_of(ev, "type") == "content_block_delta" {
+                let delta = &ev["delta"];
+                match str_of(delta, "type") {
+                    "text_delta" => {
+                        let t = str_of(delta, "text");
+                        if !t.is_empty() {
+                            events.push(Event::TextDelta(t.to_string()));
+                        }
+                    }
+                    "thinking_delta" => {
+                        let t = str_of(delta, "thinking");
+                        if !t.is_empty() {
+                            events.push(Event::Reasoning(t.to_string()));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
         "assistant" => {
+            // 过滤 Claude Code 续聊时的合成占位回复。
+            if str_of(&value["message"], "model") == "<synthetic>" {
+                return events;
+            }
+            if value["isApiErrorMessage"].as_bool().unwrap_or(false)
+                || value.get("error").is_some_and(|e| !e.is_null())
+            {
+                let msg = str_of(value, "error");
+                let text = parts
+                    .iter()
+                    .filter_map(|p| p["text"].as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let reason = if !text.is_empty() {
+                    text
+                } else if !msg.is_empty() {
+                    msg.to_string()
+                } else {
+                    "Claude Code 接口报错".into()
+                };
+                events.push(Event::Failed(reason));
+                return events;
+            }
             for part in &parts {
                 match str_of(part, "type") {
+                    "thinking" => {
+                        let t = str_of(part, "thinking");
+                        if !t.is_empty() {
+                            events.push(Event::Reasoning(t.to_string()));
+                        }
+                    }
                     "text" => events.push(Event::Text(str_of(part, "text").to_string())),
                     "tool_use" => {
                         let (tool, title) = claude_tool(str_of(part, "name"), &part["input"]);
@@ -531,14 +1245,35 @@ fn parse_claude(value: &Value) -> Vec<Event> {
                 });
             }
         }
-        "result" if value["is_error"].as_bool().unwrap_or(false) => {
-            let said = str_of(value, "result");
-            let reason = if said.is_empty() {
-                format!("Claude Code 没做完（{}）", str_of(value, "subtype"))
-            } else {
-                said.to_string()
-            };
-            events.push(Event::Failed(reason));
+        "result" => {
+            if let Some(u) = value.get("usage").filter(|v| v.is_object()) {
+                let input_tokens = u["input_tokens"].as_u64().unwrap_or(0);
+                let output_tokens = u["output_tokens"].as_u64().unwrap_or(0);
+                let cached_tokens = u["cache_read_input_tokens"].as_u64().unwrap_or(0);
+                if input_tokens + output_tokens + cached_tokens > 0 {
+                    let model = match str_of(value, "model") {
+                        "" => "claude-code",
+                        m => m,
+                    };
+                    events.push(Event::Usage {
+                        model: model.to_string(),
+                        usage: Usage {
+                            input_tokens,
+                            output_tokens,
+                            cached_tokens,
+                        },
+                    });
+                }
+            }
+            if value["is_error"].as_bool().unwrap_or(false) {
+                let said = str_of(value, "result");
+                let reason = if said.is_empty() {
+                    format!("Claude Code 没做完（{}）", str_of(value, "subtype"))
+                } else {
+                    said.to_string()
+                };
+                events.push(Event::Failed(reason));
+            }
         }
         _ => {}
     }
@@ -548,22 +1283,35 @@ fn parse_claude(value: &Value) -> Vec<Event> {
 fn codex_item(item: &Value) -> Option<(String, String)> {
     let kind = str_of(item, "type");
     Some(match kind {
-        "command_execution" => ("shell".into(), str_of(item, "command").to_string()),
-        "file_change" => {
+        "command_execution" | "commandExecution" => {
+            let cmd = match str_of(item, "command") {
+                "" => str_of(item, "cmd"),
+                c => c,
+            };
+            ("shell".into(), cmd.to_string())
+        }
+        "file_change" | "fileChange" => {
             let paths: Vec<&str> = item["changes"]
                 .as_array()
                 .map(|c| c.iter().filter_map(|c| c["path"].as_str()).collect())
                 .unwrap_or_default();
             ("edit".into(), format!("改文件 {}", paths.join("、")))
         }
-        "mcp_tool_call" => (
-            str_of(item, "tool").to_string(),
-            format!("{} {}", str_of(item, "server"), str_of(item, "tool")),
-        ),
-        "web_search" => (
+        "mcp_tool_call" | "mcpToolCall" => {
+            let tool = match str_of(item, "tool") {
+                "" => str_of(item, "name"),
+                t => t,
+            };
+            (
+                tool.to_string(),
+                format!("{} {tool}", str_of(item, "server")),
+            )
+        }
+        "web_search" | "webSearch" => (
             "web_fetch".into(),
             format!("搜索 {}", str_of(item, "query")),
         ),
+        "plan" | "update_plan" => ("todo".into(), "更新计划".into()),
         _ => return None,
     })
 }
@@ -577,26 +1325,75 @@ fn parse_codex(value: &Value) -> Vec<Event> {
             .map(|(tool, title)| vec![Event::Started { id, tool, title }])
             .unwrap_or_default(),
         "item.completed" => {
-            if str_of(item, "type") == "agent_message" {
-                return vec![Event::Text(str_of(item, "text").to_string())];
+            match str_of(item, "type") {
+                "agent_message" => return vec![Event::Text(str_of(item, "text").to_string())],
+                "reasoning" => {
+                    let t = str_of(item, "text");
+                    return if t.is_empty() {
+                        vec![]
+                    } else {
+                        vec![Event::Reasoning(t.to_string())]
+                    };
+                }
+                _ => {}
             }
             let Some((tool, title)) = codex_item(item) else {
                 return vec![];
             };
-            let ok = match item["exit_code"].as_i64() {
-                Some(code) => code == 0,
-                None => str_of(item, "status") != "failed",
-            };
-            let output = match str_of(item, "aggregated_output") {
-                "" => str_of(&item["result"], "content").to_string(),
-                text => text.to_string(),
-            };
+            let status = str_of(item, "status");
+            let has_error = item.get("error").is_some_and(|e| !e.is_null());
+            let ok = !has_error
+                && !matches!(status, "failed" | "error" | "declined" | "cancelled")
+                && match item["exit_code"]
+                    .as_i64()
+                    .or_else(|| item["exitCode"].as_i64())
+                {
+                    Some(code) => code == 0,
+                    None => true,
+                };
+            let output = [
+                str_of(item, "aggregated_output"),
+                str_of(item, "aggregatedOutput"),
+                str_of(item, "output"),
+                str_of(item, "summary"),
+                str_of(&item["result"], "content"),
+                str_of(&item["error"], "message"),
+            ]
+            .into_iter()
+            .find(|s| !s.is_empty())
+            .map(String::from)
+            .unwrap_or_else(|| {
+                if has_error {
+                    item["error"].to_string()
+                } else {
+                    String::new()
+                }
+            });
             vec![Event::Ended {
                 id,
                 tool,
                 title,
                 ok,
                 output,
+            }]
+        }
+        "turn.completed" => {
+            let Some(u) = value.get("usage").filter(|v| v.is_object()) else {
+                return vec![];
+            };
+            let input_tokens = u["input_tokens"].as_u64().unwrap_or(0);
+            let output_tokens = u["output_tokens"].as_u64().unwrap_or(0);
+            let cached_tokens = u["cached_input_tokens"].as_u64().unwrap_or(0);
+            if input_tokens + output_tokens + cached_tokens == 0 {
+                return vec![];
+            }
+            vec![Event::Usage {
+                model: "codex".into(),
+                usage: Usage {
+                    input_tokens,
+                    output_tokens,
+                    cached_tokens,
+                },
             }]
         }
         "turn.failed" => vec![Event::Failed(
@@ -618,6 +1415,12 @@ fn parse_opencode(value: &Value) -> Vec<Event> {
     }
     match str_of(value, "type") {
         "text" => events.push(Event::Text(str_of(part, "text").to_string())),
+        "reasoning" => {
+            let t = str_of(part, "text");
+            if !t.is_empty() {
+                events.push(Event::Reasoning(t.to_string()));
+            }
+        }
         "tool_use" => {
             let state = &part["state"];
             let tool = str_of(part, "tool").to_string();
@@ -643,6 +1446,22 @@ fn parse_opencode(value: &Value) -> Vec<Event> {
                 _ => events.push(Event::Started { id, tool, title }),
             }
         }
+        "step_finish" => {
+            let tokens = &part["tokens"];
+            let input_tokens = tokens["input"].as_u64().unwrap_or(0);
+            let output_tokens = tokens["output"].as_u64().unwrap_or(0);
+            let cached_tokens = tokens["cache"]["read"].as_u64().unwrap_or(0);
+            if input_tokens + output_tokens + cached_tokens > 0 {
+                events.push(Event::Usage {
+                    model: "opencode".into(),
+                    usage: Usage {
+                        input_tokens,
+                        output_tokens,
+                        cached_tokens,
+                    },
+                });
+            }
+        }
         "error" => {
             let error = &value["error"];
             let reason = [
@@ -660,10 +1479,98 @@ fn parse_opencode(value: &Value) -> Vec<Event> {
     events
 }
 
+/// Gemini CLI (`gemini -p ... --output-format stream-json`) 的事件解析。
+fn parse_gemini(value: &Value) -> Vec<Event> {
+    let mut events = vec![];
+    if let Some(id) = value["session_id"].as_str().filter(|s| !s.is_empty()) {
+        events.push(Event::Session(id.to_string()));
+    }
+    match str_of(value, "type") {
+        "message" if str_of(value, "role") == "assistant" => {
+            let content = str_of(value, "content");
+            if !content.is_empty() {
+                if value["delta"].as_bool().unwrap_or(false) {
+                    events.push(Event::TextDelta(content.to_string()));
+                } else {
+                    events.push(Event::Text(content.to_string()));
+                }
+            }
+        }
+        "tool_use" => {
+            let name = str_of(value, "tool_name");
+            let id = str_of(value, "tool_id").to_string();
+            let (tool, title) = claude_tool(name, &value["parameters"]);
+            events.push(Event::Started { id, tool, title });
+        }
+        "tool_result" => {
+            let id = str_of(value, "tool_id").to_string();
+            let ok = str_of(value, "status") != "error";
+            let output = str_of(value, "output").to_string();
+            events.push(Event::Ended {
+                id,
+                tool: "tool".into(),
+                title: "工具".into(),
+                ok,
+                output,
+            });
+        }
+        "result" => {
+            if let Some(stats) = value.get("stats").filter(|v| v.is_object()) {
+                let input_tokens = stats["input_tokens"].as_u64().unwrap_or(0);
+                let output_tokens = stats["output_tokens"].as_u64().unwrap_or(0);
+                let cached_tokens = stats["cached"].as_u64().unwrap_or(0);
+                if input_tokens + output_tokens + cached_tokens > 0 {
+                    events.push(Event::Usage {
+                        model: "gemini-cli".into(),
+                        usage: Usage {
+                            input_tokens,
+                            output_tokens,
+                            cached_tokens,
+                        },
+                    });
+                }
+            }
+            if str_of(value, "status") == "error" {
+                let reason = str_of(&value["error"], "message");
+                events.push(Event::Failed(if reason.is_empty() {
+                    "Gemini CLI 执行失败".into()
+                } else {
+                    reason.to_string()
+                }));
+            }
+        }
+        "error" => {
+            let reason = str_of(value, "message");
+            if !reason.is_empty() {
+                events.push(Event::Failed(reason.to_string()));
+            }
+        }
+        _ => {}
+    }
+    events
+}
+
+/// Kimi Code (`kimi --print --output-format stream-json`) 的事件解析。
+fn parse_kimi(value: &Value) -> Vec<Event> {
+    // Kimi Code stream-json 兼容 Claude / OpenAI 风格消息块，同时支持 role="assistant" 顶层块。
+    let mut events = parse_claude(value);
+    if !events.is_empty() {
+        return events;
+    }
+    if str_of(value, "role") == "assistant" {
+        let content = content_text(&value["content"]);
+        if !content.is_empty() {
+            events.push(Event::Text(content));
+        }
+    }
+    events
+}
+
 /// 自定义命令的格式：一行一个 JSON。
 ///
 /// - `{"type":"session","id":"…"}` 会话号，下次通过环境变量 `SA_HARNESS_SESSION` 交回来
 /// - `{"type":"text","text":"…"}` 说的话
+/// - `{"type":"thinking","text":"…"}` 思考过程
 /// - `{"type":"step","id":"1","tool":"shell","title":"cargo test"}` 开始一步
 /// - `{"type":"step_end","id":"1","ok":true,"output":"…"}` 这一步结束
 /// - `{"type":"error","message":"…"}` 做不下去了
@@ -672,6 +1579,7 @@ fn parse_plain(value: &Value) -> Vec<Event> {
     match str_of(value, "type") {
         "session" => vec![Event::Session(id)],
         "text" => vec![Event::Text(str_of(value, "text").to_string())],
+        "thinking" => vec![Event::Reasoning(str_of(value, "text").to_string())],
         "step" => vec![Event::Started {
             id,
             tool: str_of(value, "tool").to_string(),
@@ -707,6 +1615,61 @@ mod tests {
     }
 
     #[test]
+    fn split_command_handles_single_and_double_quotes() {
+        assert_eq!(
+            split_command(r#"claude --model "claude-sonnet" --system-prompt 'hi there'"#),
+            vec![
+                "claude",
+                "--model",
+                "claude-sonnet",
+                "--system-prompt",
+                "hi there"
+            ]
+        );
+    }
+
+    #[test]
+    fn codex_resume_places_subcommand_right_after_exec() {
+        let desk = tempfile::tempdir().unwrap();
+        let fake = desk.path().join("codex-bin");
+        std::fs::write(&fake, "").unwrap();
+        let launch = Launch {
+            harness: Harness::Codex,
+            command: &format!("{} -m o3", fake.display()),
+            dir: desk.path(),
+            prompt: "hi",
+            session: Some("thr_123"),
+            permission: PermissionMode::Full,
+        };
+        let (_, args, stdin) = plan(&launch).unwrap();
+        assert!(stdin);
+        assert_eq!(args[0], "exec");
+        assert_eq!(args[1], "resume");
+        assert!(args.contains(&"--all".to_string()));
+        assert!(args.contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()));
+        assert_eq!(args[args.len() - 2], "thr_123");
+        assert_eq!(args[args.len() - 1], "-");
+    }
+
+    #[test]
+    fn claude_full_permission_passes_skip_permissions() {
+        let desk = tempfile::tempdir().unwrap();
+        let fake = desk.path().join("claude-bin");
+        std::fs::write(&fake, "").unwrap();
+        let launch = Launch {
+            harness: Harness::ClaudeCode,
+            command: &fake.display().to_string(),
+            dir: desk.path(),
+            prompt: "hi",
+            session: None,
+            permission: PermissionMode::Full,
+        };
+        let (_, args, _) = plan(&launch).unwrap();
+        assert!(args.contains(&"--dangerously-skip-permissions".to_string()));
+        assert!(args.contains(&"--include-partial-messages".to_string()));
+    }
+
+    #[test]
     fn approvals_are_kept_per_harness_and_command() {
         let first = approval_key("b1", Harness::Command, "a.sh");
         assert_eq!(first, approval_key("b1", Harness::Command, " a.sh "));
@@ -715,105 +1678,144 @@ mod tests {
     }
 
     #[test]
-    fn commands_split_on_spaces_outside_quotes() {
-        assert_eq!(
-            split_command(r#" "C:\Program Files\x\claude.exe"  --model  opus "" "#),
-            vec![r"C:\Program Files\x\claude.exe", "--model", "opus", ""]
-        );
-    }
-
-    #[test]
-    fn claude_stream_json_turns_into_text_and_steps() {
-        let init = json!({"type":"system","subtype":"init","session_id":"s1"});
-        assert_eq!(parse_claude(&init), vec![Event::Session("s1".into())]);
-        let said = json!({"type":"assistant","session_id":"s1","message":{"content":[
-            {"type":"text","text":"看一下"},
-            {"type":"tool_use","id":"t1","name":"Bash","input":{"command":"cargo test"}}]}});
-        assert_eq!(
-            parse_claude(&said)[1..],
-            [
-                Event::Text("看一下".into()),
-                Event::Started {
-                    id: "t1".into(),
-                    tool: "shell".into(),
-                    title: "Bash cargo test".into()
+    fn parses_claude_codex_opencode_and_gemini_events() {
+        let claude = parse(
+            Harness::ClaudeCode,
+            &json!({
+                "type": "assistant",
+                "session_id": "s1",
+                "message": {
+                    "content": [
+                        {"type": "thinking", "thinking": "先查一下目录结构"},
+                        {"type": "text", "text": "先看一下"},
+                        {"type": "tool_use", "id": "u1", "name": "Read", "input": {"file_path": "a.rs"}}
+                    ]
                 }
-            ]
+            }),
         );
-        let result = json!({"type":"user","message":{"content":[
-            {"type":"tool_result","tool_use_id":"t1","is_error":true,"content":[{"type":"text","text":"1 failed"}]}]}});
-        assert!(matches!(
-            &parse_claude(&result)[0],
-            Event::Ended { id, ok: false, output, .. } if id == "t1" && output == "1 failed"
-        ));
-        let bad =
-            json!({"type":"result","subtype":"error_max_turns","is_error":true,"session_id":"s1"});
-        assert!(
-            matches!(&parse_claude(&bad)[1], Event::Failed(r) if r.contains("error_max_turns"))
+        assert!(claude.contains(&Event::Session("s1".into())));
+        assert!(claude.contains(&Event::Reasoning("先查一下目录结构".into())));
+        assert!(claude.contains(&Event::Text("先看一下".into())));
+        assert!(claude.contains(&Event::Started {
+            id: "u1".into(),
+            tool: "read".into(),
+            title: "Read a.rs".into(),
+        }));
+
+        let claude_usage = parse(
+            Harness::ClaudeCode,
+            &json!({
+                "type": "result",
+                "usage": {"input_tokens": 120, "output_tokens": 45, "cache_read_input_tokens": 30}
+            }),
         );
-    }
-
-    #[test]
-    fn codex_json_events_turn_into_text_and_steps() {
-        let start = json!({"type":"thread.started","thread_id":"th"});
-        assert_eq!(parse_codex(&start), vec![Event::Session("th".into())]);
-        let run = json!({"type":"item.completed","item":{"id":"i1","type":"command_execution",
-            "command":"ls","aggregated_output":"a\n","exit_code":2,"status":"failed"}});
         assert!(matches!(
-            &parse_codex(&run)[0],
-            Event::Ended { ok: false, tool, output, .. } if tool == "shell" && output == "a\n"
+            claude_usage.as_slice(),
+            [Event::Usage { usage, .. }] if usage.input_tokens == 120 && usage.output_tokens == 45 && usage.cached_tokens == 30
         ));
-        let said = json!({"type":"item.completed","item":{"id":"i2","type":"agent_message","text":"好了"}});
-        assert_eq!(parse_codex(&said), vec![Event::Text("好了".into())]);
-        let failed = json!({"type":"turn.failed","error":{"message":"超额"}});
-        assert_eq!(parse_codex(&failed), vec![Event::Failed("超额".into())]);
-    }
 
-    #[test]
-    fn opencode_json_events_turn_into_text_and_steps() {
-        let tool = json!({"type":"tool_use","sessionID":"o1","part":{"tool":"bash","callID":"c1",
-            "state":{"status":"completed","title":"ls","output":"x"}}});
+        let codex = parse(
+            Harness::Codex,
+            &json!({
+                "type": "item.completed",
+                "item": {"id": "c1", "type": "command_execution", "command": "cargo test", "exit_code": 1, "aggregated_output": "failed"}
+            }),
+        );
         assert_eq!(
-            parse_opencode(&tool),
-            vec![
-                Event::Session("o1".into()),
-                Event::Ended {
-                    id: "c1".into(),
-                    tool: "bash".into(),
-                    title: "bash ls".into(),
-                    ok: true,
-                    output: "x".into()
-                }
-            ]
+            codex,
+            vec![Event::Ended {
+                id: "c1".into(),
+                tool: "shell".into(),
+                title: "cargo test".into(),
+                ok: false,
+                output: "failed".into(),
+            }]
         );
+
+        let codex_usage = parse(
+            Harness::Codex,
+            &json!({
+                "type": "turn.completed",
+                "usage": {"input_tokens": 500, "cached_input_tokens": 200, "output_tokens": 80}
+            }),
+        );
+        assert!(matches!(
+            codex_usage.as_slice(),
+            [Event::Usage { usage, .. }] if usage.input_tokens == 500 && usage.cached_tokens == 200
+        ));
+
+        let opencode = parse(
+            Harness::OpenCode,
+            &json!({
+                "type": "tool_use",
+                "sessionID": "oc1",
+                "part": {"callID": "p1", "tool": "bash", "state": {"status": "completed", "title": "ls", "output": "ok"}}
+            }),
+        );
+        assert!(opencode.contains(&Event::Session("oc1".into())));
+        assert!(opencode.contains(&Event::Ended {
+            id: "p1".into(),
+            tool: "bash".into(),
+            title: "bash ls".into(),
+            ok: true,
+            output: "ok".into(),
+        }));
+
+        let gemini = parse(
+            Harness::Gemini,
+            &json!({
+                "type": "message",
+                "session_id": "g1",
+                "role": "assistant",
+                "content": "hello",
+                "delta": true
+            }),
+        );
+        assert!(gemini.contains(&Event::Session("g1".into())));
+        assert!(gemini.contains(&Event::TextDelta("hello".into())));
     }
 
     #[test]
-    fn programs_that_are_not_installed_are_reported_by_name() {
+    fn extract_semver_finds_version_in_cli_output() {
+        assert_eq!(
+            extract_semver("claude 2.1.88 (Claude Code)"),
+            Some("2.1.88".into())
+        );
+        assert_eq!(extract_semver("codex-cli v0.166.0"), Some("0.166.0".into()));
+        assert_eq!(extract_semver("no version here"), None);
+    }
+
+    #[tokio::test]
+    async fn missing_harness_fails_cleanly_with_its_name() {
+        struct Null;
+        #[async_trait::async_trait]
+        impl Observer for Null {
+            async fn text_delta(&self, _: &str) {}
+            async fn tool_started(&self, _: &str, _: &str, _: &str, _: &str) {}
+            async fn tool_finished(&self, _: &str, _: StepEnd, _: &str) {}
+            async fn usage(&self, _: &str, _: sa_llm::Usage) {}
+        }
+        let dir = tempfile::tempdir().unwrap();
         let launch = Launch {
             harness: Harness::Command,
-            command: "sa-surely-not-installed --x",
-            dir: Path::new("."),
-            prompt: "",
-            session: None,
-        };
-        let error = plan(&launch).unwrap_err();
-        assert!(error.contains("sa-surely-not-installed"), "{error}");
-    }
-
-    #[test]
-    fn codex_resumes_its_thread_and_reads_the_prompt_from_stdin() {
-        let launch = Launch {
-            harness: Harness::Codex,
-            command: "sh",
-            dir: Path::new("."),
+            command: "definitely-not-a-real-harness-binary",
+            dir: dir.path(),
             prompt: "hi",
-            session: Some("th"),
+            session: None,
+            permission: PermissionMode::Ask,
         };
-        if let Ok((_, args, stdin)) = plan(&launch) {
-            assert!(stdin);
-            assert_eq!(args[0], "exec");
-            assert_eq!(&args[args.len() - 3..], ["resume", "th", "-"]);
-        }
+        let done = run(&launch, &Null, &CancellationToken::new()).await;
+        assert!(matches!(done.end, TurnEnd::Failed(msg) if msg.contains("找不到")));
+
+        let codex = Launch {
+            harness: Harness::Codex,
+            command: "definitely-not-codex",
+            dir: dir.path(),
+            prompt: "hi",
+            session: None,
+            permission: PermissionMode::Ask,
+        };
+        let done = run(&codex, &Null, &CancellationToken::new()).await;
+        assert!(matches!(done.end, TurnEnd::Failed(msg) if msg.contains("Codex")));
     }
 }

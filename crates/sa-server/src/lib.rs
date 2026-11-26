@@ -131,6 +131,14 @@ pub fn router(state: AppState) -> Router {
         .route("/rooms/{room_id}/context", get(routes::room_context))
         .route("/rooms/{room_id}/desks", get(routes::list_desks))
         .route(
+            "/rooms/{room_id}/desks/{bot_id}/diff",
+            get(routes::desk_diff),
+        )
+        .route(
+            "/rooms/{room_id}/desks/{bot_id}/reset-session",
+            post(routes::reset_desk_session),
+        )
+        .route(
             "/rooms/{room_id}/desks/{bot_id}/accept",
             post(routes::accept_desk),
         )
@@ -138,6 +146,9 @@ pub fn router(state: AppState) -> Router {
             "/rooms/{room_id}/desks/{bot_id}/discard",
             post(routes::discard_desk),
         )
+        .route("/rooms/{room_id}/files", get(routes::list_files))
+        .route("/rooms/{room_id}/files/content", get(routes::read_file))
+        .route("/harnesses", get(routes::list_harnesses))
         .route("/rooms/{room_id}/rules", get(routes::list_rules))
         .route("/rules/{rule_id}", delete(routes::delete_rule))
         .route(

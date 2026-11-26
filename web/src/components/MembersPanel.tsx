@@ -2,7 +2,8 @@ import { useEffect, useRef, useState, type ChangeEvent, type FormEvent } from "r
 import { api } from "../api/client";
 import { importSummary, MAX_TEMPLATE_BYTES, saveTextFile } from "../api/templates";
 import type { Team } from "../api/useWorkspace";
-import type { Bot, Discussion, Harness, HarnessDesk, ModelTier, Room, Share } from "../api/types";
+import type { Bot, DeskDiff, Discussion, Harness, HarnessDesk, HarnessProbe, ModelTier, Room, Share } from "../api/types";
+import { DiffView } from "./FilesPanel";
 
 /** 一个房间里最多几个 Bot。和服务端的上限一致，超过时服务端也会拒绝。 */
 const MAX_MEMBERS = 6;
@@ -19,6 +20,9 @@ const HARNESSES: readonly { id: Harness; label: string }[] = [
   { id: "claude_code", label: "Claude Code" },
   { id: "codex", label: "Codex" },
   { id: "open_code", label: "OpenCode" },
+  { id: "gemini", label: "Gemini CLI" },
+  { id: "kimi", label: "Kimi Code" },
+  { id: "acp", label: "ACP 通用 Agent（Cursor / Gemini / Kimi 等）" },
   { id: "command", label: "自定义命令" },
 ];
 
@@ -270,9 +274,16 @@ export function MembersPanel({ room, members, bots, team }: Props) {
               </div>
               {bot.persona && <p className="sa-member-role">{bot.persona.split("\n")[0]}</p>}
               <DeskView
+                roomId={room.id}
                 desk={desks.find((desk) => desk.bot_id === bot.id)}
                 busy={busy}
                 onClose={(how) => void run(async () => setDesks(await api.closeDesk(room.id, bot.id, how)))}
+                onResetSession={() =>
+                  void run(async () => {
+                    await api.resetDeskSession(room.id, bot.id);
+                    setImported(`${bot.name} 的会话上下文已重置（独立目录里的改动已保留）。`);
+                  })
+                }
               />
               <div className="sa-member-actions">
                 {bot.id !== room.host_bot_id && (
@@ -386,35 +397,85 @@ export function MembersPanel({ room, members, bots, team }: Props) {
   );
 }
 
-/** harness 成员的独立目录：改了哪些文件，带回还是丢掉。 */
+/** harness 成员的独立目录：改了哪些文件、点击预览 Diff、重置会话、带回还是丢掉。 */
 function DeskView({
+  roomId,
   desk,
   busy,
   onClose,
+  onResetSession,
 }: {
+  roomId: Room["id"];
   desk: HarnessDesk | undefined;
   busy: boolean;
   onClose(how: "accept" | "discard"): void;
+  onResetSession(): void;
 }) {
+  const [diff, setDiff] = useState<DeskDiff | null>(null);
+  const [diffError, setDiffError] = useState<string | null>(null);
   if (!desk) return null;
+
+  const inspect = (path: string) => {
+    if (diff?.path === path) {
+      setDiff(null);
+      setDiffError(null);
+      return;
+    }
+    setDiffError(null);
+    void api.deskDiff(roomId, desk.bot_id, path).then(
+      (found) => setDiff(found),
+      (cause: unknown) => {
+        setDiff(null);
+        setDiffError(cause instanceof Error ? cause.message : String(cause));
+      },
+    );
+  };
+
   return (
     <div className="sa-member-desk" aria-label="独立目录">
       <p className="sa-member-role">
         独立目录{desk.branch ? `（分支 ${desk.branch}）` : ""}：
-        {desk.changes.length === 0 ? "还没有改动" : `改了 ${desk.changes.length} 个文件`}
+        {desk.changes.length === 0 ? "还没有改动" : `改了 ${desk.changes.length} 个文件（点击文件名看 Diff）`}
       </p>
       {desk.changes.length > 0 && (
         <ul className="sa-member-changes">
           {desk.changes.map((change) => (
             <li key={change.path}>
-              {change.label} {change.path}
+              <button
+                type="button"
+                className="sa-link"
+                onClick={() => inspect(change.path)}
+              >
+                {change.label} {change.path}
+              </button>
             </li>
           ))}
         </ul>
       )}
+      {diffError && <p className="sa-form-error">{diffError}</p>}
+      {diff && (
+        <div className="sa-files-preview">
+          <header className="sa-files-preview-head">
+            <code>{diff.path}</code>
+            <button type="button" className="sa-link" onClick={() => setDiff(null)}>
+              收起
+            </button>
+          </header>
+          <DiffView diff={diff} />
+        </div>
+      )}
       <div className="sa-member-actions">
         <button type="button" className="sa-link" disabled={busy} onClick={() => onClose("accept")}>
           带回工作目录
+        </button>
+        <button
+          type="button"
+          className="sa-link"
+          disabled={busy}
+          title="只清空这个 Agent 的会话上下文，保留独立目录里的代码改动"
+          onClick={onResetSession}
+        >
+          重置会话
         </button>
         <button type="button" className="sa-link sa-link-danger" disabled={busy} onClick={() => onClose("discard")}>
           丢掉改动
@@ -450,6 +511,27 @@ function BotForm({ bot, busy, error, onSave, onCancel, onDelete }: FormProps) {
   const [enabled, setEnabled] = useState(bot?.enabled ?? true);
   const [harness, setHarness] = useState<Harness>(bot?.harness ?? "builtin");
   const [command, setCommand] = useState(bot?.harness_command ?? "");
+  const [probes, setProbes] = useState<readonly HarnessProbe[]>([]);
+
+  useEffect(() => {
+    let alive = true;
+    api.listHarnesses().then(
+      (found) => alive && setProbes(found),
+      () => {},
+    );
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const probeFor = (id: Harness) => probes.find((p) => p.harness === id);
+  const optionLabel = (id: Harness, label: string) => {
+    const p = probeFor(id);
+    if (!p) return label;
+    if (p.available) return `${label}（已装${p.version ? ` v${p.version}` : ""}）`;
+    return `${label}（本机未检测到）`;
+  };
+  const needsCommand = harness === "command" || harness === "acp";
 
   const submit = (event: FormEvent) => {
     event.preventDefault();
@@ -485,21 +567,33 @@ function BotForm({ bot, busy, error, onSave, onCancel, onDelete }: FormProps) {
         <select value={harness} onChange={(event) => setHarness(event.target.value as Harness)}>
           {HARNESSES.map(({ id, label }) => (
             <option key={id} value={id}>
-              {label}
+              {optionLabel(id, label)}
             </option>
           ))}
         </select>
       </label>
       {harness !== "builtin" && (
         <label className="sa-field">
-          <span>{harness === "command" ? "命令" : "命令（不填就用默认的）"}</span>
+          <span>{needsCommand ? "启动命令" : "启动命令（不填就用默认的，可追加 --model 等参数）"}</span>
           <input
             value={command}
             maxLength={300}
-            required={harness === "command"}
-            placeholder={harness === "command" ? "比如 python my_harness.py" : "比如 /usr/local/bin/claude"}
+            required={needsCommand}
+            placeholder={
+              harness === "acp"
+                ? "比如 cursor-agent acp、gemini --acp 或 kimi acp"
+                : harness === "command"
+                  ? "比如 python my_harness.py"
+                  : "比如 claude --model sonnet 或 codex -m o3"
+            }
             onChange={(event) => setCommand(event.target.value)}
           />
+          {probeFor(harness)?.path && (
+            <span className="sa-harness-probes">
+              已探测到：{probeFor(harness)?.path}
+              {probeFor(harness)?.version ? `（v${probeFor(harness)?.version}）` : ""}
+            </span>
+          )}
         </label>
       )}
       <label className="sa-field">
