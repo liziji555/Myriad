@@ -6,6 +6,7 @@ import { Icon } from "./Icon";
 
 export const PERMISSIONS: readonly { id: PermissionMode; label: string; note: string }[] = [
   { id: "ask", label: "每次都问", note: "改工作目录外的文件、执行命令前先问你" },
+  { id: "plan", label: "规划模式", note: "只读调研代码并提交实施方案，你批准后再自动切入执行" },
   { id: "full", label: "完全权限", note: "不问直接做，做了什么记在审计里。连着 GitHub、Telegram 的房间照样问" },
 ];
 

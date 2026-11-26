@@ -106,6 +106,8 @@ impl App {
                     config.github.token_env.clone(),
                     config.github.webhook_secret_env.clone(),
                     config.telegram.token_env.clone(),
+                    "TAVILY_API_KEY".to_string(),
+                    "BRAVE_API_KEY".to_string(),
                 ])
                 .chain(
                     config
@@ -143,6 +145,7 @@ impl App {
         let orchestrator = Arc::new(Orchestrator::new(engine.clone(), models, settings));
         orchestrator.use_skills(data_dir.skills());
         orchestrator.use_memory(data_dir.root().join("memory"));
+        orchestrator.use_checkpoints(data_dir.root().join("checkpoints"));
         orchestrator.use_hooks(config.hooks.clone());
         orchestrator.use_truncated_recoveries(2);
         Ok(Self {

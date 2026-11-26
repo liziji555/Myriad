@@ -170,11 +170,14 @@ pub enum PermissionMode {
     Ask,
     /// 不问，直接做。做了什么照样记在审计里。
     Full,
+    /// 规划模式：只读探索代码，先通过 `submit_plan` 提交方案等人批准后再切入执行。
+    Plan,
 }
 
 str_enum!(PermissionMode {
     Ask => "ask",
     Full => "full",
+    Plan => "plan",
 });
 
 /// 别的电脑用 `sa share` 共享过来的目录。

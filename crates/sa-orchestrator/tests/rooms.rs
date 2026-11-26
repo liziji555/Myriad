@@ -286,6 +286,7 @@ async fn hello_gets_a_streamed_reply_from_the_host_bot() {
             "glob",
             "grep",
             "web_fetch",
+            "web_search",
             "write",
             "edit",
             "multi_edit",

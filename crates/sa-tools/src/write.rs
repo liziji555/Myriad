@@ -62,6 +62,8 @@ impl Tool for WriteTool {
         let (path, _) = ctx.fence.resolve_for_write(&input.path)?;
         let shown = input.path.trim().to_string();
         let cancel = ctx.cancel.clone();
+        let fence = ctx.fence.clone();
+        let checkpoint = ctx.checkpoint.clone();
         blocking(move || {
             let _lock = file_lock();
             if cancel.is_cancelled() {
@@ -71,8 +73,16 @@ impl Tool for WriteTool {
                 return Err(ToolError(format!("{shown} 是目录，不能当文件写。")));
             }
             let existed = path.exists();
+            let before = if existed && checkpoint.is_some() {
+                std::fs::read(&path).ok()
+            } else {
+                None
+            };
             write_atomically(&path, input.content.as_bytes())
                 .map_err(|e| ToolError(format!("写不进 {shown}：{e}")))?;
+            if let Some(cp) = checkpoint {
+                cp.record_write(&fence, &path, before.as_deref(), input.content.as_bytes());
+            }
             let lines = input.content.lines().count();
             Ok(format!(
                 "已{} {shown}（{lines} 行）。",

@@ -240,6 +240,7 @@ fn extra_files(dir: &Path) -> Vec<String> {
 }
 
 /// `skill` 工具：读一个技能的全文，或者技能带着的某个文件。
+#[derive(Clone)]
 pub struct SkillTool {
     /// 技能目录。
     pub dir: PathBuf,

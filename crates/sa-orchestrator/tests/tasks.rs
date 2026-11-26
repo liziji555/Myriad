@@ -1228,7 +1228,17 @@ async fn a_sub_agent_reads_for_the_work_session_and_only_its_answer_comes_back()
     assert!(sub[0].messages[0].content.contains("子代理"));
     assert_eq!(sub[0].messages[1].content, "b.txt 里写了什么？");
     let tools: Vec<&str> = sub[0].tools.iter().map(|t| t.name.as_str()).collect();
-    assert_eq!(tools, ["read", "list_dir", "glob", "grep", "web_fetch"]);
+    assert_eq!(
+        tools,
+        [
+            "read",
+            "list_dir",
+            "glob",
+            "grep",
+            "web_fetch",
+            "web_search"
+        ]
+    );
     assert!(sub[1].messages.last().unwrap().content.contains("秘密"));
 
     // 房间里只看到「派了子代理」这一步；子代理的临时记录用完就删。

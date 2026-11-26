@@ -17,6 +17,7 @@ mod extensions;
 mod github;
 pub mod harness;
 mod manage_bots;
+mod plan;
 mod project_docs;
 mod room;
 mod router;
@@ -169,6 +170,8 @@ pub(crate) struct Shared {
     pub context: desks::ContextCache,
     /// 跨会话持久记忆存储（按 Bot 与团队共享两层）。
     pub memory: Mutex<Option<Arc<sa_tools::MemoryStore>>>,
+    /// 对话轮次级文件检查点存储（支持内置 Bot 改动回滚）。
+    pub checkpoints: Mutex<Option<Arc<sa_tools::CheckpointStore>>>,
     /// 生命周期钩子（PreToolUse / PostToolUse / Stop）。
     pub hooks: Mutex<Option<Arc<sa_tools::HookRunner>>>,
     /// 后台长耗时命令管理器（服务关闭时统一清理进程树）。
@@ -279,6 +282,7 @@ impl Orchestrator {
                 shares: Arc::default(),
                 context: desks::ContextCache::default(),
                 memory: Mutex::default(),
+                checkpoints: Mutex::default(),
                 hooks: Mutex::default(),
                 bg_shell: sa_tools::BgShellManager::new(),
                 mcp_specs: Mutex::default(),

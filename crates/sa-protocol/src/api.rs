@@ -479,3 +479,34 @@ pub struct ShareReply {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub progress: bool,
 }
+
+/// 一轮对话产生的只读文件检查点摘要（用于回滚内置 Bot 的直接文件修改）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct CheckpointInfo {
+    pub id: String,
+    pub bot_name: String,
+    #[ts(type = "number")]
+    pub created_at: crate::Millis,
+    /// 本轮被改动或新建的相对文件路径列表。
+    pub files: Vec<String>,
+}
+
+/// 回滚到指定检查点的请求。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct RewindRequest {
+    /// 是否强制覆盖检查点之后被外部修改过的文件（默认 false）。
+    #[serde(default)]
+    #[ts(optional)]
+    pub force: Option<bool>,
+}
+
+/// 回滚检查点的结果报告。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct RewindReport {
+    pub checkpoint_id: String,
+    pub restored: Vec<String>,
+    pub removed: Vec<String>,
+}

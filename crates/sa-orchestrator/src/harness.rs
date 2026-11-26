@@ -255,6 +255,7 @@ fn plan(launch: &Launch<'_>) -> Result<(PathBuf, Vec<String>, bool, TempFileGuar
             .any(|w| w == flag || w.starts_with(&format!("{flag}=")))
     };
     let full = launch.permission == PermissionMode::Full;
+    let plan_mode = launch.permission == PermissionMode::Plan;
     let mut args = vec![];
     let mut stdin = true;
     let mut temp_file = TempFileGuard(None);
@@ -274,6 +275,8 @@ fn plan(launch: &Launch<'_>) -> Result<(PathBuf, Vec<String>, bool, TempFileGuar
             if !has("--permission-mode") && !has("--dangerously-skip-permissions") {
                 if full {
                     args.push("--dangerously-skip-permissions".into());
+                } else if plan_mode {
+                    args.extend(["--permission-mode", "plan"].map(String::from));
                 } else {
                     args.extend(["--permission-mode", "acceptEdits"].map(String::from));
                 }
@@ -305,6 +308,11 @@ fn plan(launch: &Launch<'_>) -> Result<(PathBuf, Vec<String>, bool, TempFileGuar
             {
                 if full {
                     args.push("--dangerously-bypass-approvals-and-sandbox".into());
+                } else if plan_mode {
+                    args.extend(
+                        ["--sandbox", "read-only", "-c", "approval_policy=\"never\""]
+                            .map(String::from),
+                    );
                 } else {
                     args.extend(
                         [

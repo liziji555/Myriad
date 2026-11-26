@@ -4,6 +4,7 @@
 //! 技能（写在文件里的做事套路）见 [`skills`]，外部 MCP 服务提供的工具见 [`mcp`]。
 
 pub mod bg_shell;
+pub mod checkpoint;
 mod edit;
 mod fence;
 mod glob;
@@ -20,9 +21,13 @@ mod skills;
 mod todo;
 mod walk;
 mod web_fetch;
+mod web_search;
 mod write;
 
 pub use bg_shell::{BgShellKillTool, BgShellManager, BgShellOutputTool, BgShellStartTool};
+pub use checkpoint::{
+    CheckpointRecord, CheckpointStore, FileSnapshot, RewindOutcome, TurnCheckpoint,
+};
 pub use edit::EditTool;
 pub use fence::Fence;
 pub use glob::GlobTool;
@@ -38,6 +43,7 @@ pub use shell::{
 pub use skills::{Skill, SkillSet, SkillTool, MAX_SKILLS};
 pub use todo::TodoTool;
 pub use web_fetch::WebFetchTool;
+pub use web_search::WebSearchTool;
 pub use write::{in_git_dir, WriteTool};
 
 use async_trait::async_trait;
@@ -53,6 +59,8 @@ pub struct ToolCtx {
     pub cancel: CancellationToken,
     /// 允许 `web_fetch` 访问本机和内网地址。只在测试里打开。
     pub allow_private_network: bool,
+    /// 可选的轮次级文件检查点录制器：启用时 `write`/`edit`/`multi_edit` 自动快照改动前后的文件内容。
+    pub checkpoint: Option<Arc<TurnCheckpoint>>,
 }
 
 impl ToolCtx {
@@ -61,6 +69,7 @@ impl ToolCtx {
             fence,
             cancel: CancellationToken::new(),
             allow_private_network: false,
+            checkpoint: None,
         }
     }
 }
@@ -152,6 +161,7 @@ impl ToolRegistry {
         registry.register(GlobTool);
         registry.register(GrepTool);
         registry.register(WebFetchTool);
+        registry.register(WebSearchTool);
         registry
     }
 
@@ -213,7 +223,17 @@ mod tests {
     fn registry_exposes_read_only_tools_with_object_schemas() {
         let registry = ToolRegistry::read_only();
         let names: Vec<_> = registry.iter().map(|t| t.name()).collect();
-        assert_eq!(names, ["read", "list_dir", "glob", "grep", "web_fetch"]);
+        assert_eq!(
+            names,
+            [
+                "read",
+                "list_dir",
+                "glob",
+                "grep",
+                "web_fetch",
+                "web_search"
+            ]
+        );
         for tool in registry.iter() {
             let schema = tool.input_schema();
             assert_eq!(schema["type"], "object", "{}", tool.name());
