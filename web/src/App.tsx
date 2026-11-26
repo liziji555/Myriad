@@ -16,6 +16,8 @@ import {
 } from "./api/desktop";
 import { ConnectPanel } from "./components/ConnectPanel";
 import { UpdatePanel } from "./components/UpdatePanel";
+import { BotCreateModal } from "./components/BotCreateModal";
+import { RoomCreateModal } from "./components/RoomCreateModal";
 import { noticesFor } from "./api/workspace";
 import { CommandPalette, type PaletteEntry } from "./components/CommandPalette";
 import { ComposerControls } from "./components/ComposerControls";
@@ -27,7 +29,7 @@ import {
 import { Notices } from "./components/Notices";
 import { applyTheme, loadTheme, nextTheme } from "./api/theme";
 import { Sidebar, type RoomState } from "./components/Sidebar";
-import { StageBar, type MainView } from "./components/StageBar";
+import { StageBar } from "./components/StageBar";
 import { WindowControls } from "./components/WindowControls";
 import { Timeline } from "./components/Timeline";
 import { FlowView } from "./components/FlowView";
@@ -73,6 +75,8 @@ function Shell() {
   const [desktop, setDesktop] = useState<DesktopState | null>(null);
   const [connectOpen, setConnectOpen] = useState(false);
   const [updateOpen, setUpdateOpen] = useState(false);
+  const [botModalOpen, setBotModalOpen] = useState(false);
+  const [roomModalOpen, setRoomModalOpen] = useState(false);
   const [serverUpdate, setServerUpdate] = useState<UpdateStatus | null>(null);
   const [desktopUpdate, setDesktopUpdate] = useState<DesktopUpdateInfo | null>(null);
   // 输入框的菜单里列的技能。技能是磁盘上的文件，随时会多会少：连上之后读一次，回到窗口时再读。
@@ -148,13 +152,8 @@ function Shell() {
   const [retry, setRetry] = useState(0);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [theme, setTheme] = useState(loadTheme);
-  const [createSignal, setCreateSignal] = useState(0);
-  const [view, setView] = useState<MainView>("split");
-  // 房间列表收起后把「新建房间」的信号清掉，不然下次打开列表又弹出填名字的框。
-  const listShown = docked ? !collapsed : roomsOpen;
-  useEffect(() => {
-    if (!listShown) setCreateSignal(0);
-  }, [listShown]);
+  const [trajectoryOpen, setTrajectoryOpen] = useState(true);
+  const [flowExpanded, setFlowExpanded] = useState(false);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -316,7 +315,7 @@ function Shell() {
     : 0;
   // 从协作视图或工作树轨迹点一个节点：确保对话可见，滚到那条消息闪一下。
   const openMessage = (messageId: string) => {
-    if (view === "flow") setView("split");
+    if (flowExpanded) setFlowExpanded(false);
     window.setTimeout(() => {
       const target = document.querySelector(`[data-message-id="${messageId}"]`);
       if (!target) return;
@@ -345,8 +344,8 @@ function Shell() {
         });
       }
     };
-    if (view === "flow") {
-      setView("split");
+    if (flowExpanded) {
+      setFlowExpanded(false);
       window.setTimeout(() => {
         reveal(row);
         fireToTree();
@@ -354,6 +353,61 @@ function Shell() {
     } else {
       reveal(row);
       fireToTree();
+    }
+  };
+
+  // ProkBot / GrokBot 风格：识别主控、每个 Bot 的 1v1 直聊房间、以及多 Bot 协作房间。
+  const masterBot = workspace.bots.find((b) => b.enabled) ?? workspace.bots[0] ?? null;
+  const directRoomOf = (botId: string) =>
+    workspace.rooms.find(
+      (candidate) =>
+        candidate.member_bot_ids.length === 1 && candidate.member_bot_ids[0] === botId,
+    );
+  const directRoomIds = new Set(
+    workspace.bots.flatMap((bot) => {
+      const dm = directRoomOf(bot.id);
+      return dm ? [dm.id] : [];
+    }),
+  );
+  const groupRooms = workspace.rooms.filter((candidate) => !directRoomIds.has(candidate.id));
+
+  const openBotChat = async (bot: (typeof workspace.bots)[number]) => {
+    setRoomsOpen(false);
+    setFlowExpanded(false);
+    const existing = directRoomOf(bot.id);
+    if (existing) {
+      setSelected(existing.id);
+      return;
+    }
+    const created = await workspace.createRoom({
+      name: bot.name,
+      member_bot_ids: [bot.id],
+      host_bot_id: bot.id,
+      discussion: "normal",
+    });
+    setSelected(created.id);
+  };
+
+  const roomBadge = !room
+    ? null
+    : masterBot && room.member_bot_ids.length === 1 && room.member_bot_ids[0] === masterBot.id
+      ? "主控"
+      : room.member_bot_ids.length === 1
+        ? "1 对 1"
+        : room.member_bot_ids.length >= 2
+          ? `${room.member_bot_ids.length} 位队员协作`
+          : null;
+
+  // 右侧单槽位互斥：打开任何工具面板时自动隐藏工作树，彻底告别四栏拥挤裁剪；收起工具面板后工作树自动回来。
+  const showTrajectory = Boolean(!panelOpen && trajectoryOpen && !flowExpanded && flow);
+  const toggleTrajectory = () => {
+    if (panelOpen) {
+      setPanelOpen(false);
+      setTrajectoryOpen(true);
+      setFlowExpanded(false);
+    } else {
+      setFlowExpanded(false);
+      setTrajectoryOpen((open) => !open);
     }
   };
   const reveal = (row: Presence) => {
@@ -416,15 +470,16 @@ function Shell() {
         },
       })),
     {
+      id: "action:new-bot",
+      group: "action",
+      title: "新建 Bot",
+      run: () => setBotModalOpen(true),
+    },
+    {
       id: "action:new-room",
       group: "action",
-      title: "新建房间",
-      run: () => {
-        // 填名字的地方在房间列表里：先把它打开。
-        if (docked) changeLayout({ sidebarCollapsed: false });
-        else openRoomsDrawer();
-        setCreateSignal((n) => n + 1);
-      },
+      title: "组建协作房间",
+      run: () => setRoomModalOpen(true),
     },
     ...(room
       ? [
@@ -549,19 +604,51 @@ function Shell() {
           onClose={() => setPaletteOpen(false)}
         />
       )}
+      {botModalOpen && (
+        <BotCreateModal
+          onCreate={async (body, openChat) => {
+            const created = await workspace.team.createBot(body);
+            if (openChat) {
+              const dm = await workspace.createRoom({
+                name: created.name,
+                member_bot_ids: [created.id],
+                host_bot_id: created.id,
+                discussion: "normal",
+              });
+              setSelected(dm.id);
+              setFlowExpanded(false);
+            }
+            return created;
+          }}
+          onClose={() => setBotModalOpen(false)}
+        />
+      )}
+      {roomModalOpen && (
+        <RoomCreateModal
+          bots={workspace.bots}
+          defaultMasterId={masterBot?.id ?? null}
+          onCreate={async (body) => {
+            const created = await workspace.createRoom(body);
+            setSelected(created.id);
+            setFlowExpanded(false);
+            setRoomsOpen(false);
+            return created;
+          }}
+          onOpenNewBot={() => setBotModalOpen(true)}
+          onClose={() => setRoomModalOpen(false)}
+        />
+      )}
       <StageBar
         room={room}
+        roomBadge={roomBadge}
         presence={presence}
         connected={workspace.connected}
         pendingTasks={pendingTasks}
-        view={view}
-        liveLanes={liveLanes}
-        onView={setView}
+        trajectoryShown={showTrajectory}
         docked={docked}
         roomsOpen={roomsShown}
-        drawerOpen={panelOpen}
         onToggleRooms={toggleRooms}
-        onToggleDrawer={() => setPanelOpen(!panelOpen)}
+        onToggleTrajectory={toggleTrajectory}
         onShowTasks={() => showPanel("tasks")}
         onOpenPalette={() => setPaletteOpen(true)}
         theme={theme}
@@ -578,7 +665,9 @@ function Shell() {
             <div className="sa-scrim" onClick={() => setRoomsOpen(false)} />
           )}
           <Sidebar
-            rooms={workspace.rooms}
+            masterBot={masterBot}
+            directRoomOf={directRoomOf}
+            groupRooms={groupRooms}
             bots={workspace.bots}
             selectedRoomId={room?.id ?? null}
             roomStates={roomStates}
@@ -590,19 +679,14 @@ function Shell() {
             onToggleCollapsed={toggleRooms}
             activeTab={panelOpen ? tab : null}
             onShowPanel={toggleTab}
-            onPickBot={(row) => {
-              if (!docked) setRoomsOpen(false);
-              jumpTo(row);
-            }}
-            onSelect={(id) => {
+            onOpenBotChat={(bot) => void openBotChat(bot)}
+            onSelectRoom={(id) => {
               setSelected(id);
+              setFlowExpanded(false);
               setRoomsOpen(false);
             }}
-            onCreateRoom={async (name) => {
-              setSelected((await workspace.createRoom(name)).id);
-              setRoomsOpen(false);
-            }}
-            createSignal={createSignal}
+            onNewBot={() => setBotModalOpen(true)}
+            onNewRoom={() => setRoomModalOpen(true)}
             desktop={desktop}
             onConnect={openConnect}
             updateAvailable={Boolean(serverUpdate?.available || desktopUpdate?.available)}
@@ -611,9 +695,9 @@ function Shell() {
         </>
       )}
       <div className="sa-workspace">
-        <main className="sa-main" data-view={view}>
+        <main className="sa-main">
           {room ? (
-            <div className="sa-split-workspace" data-split={view === "split" && Boolean(flow)}>
+            <div className="sa-split-workspace" data-split={showTrajectory}>
               <div className="sa-primary-column">
                 <Notices
                   notices={noticesFor(workspace.notices, room.id)}
@@ -624,9 +708,16 @@ function Shell() {
                   }}
                   onShowUsage={() => showPanel("usage")}
                 />
-                {view === "flow" && flow && (
+                {flowExpanded && flow && (
                   <>
                     <div className="sa-flow-meta-bar">
+                      <button
+                        type="button"
+                        className="sa-link"
+                        onClick={() => setFlowExpanded(false)}
+                      >
+                        ← 返回同屏对话
+                      </button>
                       <span>
                         {flow.lanes.length - 1} 条工作树泳道 · {handoffCount} 次派活与交接
                         {liveLanes > 0 ? ` · ${liveLanes} 个正在运行` : ""}
@@ -640,8 +731,7 @@ function Shell() {
                     />
                   </>
                 )}
-                {/* 全屏流线视图时主线只藏起来不卸载：没写完的打回意见、审批卡都还在。 */}
-                <div className="sa-viewpane" hidden={view === "flow" && !!flow}>
+                <div className="sa-viewpane" hidden={flowExpanded && !!flow}>
                   <Timeline
                     key={room.id}
                     chat={roomChat}
@@ -659,7 +749,7 @@ function Shell() {
                     onLoadOlder={() => workspace.loadOlder(room.id)}
                     onDecide={workspace.decideApproval}
                     onExample={setPrefill}
-                    hidden={view === "flow" && !!flow}
+                    hidden={flowExpanded && !!flow}
                   />
                 </div>
                 {roomChat?.activity?.routing ? (
@@ -705,7 +795,7 @@ function Shell() {
                   onStop={() => workspace.stopReply(room.id)}
                 />
               </div>
-              {view === "split" && flow && (
+              {showTrajectory && flow && (
                 <TrajectoryPane
                   key={`traj-${room.id}`}
                   roomId={room.id}
@@ -714,13 +804,18 @@ function Shell() {
                   presence={presence}
                   onOpen={openMessage}
                   onShowDiff={() => showPanel("files")}
+                  onExpandFlow={() => setFlowExpanded(true)}
+                  onClose={() => setTrajectoryOpen(false)}
                 />
               )}
             </div>
           ) : (
             <div className="sa-empty">
-              <h2>还没有房间</h2>
-              <p>在左边的房间列表里点 + 新建一个。</p>
+              <h2>先创建一个 Bot 开始对话</h2>
+              <p>点左侧「新建 Bot」创建你的主控或专职助手，也可以直接组建多 Bot 协作房间。</p>
+              <button type="button" className="sa-button" onClick={() => setBotModalOpen(true)}>
+                新建 Bot
+              </button>
             </div>
           )}
         </main>

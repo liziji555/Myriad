@@ -28,6 +28,7 @@ import type {
   Bot,
   BotId,
   CreateBotRequest,
+  CreateRoomRequest,
   CreateRoutineRequest,
   Link,
   LinkId,
@@ -109,7 +110,7 @@ export interface WorkspaceView extends Workspace {
   readonly linkActions: LinkActions;
   /** 每次需要重新拉消息时加一（重新连上、或者片段丢了）。 */
   readonly epoch: number;
-  createRoom(name: string): Promise<Room>;
+  createRoom(nameOrBody: string | CreateRoomRequest): Promise<Room>;
   /** Bot 和房间成员的管理。结果先放进本地状态，事件流稍后送来同样的内容。 */
   readonly team: Team;
   /** 打开一个房间：关注它的消息事件，并拉最新一页。失败时抛出。 */
@@ -304,8 +305,10 @@ export function useWorkspace(): WorkspaceView {
     return stop;
   }, []);
 
-  const createRoom = useCallback(async (name: string) => {
-    const room = await api.createRoom({ name });
+  const createRoom = useCallback(async (nameOrBody: string | CreateRoomRequest) => {
+    const body: CreateRoomRequest =
+      typeof nameOrBody === "string" ? { name: nameOrBody } : nameOrBody;
+    const room = await api.createRoom(body);
     setWorkspace((current) =>
       applyEvent(current, {
         seq: 0,

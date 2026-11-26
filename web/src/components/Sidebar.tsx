@@ -1,7 +1,6 @@
-import { useEffect, useState, type FormEvent } from "react";
 import { connectionLabel, type DesktopState } from "../api/desktop";
 import type { Presence, PresenceState } from "../api/presence";
-import type { Bot, Room, RoomId } from "../api/types";
+import type { Bot, BotId, Harness, Room, RoomId } from "../api/types";
 import { BotAvatar } from "./BotAvatar";
 import type { PanelTab } from "./ContextPanel";
 import { Icon, type IconName } from "./Icon";
@@ -14,17 +13,16 @@ const NAV: readonly { tab: PanelTab; label: string; icon: IconName }[] = [
   { tab: "execution", label: "执行", icon: "graph" },
   { tab: "tasks", label: "任务", icon: "tasks" },
   { tab: "routines", label: "定时任务", icon: "clock" },
-  { tab: "members", label: "队员和成员", icon: "users" },
+  { tab: "members", label: "Bot 与成员管理", icon: "users" },
+  { tab: "files", label: "文件与 Diff", icon: "file" },
   { tab: "links", label: "连接", icon: "link" },
   { tab: "models", label: "模型", icon: "bot" },
   { tab: "extensions", label: "技能和 MCP", icon: "plug" },
-  { tab: "files", label: "文件", icon: "file" },
   { tab: "usage", label: "用量", icon: "chart" },
   { tab: "audit", label: "审计", icon: "shield" },
 ];
 
-/** 队员名字后面那几个字：一眼看出它在不在忙。 */
-const SHORT: Record<PresenceState, string> = {
+const SHORT_STATE: Record<PresenceState, string> = {
   approval: "等你批准",
   asking: "等你",
   tool: "在做事",
@@ -35,38 +33,57 @@ const SHORT: Record<PresenceState, string> = {
   off: "已停用",
 };
 
+const SHORT_HARNESS: Record<Harness, string> = {
+  builtin: "内置",
+  claude_code: "Claude",
+  codex: "Codex",
+  open_code: "OpenCode",
+  gemini: "Gemini",
+  kimi: "Kimi",
+  acp: "ACP",
+  command: "CLI",
+};
+
 interface Props {
-  rooms: readonly Room[];
+  /** 主控 Bot（固定置顶，可直接对话或让它创建子 Bot）。 */
+  masterBot: Bot | null;
+  /** 1 对 1 专属 Bot 映射（用于判断当前是否正与某个 Bot 私聊）。 */
+  directRoomOf(botId: BotId): Room | undefined;
+  /** 多 Bot 协作房间（非单 Bot 1v1 私聊的房间）。 */
+  groupRooms: readonly Room[];
   bots: readonly Bot[];
   selectedRoomId: RoomId | null;
   roomStates: Readonly<Record<RoomId, RoomState>>;
-  /** 当前房间里每个 Bot 在做什么。不在这个房间的 Bot 没有。 */
   presence: readonly Presence[];
   connected: boolean;
   version: string;
-  /** 收成一条只有图标的窄条。 */
   collapsed: boolean;
-  /** 窗口窄的时候左栏是盖在主线上的抽屉，没有收起这一说。 */
   docked: boolean;
   onToggleCollapsed(): void;
-  /** 正开着的面板页，没开时是 null。 */
   activeTab: PanelTab | null;
   onShowPanel(tab: PanelTab): void;
-  onPickBot(row: Presence): void;
-  onSelect(id: RoomId): void;
-  onCreateRoom(name: string): Promise<void>;
-  /** 每加一就打开「新建房间」的输入框（命令面板里点的）。 */
-  createSignal: number;
-  /** 在桌面版里时：连的是本机还是哪台服务器。 */
+  onOpenBotChat(bot: Bot): void;
+  onSelectRoom(id: RoomId): void;
+  onNewBot(): void;
+  onNewRoom(): void;
   desktop: DesktopState | null;
   onConnect(): void;
-  /** 是否有可用的新版本（服务端或桌面版）。 */
   updateAvailable: boolean;
   onUpdate(): void;
 }
 
+/**
+ * 借鉴 ProkBot / GrokBot 的 Bot-First 左侧栏结构：
+ * 1. 置顶「主控」中枢卡片（直接对话，或让主控用 create_bot 自主组建团队）；
+ * 2. 快捷操作「+ 新建 Bot」「+ 组建房间」；
+ * 3. 「我的 Bot」独立列表（点任意 Bot 直接 1v1 对话，不强迫先建房间）；
+ * 4. 「协作房间」多 Bot 群聊列表；
+ * 5. 「工作台」工具导航。
+ */
 export function Sidebar({
-  rooms,
+  masterBot,
+  directRoomOf,
+  groupRooms,
   bots,
   selectedRoomId,
   roomStates,
@@ -78,48 +95,21 @@ export function Sidebar({
   onToggleCollapsed,
   activeTab,
   onShowPanel,
-  onPickBot,
-  onSelect,
-  onCreateRoom,
-  createSignal,
+  onOpenBotChat,
+  onSelectRoom,
+  onNewBot,
+  onNewRoom,
   desktop,
   onConnect,
   updateAvailable,
   onUpdate,
 }: Props) {
-  const [creating, setCreating] = useState(false);
-  useEffect(() => {
-    if (createSignal > 0) setCreating(true);
-  }, [createSignal]);
-  const [name, setName] = useState("");
-  const [error, setError] = useState("");
-  const [busy, setBusy] = useState(false);
   const narrow = docked && collapsed;
-
-  const close = () => {
-    setCreating(false);
-    setName("");
-    setError("");
-  };
-
-  const startCreating = () => {
-    if (narrow) onToggleCollapsed();
-    setCreating(true);
-  };
-
-  const submit = async (event: FormEvent) => {
-    event.preventDefault();
-    if (busy) return;
-    setBusy(true);
-    try {
-      await onCreateRoom(name);
-      close();
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "新建失败");
-    } finally {
-      setBusy(false);
-    }
-  };
+  const subBots = bots.filter((bot) => !masterBot || bot.id !== masterBot.id);
+  const masterDirect = masterBot ? directRoomOf(masterBot.id) : undefined;
+  const masterSelected = Boolean(masterDirect && masterDirect.id === selectedRoomId);
+  const masterPresence = masterBot ? presence.find((p) => p.botId === masterBot.id) : undefined;
+  const masterState: PresenceState = masterPresence?.state ?? (masterBot?.enabled ? "idle" : "off");
 
   return (
     <nav className="sa-sidebar" aria-label="左栏" data-collapsed={narrow}>
@@ -140,89 +130,136 @@ export function Sidebar({
       </header>
 
       <div className="sa-sidebar-body">
-        <button type="button" className="sa-new-room-button" title="新建房间" onClick={startCreating}>
-          <Icon name="plus" />
-          <span className="sa-nav-label">新建房间</span>
-        </button>
-
-        <section className="sa-section" aria-label="房间">
-          <h2 className="sa-section-title">房间</h2>
-          {creating && !narrow && (
-            <form className="sa-new-room" onSubmit={submit}>
-              <input
-                autoFocus
-                value={name}
-                maxLength={60}
-                placeholder="房间名，回车确认"
-                aria-label="房间名"
-                aria-invalid={error !== ""}
-                onChange={(event) => {
-                  setName(event.target.value);
-                  setError("");
-                }}
-                onKeyDown={(event) => event.key === "Escape" && close()}
+        {/* 1. 置顶「主控」入口 */}
+        {masterBot && (
+          <div className="sa-master-wrap">
+            <button
+              type="button"
+              className="sa-master-card"
+              aria-current={masterSelected ? "page" : undefined}
+              data-state={masterState}
+              title={`主控「${masterBot.name}」：点击进入主控对话，可直接指挥或让它为你创建子 Bot`}
+              onClick={() => onOpenBotChat(masterBot)}
+            >
+              <BotAvatar
+                id={masterBot.id}
+                name={masterBot.name}
+                state={masterPresence && masterState !== "idle" ? masterState : undefined}
+                className="sa-master-avatar"
               />
-              {error && (
-                <p className="sa-field-error" role="alert">
-                  {error}
-                </p>
-              )}
-            </form>
+              <span className="sa-master-info sa-nav-label">
+                <span className="sa-master-top">
+                  <strong>{masterBot.name}</strong>
+                  <em className="sa-master-badge">主控</em>
+                  <span className="sa-row-meta">{SHORT_STATE[masterState]}</span>
+                </span>
+                <small>主控中枢 · 可自主创建并调度 Bot</small>
+              </span>
+            </button>
+          </div>
+        )}
+
+        {/* 2. 两个明确的一级动作：先建 Bot，再按需组建多 Bot 协作房间 */}
+        <div className="sa-side-actions">
+          <button type="button" className="sa-side-action-btn" data-primary="true" title="新建独立 Bot" onClick={onNewBot}>
+            <Icon name="plus" size={14} />
+            <span className="sa-nav-label">新建 Bot</span>
+          </button>
+          <button type="button" className="sa-side-action-btn" title="挑选多个 Bot 组建协作房间" onClick={onNewRoom}>
+            <Icon name="users" size={14} />
+            <span className="sa-nav-label">组建房间</span>
+          </button>
+        </div>
+
+        {/* 3. 我的 Bot（1v1 直聊列表，由自己或主控创建） */}
+        <section className="sa-section" aria-label="我的 Bot">
+          <div className="sa-section-head">
+            <h2 className="sa-section-title">我的 Bot</h2>
+            <span className="sa-section-count sa-nav-label">{subBots.length}</span>
+          </div>
+          {subBots.length === 0 ? (
+            <p className="sa-section-empty sa-nav-label">
+              点「新建 Bot」，或在主控对话里让它帮你创建专职子 Bot。
+            </p>
+          ) : (
+            <ul className="sa-list">
+              {subBots.map((bot) => {
+                const dm = directRoomOf(bot.id);
+                const active = Boolean(dm && dm.id === selectedRoomId);
+                const row = presence.find((candidate) => candidate.botId === bot.id);
+                const state: PresenceState = row?.state ?? (bot.enabled ? "idle" : "off");
+                const dmState = dm ? roomStates[dm.id] : undefined;
+                return (
+                  <li key={bot.id}>
+                    <button
+                      type="button"
+                      className="sa-row"
+                      aria-current={active ? "page" : undefined}
+                      data-state={state}
+                      title={`${bot.name}（${SHORT_HARNESS[bot.harness]}）· 点击 1 对 1 对话`}
+                      onClick={() => onOpenBotChat(bot)}
+                    >
+                      <BotAvatar
+                        id={bot.id}
+                        name={bot.name}
+                        state={
+                          row && state !== "idle"
+                            ? state
+                            : dmState === "busy"
+                              ? "working"
+                              : bot.enabled
+                                ? undefined
+                                : "off"
+                        }
+                        className="sa-row-avatar"
+                      />
+                      <span className="sa-row-label">{bot.name}</span>
+                      <span className="sa-row-meta">
+                        {row && state !== "idle" ? SHORT_STATE[state] : SHORT_HARNESS[bot.harness]}
+                      </span>
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
           )}
-          <ul className="sa-list">
-            {rooms.map((room) => (
-              <li key={room.id}>
-                <button
-                  type="button"
-                  className="sa-row"
-                  aria-current={room.id === selectedRoomId ? "page" : undefined}
-                  title={room.name}
-                  onClick={() => onSelect(room.id)}
-                >
-                  <span className="sa-room-mark" aria-hidden="true">
-                    {[...room.name.trim()][0] ?? "·"}
-                    <span className="sa-dot" data-state={roomStates[room.id] ?? "idle"} />
-                  </span>
-                  <span className="sa-row-label">{room.name}</span>
-                </button>
-              </li>
-            ))}
-          </ul>
         </section>
 
-        <section className="sa-section" aria-label="队员">
-          <h2 className="sa-section-title">队员</h2>
-          <ul className="sa-list">
-            {bots.map((bot) => {
-              const row = presence.find((candidate) => candidate.botId === bot.id);
-              const state: PresenceState = row?.state ?? (bot.enabled ? "idle" : "off");
-              const meta = row ? SHORT[state] : bot.enabled ? "不在这个房间" : "已停用";
-              const label = row ? `${bot.name}：${row.text}` : `${bot.name}：${meta}`;
-              return (
-                <li key={bot.id}>
+        {/* 4. 协作房间（多 Bot 群聊 / 项目室） */}
+        <section className="sa-section" aria-label="协作房间">
+          <div className="sa-section-head">
+            <h2 className="sa-section-title">协作房间</h2>
+            <span className="sa-section-count sa-nav-label">{groupRooms.length}</span>
+          </div>
+          {groupRooms.length === 0 ? (
+            <p className="sa-section-empty sa-nav-label">
+              需要多位 Bot 协同干活时，点「组建房间」拉它们进群。
+            </p>
+          ) : (
+            <ul className="sa-list">
+              {groupRooms.map((room) => (
+                <li key={room.id}>
                   <button
                     type="button"
                     className="sa-row"
-                    data-state={state}
-                    title={label}
-                    aria-label={label}
-                    onClick={() => (row && (row.messageId || row.taskId) ? onPickBot(row) : onShowPanel("members"))}
+                    aria-current={room.id === selectedRoomId ? "page" : undefined}
+                    title={`${room.name}（${room.member_bot_ids.length} 位成员）`}
+                    onClick={() => onSelectRoom(room.id)}
                   >
-                    <BotAvatar
-                      id={bot.id}
-                      name={bot.name}
-                      state={row && state !== "idle" ? state : bot.enabled ? undefined : "off"}
-                      className="sa-row-avatar"
-                    />
-                    <span className="sa-row-label">{bot.name}</span>
-                    <span className="sa-row-meta">{meta}</span>
+                    <span className="sa-room-mark" aria-hidden="true">
+                      {[...room.name.trim()][0] ?? "·"}
+                      <span className="sa-dot" data-state={roomStates[room.id] ?? "idle"} />
+                    </span>
+                    <span className="sa-row-label">{room.name}</span>
+                    <span className="sa-row-meta">{room.member_bot_ids.length} 人</span>
                   </button>
                 </li>
-              );
-            })}
-          </ul>
+              ))}
+            </ul>
+          )}
         </section>
 
+        {/* 5. 工作台工具 */}
         <section className="sa-section" aria-label="工作台">
           <h2 className="sa-section-title">工作台</h2>
           <ul className="sa-list">

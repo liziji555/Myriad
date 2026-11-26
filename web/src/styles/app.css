@@ -4637,6 +4637,229 @@ button.sa-row:hover {
   display: inline-flex;
   color: var(--sa-fg-muted);
 }
+/* ProkBot / GrokBot 风格：置顶主控卡片 + 新建 Bot / 组建房间双按钮 + 弹窗勾选清单 */
+.sa-master-wrap {
+  padding: 0 var(--sa-space-2) var(--sa-space-2);
+}
+.sa-master-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--sa-border);
+  border-radius: var(--sa-radius-lg);
+  background: var(--sa-glass);
+  box-shadow: var(--sa-glass-edge);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color var(--sa-motion), background var(--sa-motion);
+}
+.sa-master-card:hover {
+  border-color: color-mix(in srgb, var(--sa-accent) 45%, var(--sa-border));
+}
+.sa-master-card[aria-current="page"] {
+  border-color: color-mix(in srgb, var(--sa-accent) 55%, var(--sa-border));
+  background: color-mix(in srgb, var(--sa-accent) 10%, var(--sa-bg-raised));
+}
+.sa-master-avatar {
+  width: 30px;
+  height: 30px;
+  font-size: 13px;
+}
+.sa-master-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+.sa-master-top {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+.sa-master-top strong {
+  font-size: var(--sa-text-sm);
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sa-master-badge {
+  flex: none;
+  padding: 0 5px;
+  border-radius: var(--sa-radius-pill);
+  background: color-mix(in srgb, var(--sa-accent) 16%, transparent);
+  color: var(--sa-accent);
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 600;
+  line-height: 16px;
+}
+.sa-master-info small {
+  font-size: 11px;
+  color: var(--sa-fg-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sa-side-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  padding: 0 var(--sa-space-2) var(--sa-space-1);
+}
+.sa-side-action-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  height: 32px;
+  padding: 0 8px;
+  border: 1px solid var(--sa-border);
+  border-radius: var(--sa-radius-md);
+  background: var(--sa-glass);
+  box-shadow: var(--sa-glass-edge);
+  color: var(--sa-fg);
+  font-size: var(--sa-text-xs);
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: border-color var(--sa-motion), background var(--sa-motion);
+}
+.sa-side-action-btn[data-primary="true"] {
+  border-color: color-mix(in srgb, var(--sa-accent) 36%, var(--sa-border));
+  color: var(--sa-accent);
+}
+.sa-side-action-btn:hover {
+  border-color: color-mix(in srgb, var(--sa-accent) 55%, var(--sa-border));
+  background: var(--sa-glass-strong);
+}
+.sa-sidebar[data-collapsed="true"] .sa-master-card {
+  justify-content: center;
+  padding: 6px 0;
+}
+.sa-sidebar[data-collapsed="true"] .sa-side-actions {
+  grid-template-columns: 1fr;
+}
+.sa-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-right: var(--sa-space-2);
+}
+.sa-section-count {
+  font-size: 10.5px;
+  color: var(--sa-fg-faint);
+  font-variant-numeric: tabular-nums;
+}
+.sa-section-empty {
+  padding: 2px var(--sa-space-2) 4px;
+  font-size: 11px;
+  color: var(--sa-fg-faint);
+  line-height: 1.45;
+}
+.sa-traj-actions {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.sa-traj-close {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--sa-fg-muted);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+.sa-traj-close:hover {
+  background: var(--sa-hover);
+  color: var(--sa-fg);
+}
+.sa-flow-meta-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px var(--sa-space-4);
+  border-bottom: 1px solid var(--sa-border);
+  color: var(--sa-fg-muted);
+  font-size: var(--sa-text-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 新建 Bot / 组建房间弹窗 */
+.sa-create-modal {
+  width: min(560px, 100%);
+}
+.sa-preset-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.sa-preset-label {
+  font-size: var(--sa-text-xs);
+  color: var(--sa-fg-muted);
+}
+.sa-create-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--sa-space-3);
+}
+.sa-room-picker-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.sa-bot-checklist {
+  display: grid;
+  gap: 6px;
+  max-height: 210px;
+  overflow-y: auto;
+}
+.sa-bot-check-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border: 1px solid var(--sa-border);
+  border-radius: var(--sa-radius-md);
+  background: var(--sa-glass);
+  cursor: pointer;
+  transition: border-color var(--sa-motion), background var(--sa-motion);
+}
+.sa-bot-check-row[data-checked="true"] {
+  border-color: color-mix(in srgb, var(--sa-accent) 55%, var(--sa-border));
+  background: color-mix(in srgb, var(--sa-accent) 9%, var(--sa-bg-raised));
+}
+.sa-bot-check-info {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+}
+.sa-bot-check-info strong {
+  font-size: var(--sa-text-sm);
+  color: var(--sa-fg);
+}
+.sa-bot-check-info small {
+  font-size: 11px;
+  color: var(--sa-fg-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 @media (prefers-reduced-transparency: reduce) {
   :root {
     --sa-glass: var(--sa-bg);

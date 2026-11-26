@@ -48,7 +48,7 @@ pub async fn create_room(
     body: Result<Json<CreateRoomRequest>, JsonRejection>,
 ) -> Result<(StatusCode, Json<Room>), AppError> {
     let Json(body) = body.map_err(|e| AppError::bad_request(e.body_text()))?;
-    let room = blocking(&state, move |engine| engine.create_room(&body.name)).await?;
+    let room = blocking(&state, move |engine| engine.create_room_with(&body)).await?;
     Ok((StatusCode::CREATED, Json(room)))
 }
 

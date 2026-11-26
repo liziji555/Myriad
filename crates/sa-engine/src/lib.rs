@@ -159,15 +159,67 @@ impl Engine {
 
     /// 新建房间。入口 Bot 取最早创建的、已启用的 Bot（没有则为空）。
     pub fn create_room(&self, name: &str) -> Result<Room> {
-        let name = name.trim();
+        self.create_room_with(&sa_protocol::CreateRoomRequest {
+            name: name.to_string(),
+            member_bot_ids: None,
+            host_bot_id: None,
+            discussion: None,
+        })
+    }
+
+    /// 新建房间，支持直接指定成员 Bot 列表、入口主控 Bot 和讨论模式（如 1v1 私聊或组建多 Bot 协作房间）。
+    pub fn create_room_with(&self, req: &sa_protocol::CreateRoomRequest) -> Result<Room> {
+        let name = req.name.trim();
         check_room_name(name)?;
         let now = now_ms();
+        let wanted_members = req.member_bot_ids.clone().unwrap_or_default();
+        let wanted_host = req.host_bot_id.clone();
+        let wanted_discussion = req.discussion;
         let (room, seq) = self.store.write(|tx| {
-            let host = bots::list(tx)?
-                .into_iter()
-                .find(|b| b.enabled)
-                .map(|b| b.id);
-            let room = new_room(name.to_string(), host, now);
+            let all_bots = bots::list(tx)?;
+            let mut members: Vec<BotId> = Vec::new();
+            for id in &wanted_members {
+                if !all_bots.iter().any(|b| &b.id == id) {
+                    return Ok(Err(EngineError::NotFound("指定的成员 Bot 不存在".into())));
+                }
+                if !members.contains(id) {
+                    members.push(id.clone());
+                }
+            }
+            if members.len() > team::MAX_ROOM_MEMBERS {
+                return Ok(Err(EngineError::Invalid(format!(
+                    "一个房间最多 {} 个 Bot",
+                    team::MAX_ROOM_MEMBERS
+                ))));
+            }
+            let host = if let Some(ref h) = wanted_host {
+                if !all_bots.iter().any(|b| &b.id == h) {
+                    return Ok(Err(EngineError::NotFound("指定的主控 Bot 不存在".into())));
+                }
+                if !members.contains(h) {
+                    if members.len() >= team::MAX_ROOM_MEMBERS {
+                        return Ok(Err(EngineError::Invalid(format!(
+                            "一个房间最多 {} 个 Bot",
+                            team::MAX_ROOM_MEMBERS
+                        ))));
+                    }
+                    members.insert(0, h.clone());
+                }
+                Some(h.clone())
+            } else if let Some(first) = members.first() {
+                Some(first.clone())
+            } else {
+                let first_enabled = all_bots.into_iter().find(|b| b.enabled).map(|b| b.id);
+                if let Some(ref id) = first_enabled {
+                    members.push(id.clone());
+                }
+                first_enabled
+            };
+            let mut room = new_room(name.to_string(), host, now);
+            room.member_bot_ids = members;
+            if let Some(discussion) = wanted_discussion {
+                room.discussion = discussion;
+            }
             rooms::insert(tx, &room)?;
             let seq = events::append(
                 tx,
@@ -176,8 +228,8 @@ impl Engine {
                 &to_json(&room),
                 now,
             )?;
-            Ok((room, seq))
-        })?;
+            Ok(Ok((room, seq)))
+        })??;
         self.publish(seq);
         self.audit(
             Audit::user("room.created", format!("新建了房间「{}」", room.name)).room(&room.id),
@@ -317,5 +369,30 @@ mod tests {
         let engine = Engine::new(Store::open(&path).unwrap()).unwrap();
         assert_eq!(engine.event_head(), 2);
         assert_eq!(engine.list_rooms().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn create_room_with_sets_members_host_and_discussion() {
+        let engine = engine();
+        let a = engine
+            .create_bot("主控", sa_protocol::ModelTier::Strong, "")
+            .unwrap();
+        let b = engine
+            .create_bot("前端专家", sa_protocol::ModelTier::Mid, "UI")
+            .unwrap();
+
+        let room = engine
+            .create_room_with(&sa_protocol::CreateRoomRequest {
+                name: "前端重构组".into(),
+                member_bot_ids: Some(vec![b.id.clone(), a.id.clone(), b.id.clone()]),
+                host_bot_id: Some(a.id.clone()),
+                discussion: Some(sa_protocol::Discussion::Lead),
+            })
+            .unwrap();
+
+        assert_eq!(room.name, "前端重构组");
+        assert_eq!(room.member_bot_ids, vec![b.id.clone(), a.id.clone()]);
+        assert_eq!(room.host_bot_id.as_ref(), Some(&a.id));
+        assert_eq!(room.discussion, sa_protocol::Discussion::Lead);
     }
 }

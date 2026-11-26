@@ -16,6 +16,7 @@ mod episode;
 mod extensions;
 mod github;
 pub mod harness;
+mod manage_bots;
 mod room;
 mod router;
 mod routines;
