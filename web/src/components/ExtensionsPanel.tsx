@@ -4,17 +4,18 @@ import { EXTENSIONS_CHANGED, mcpDot, mcpStatus, skillAudience } from "../api/ext
 import type { Extensions } from "../api/types";
 
 interface Props {
-  /** 外部快捷入口（如命令面板）递增此计数时，走面板内同一套热重载逻辑，统一呈现加载/成功/错误状态。 */
-  reloadTrigger?: number;
+  /** 外部快捷入口（如命令面板）挂起一次热重载请求；消费后由父级清零，避免重新切回标签页时重复触发。 */
+  pendingReload?: boolean;
+  onConsumeReload?(): void;
 }
 
 /** 右栏的「扩展」页：Bot 有哪些技能，接了哪些外部 MCP 服务。支持热重载 config.toml 中的 MCP 与钩子。 */
-export function ExtensionsPanel({ reloadTrigger = 0 }: Props) {
+export function ExtensionsPanel({ pendingReload = false, onConsumeReload }: Props) {
   const [found, setFound] = useState<Extensions | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const lastTrigger = useRef(0);
+  const loadedOnce = useRef(false);
 
   const load = useCallback(async () => {
     setBusy(true);
@@ -48,13 +49,15 @@ export function ExtensionsPanel({ reloadTrigger = 0 }: Props) {
   }, []);
 
   useEffect(() => {
-    if (reloadTrigger > 0 && reloadTrigger !== lastTrigger.current) {
-      lastTrigger.current = reloadTrigger;
+    if (pendingReload) {
+      loadedOnce.current = true;
+      onConsumeReload?.();
       void reload();
-    } else {
+    } else if (!loadedOnce.current) {
+      loadedOnce.current = true;
       void load();
     }
-  }, [reloadTrigger, load, reload]);
+  }, [pendingReload, onConsumeReload, load, reload]);
 
   // 有服务正在连的时候，过一会儿自己再看一眼。
   const connecting = found?.mcp.some((server) => server.state === "connecting") ?? false;

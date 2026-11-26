@@ -77,8 +77,9 @@ interface Props {
   checkpoints?: readonly CheckpointInfo[];
   onRewindCheckpoint?(checkpointId: string, force: boolean): Promise<RewindReport>;
   onJumpMessage?(messageId: string): Promise<boolean> | boolean | void;
-  /** 命令面板触发扩展热重载的递增值。 */
-  extensionsReloadTrigger?: number;
+  /** 命令面板挂起的扩展热重载请求（消费一次即清零）。 */
+  extensionsReloadPending?: boolean;
+  onConsumeExtensionsReload?(): void;
 }
 
 export function ContextPanel({
@@ -106,7 +107,8 @@ export function ContextPanel({
   checkpoints,
   onRewindCheckpoint,
   onJumpMessage,
-  extensionsReloadTrigger,
+  extensionsReloadPending,
+  onConsumeExtensionsReload,
 }: Props) {
   const [menuOpen, setMenuOpen] = useState(false);
   const pickerRef = useRef<HTMLDivElement>(null);
@@ -266,7 +268,12 @@ export function ContextPanel({
         )}
         {tab === "links" && <LinksPanel key={room.id} room={room} links={links} actions={linkActions} />}
         {tab === "models" && <ModelsPanel />}
-        {tab === "extensions" && <ExtensionsPanel reloadTrigger={extensionsReloadTrigger} />}
+        {tab === "extensions" && (
+          <ExtensionsPanel
+            pendingReload={extensionsReloadPending}
+            onConsumeReload={onConsumeExtensionsReload}
+          />
+        )}
         {tab === "usage" && <UsagePanel refreshKey={usageKey} />}
         {tab === "audit" && (
           <AuditPanel

@@ -160,7 +160,8 @@ function Shell() {
   const [flowExpanded, setFlowExpanded] = useState(false);
   const [checkpoints, setCheckpoints] = useState<CheckpointInfo[]>([]);
   const [checkpointRefresh, setCheckpointRefresh] = useState(0);
-  const [extensionsReloadTrigger, setExtensionsReloadTrigger] = useState(0);
+  const [extensionsReloadPending, setExtensionsReloadPending] = useState(false);
+  const consumeExtensionsReload = useCallback(() => setExtensionsReloadPending(false), []);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -570,7 +571,7 @@ function Shell() {
             title: "热重载 MCP 与钩子配置",
             run: () => {
               showPanel("extensions");
-              setExtensionsReloadTrigger((n) => n + 1);
+              setExtensionsReloadPending(true);
             },
           },
           {
@@ -929,7 +930,8 @@ function Shell() {
             checkpoints={checkpoints}
             onRewindCheckpoint={handleRewindCheckpoint}
             onJumpMessage={openMessage}
-            extensionsReloadTrigger={extensionsReloadTrigger}
+            extensionsReloadPending={extensionsReloadPending}
+            onConsumeExtensionsReload={consumeExtensionsReload}
           />
         )}
       </div>
