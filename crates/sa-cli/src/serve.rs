@@ -107,7 +107,8 @@ pub fn serve_until(
                 println!("正在连接 {} 个 MCP 服务。", mcp.len());
                 app.orchestrator.start_mcp(mcp);
             }
-            let mut state = AppState::new(app.engine.clone(), app.orchestrator.clone(), token);
+            let mut state = AppState::new(app.engine.clone(), app.orchestrator.clone(), token)
+                .with_updater(std::sync::Arc::new(crate::update::ServerUpdater::new()));
             if let Some(models) = &app.models {
                 state = state.with_models(models.clone());
             }

@@ -1080,3 +1080,37 @@ pub struct HarnessDesk {
     /// 和开工时比，改了哪些文件。
     pub changes: Vec<DeskChange>,
 }
+
+/// 检查更新的结果：当前版本、GitHub 上最新的 Release 版本以及能不能在线更新。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct UpdateStatus {
+    /// 当前正在运行的版本（不含 `v`）。
+    pub current: String,
+    /// GitHub 上最新 Release 的版本号（不含 `v`）。还没有 Release 时为空。
+    pub latest: Option<String>,
+    /// 是否有比当前更新的版本。
+    pub available: bool,
+    /// 最新 Release 的网页链接。
+    pub release_url: Option<String>,
+    /// 更新说明（截短后的摘要）。
+    pub notes: Option<String>,
+    /// 当前平台是否有对应二进制且支持一键替换更新。
+    pub can_self_update: bool,
+    /// 当前平台对应的服务端产物文件名（如 `sa-linux-x86_64`）。
+    pub asset_name: Option<String>,
+    /// 本次检查的时间（毫秒时间戳）。
+    pub checked_at: Millis,
+}
+
+/// 触发服务端在线更新后的结果。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct UpdateApplyResult {
+    /// 刚刚替换成的版本号。
+    pub updated_to: String,
+    /// 服务是否正在自动重启以切到新版本。
+    pub restarting: bool,
+    /// 给人看的一句话说明。
+    pub message: String,
+}

@@ -249,6 +249,8 @@ fn main() {
             pick_workdir,
             open_data_dir,
             window_chrome,
+            check_desktop_update,
+            install_desktop_update,
             retry
         ])
         .setup(|app| {
@@ -571,8 +573,9 @@ fn desktop_state(window: WebviewWindow) -> Result<Value, String> {
         .map(|dir| dir.to_string_lossy().into_owned());
     let link = shell.link.lock().unwrap();
     if from_local(&window).is_err() {
-        // 服务器的页面只用知道自己是谁，好显示「换回本机」。
+        // 服务器的页面只用知道自己是谁，好显示「换回本机」和桌面版版本。
         return Ok(json!({
+            "version": env!("CARGO_PKG_VERSION"),
             "current": match &link.target {
                 Some(target) => json!({ "mode": "server", "server": target.to_string() }),
                 None => json!({ "mode": "local" }),
@@ -589,6 +592,7 @@ fn desktop_state(window: WebviewWindow) -> Result<Value, String> {
         _ => read_remembered(&shell.remembered()).server,
     };
     Ok(json!({
+        "version": env!("CARGO_PKG_VERSION"),
         "current": match &link.target {
             Some(target) => json!({ "mode": "server", "server": target.to_string() }),
             None => json!({ "mode": "local" }),
@@ -805,6 +809,30 @@ fn change_workdir(handle: &AppHandle, dir: PathBuf) {
     }
     remember(&shell, |remembered| remembered.workdir = Some(dir));
     relaunch(handle);
+}
+
+/// 检查桌面版在 GitHub Releases 上有没有新版本。不接收页面传入的网址，只查官方仓库。
+#[tauri::command]
+async fn check_desktop_update(window: WebviewWindow) -> Result<sa_cli::DesktopUpdateInfo, String> {
+    from_main(&window)?;
+    sa_cli::check_desktop_update(env!("CARGO_PKG_VERSION")).await
+}
+
+/// 下载并校验最新的桌面版安装包（.exe / .deb），然后交给系统打开安装向导。
+#[tauri::command]
+async fn install_desktop_update(window: WebviewWindow) -> Result<Value, String> {
+    from_main(&window)?;
+    let (version, path) = sa_cli::download_desktop_installer(env!("CARGO_PKG_VERSION")).await?;
+    let shown = path.to_string_lossy().into_owned();
+    window
+        .app_handle()
+        .opener()
+        .open_path(shown.clone(), None::<&str>)
+        .map_err(|error| format!("已下载到 {shown}，但打开安装程序失败：{error}"))?;
+    Ok(json!({
+        "version": version,
+        "path": shown,
+    }))
 }
 
 /// 在系统的文件管理器里打开数据目录。只有本机页面能调，避免远程服务器页面打开本机目录。

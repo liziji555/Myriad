@@ -41,8 +41,10 @@ import type {
   TaskDetail,
   TaskId,
   TemplateFile,
+  UpdateApplyResult,
   UpdateBotRequest,
   UpdateRoomRequest,
+  UpdateStatus,
   UpdateRoutineRequest,
   UsageSummary,
 } from "./types";
@@ -201,4 +203,8 @@ export const api = {
   /** 给房间生成一个 Telegram 配对码。码只给这一次。 */
   createPairing: (roomId: RoomId) =>
     postJson<Pairing>(`/api/rooms/${encodeURIComponent(roomId)}/pairing`, {}),
+  /** 检查服务端在 GitHub Releases 上有没有新版本。 */
+  checkUpdate: () => request<UpdateStatus>("/api/update"),
+  /** 下载校验并替换服务端二进制，必要时触发自动重启。 */
+  applyUpdate: () => postJson<UpdateApplyResult>("/api/update", {}),
 };

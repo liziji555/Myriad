@@ -16,7 +16,10 @@ use axum::{middleware, Router};
 use sa_adapters::github_events;
 use sa_engine::Engine;
 use sa_orchestrator::Orchestrator;
-use sa_protocol::{ModelSettings, SaveModelsRequest, TestModelRequest, TestModelResult};
+use sa_protocol::{
+    ModelSettings, SaveModelsRequest, TestModelRequest, TestModelResult, UpdateApplyResult,
+    UpdateStatus,
+};
 use std::future::Future;
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -36,6 +39,12 @@ pub trait ModelAdmin: Send + Sync {
     ) -> futures_util::future::BoxFuture<'static, TestModelResult>;
 }
 
+/// 界面里的「更新」背后的东西：检查 GitHub 最新 Release、下载校验并替换当前服务二进制。
+pub trait UpdateAdmin: Send + Sync {
+    fn check(&self) -> futures_util::future::BoxFuture<'static, Result<UpdateStatus, String>>;
+    fn apply(&self) -> futures_util::future::BoxFuture<'static, Result<UpdateApplyResult, String>>;
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub(crate) engine: Arc<Engine>,
@@ -45,6 +54,8 @@ pub struct AppState {
     pub(crate) github_hook: Option<Arc<GithubHook>>,
     /// 模型设置。用假模型时没有。
     pub(crate) models: Option<Arc<dyn ModelAdmin>>,
+    /// 在线更新。单测里不接网时没有。
+    pub(crate) updater: Option<Arc<dyn UpdateAdmin>>,
     /// 置为 `true` 表示服务正在关闭：长连接（SSE）据此主动结束，否则优雅关闭会一直等它们。
     pub(crate) closing: watch::Sender<bool>,
 }
@@ -61,6 +72,7 @@ impl AppState {
             token: token.into(),
             github_hook: None,
             models: None,
+            updater: None,
             closing: watch::Sender::new(false),
         }
     }
@@ -72,6 +84,12 @@ impl AppState {
     /// 让界面能看、能改模型设置。
     pub fn with_models(mut self, models: Arc<dyn ModelAdmin>) -> Self {
         self.models = Some(models);
+        self
+    }
+
+    /// 让界面能检查更新并一键更新服务端。
+    pub fn with_updater(mut self, updater: Arc<dyn UpdateAdmin>) -> Self {
+        self.updater = Some(updater);
         self
     }
 
@@ -164,6 +182,10 @@ pub fn router(state: AppState) -> Router {
         .route("/extensions", get(routes::extensions))
         .route("/models", get(routes::models).put(routes::save_models))
         .route("/models/test", post(routes::test_model))
+        .route(
+            "/update",
+            get(routes::check_update).post(routes::apply_update),
+        )
         .route("/shares", get(routes::list_shares))
         .route("/shares/poll", post(routes::poll_share))
         .route("/shares/reply", post(routes::reply_share))
