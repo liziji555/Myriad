@@ -59,6 +59,10 @@ pub enum Harness {
     ClaudeCode,
     Codex,
     OpenCode,
+    Gemini,
+    Kimi,
+    /// 支持 ACP（Agent Client Protocol）的任意 Agent CLI，例如 `cursor-agent acp`、`gemini --acp`。
+    Acp,
     /// 自己指定的命令，按 Myriad 约定的格式一行一个 JSON 报告每一步。
     Command,
 }
@@ -68,6 +72,9 @@ str_enum!(Harness {
     ClaudeCode => "claude_code",
     Codex => "codex",
     OpenCode => "open_code",
+    Gemini => "gemini",
+    Kimi => "kimi",
+    Acp => "acp",
     Command => "command",
 });
 
@@ -79,17 +86,22 @@ impl Harness {
             Self::ClaudeCode => "Claude Code",
             Self::Codex => "Codex",
             Self::OpenCode => "OpenCode",
+            Self::Gemini => "Gemini CLI",
+            Self::Kimi => "Kimi Code",
+            Self::Acp => "ACP 通用 Agent",
             Self::Command => "自定义命令",
         }
     }
 
-    /// 没写命令时默认跑哪个程序。内置和自定义命令没有。
+    /// 没写命令时默认跑哪个程序。内置、ACP 和自定义命令没有。
     pub fn default_program(self) -> Option<&'static str> {
         match self {
             Self::ClaudeCode => Some("claude"),
             Self::Codex => Some("codex"),
             Self::OpenCode => Some("opencode"),
-            Self::Builtin | Self::Command => None,
+            Self::Gemini => Some("gemini"),
+            Self::Kimi => Some("kimi"),
+            Self::Builtin | Self::Acp | Self::Command => None,
         }
     }
 }
@@ -1113,4 +1125,47 @@ pub struct UpdateApplyResult {
     pub restarting: bool,
     /// 给人看的一句话说明。
     pub message: String,
+}
+
+/// 探测本机已安装的外部 Agent CLI 的结果。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct HarnessProbe {
+    pub harness: Harness,
+    pub program: String,
+    pub label: String,
+    pub available: bool,
+    pub path: Option<String>,
+    pub version: Option<String>,
+}
+
+/// 独立工位里单个文件的 Unified Diff 预览。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct DeskDiff {
+    pub path: String,
+    pub binary: bool,
+    pub truncated: bool,
+    pub patch: String,
+}
+
+/// 工作目录或独立工位里的一条文件/目录项。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct WorkspaceEntry {
+    pub name: String,
+    pub path: String,
+    pub is_dir: bool,
+    #[ts(type = "number")]
+    pub size: u64,
+}
+
+/// 工作目录或独立工位里的单个文本文件预览。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct WorkspaceFile {
+    pub path: String,
+    pub binary: bool,
+    pub truncated: bool,
+    pub content: String,
 }

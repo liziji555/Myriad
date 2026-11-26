@@ -382,6 +382,11 @@ pub(crate) fn check_harness(harness: Harness, command: &str) -> Result<String> {
     if harness == Harness::Command && command.is_empty() {
         return Err(EngineError::Invalid("自定义命令要写上跑哪个程序".into()));
     }
+    if harness == Harness::Acp && command.is_empty() {
+        return Err(EngineError::Invalid(
+            "ACP 通用 Agent 要写上启动命令，例如 cursor-agent acp 或 gemini --acp".into(),
+        ));
+    }
     if command.chars().count() > 300 || command.contains(['\n', '\r']) {
         return Err(EngineError::Invalid(
             "harness 命令要写在一行里，最多 300 个字".into(),

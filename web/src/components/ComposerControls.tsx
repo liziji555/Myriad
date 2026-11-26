@@ -13,6 +13,9 @@ const HARNESS_NAMES: Record<Exclude<Bot["harness"], "builtin">, string> = {
   claude_code: "Claude Code",
   codex: "Codex",
   open_code: "OpenCode",
+  gemini: "Gemini CLI",
+  kimi: "Kimi Code",
+  acp: "ACP Agent",
   command: "自定义命令",
 };
 

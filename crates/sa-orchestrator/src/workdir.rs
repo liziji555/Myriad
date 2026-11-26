@@ -299,6 +299,47 @@ pub async fn commit_and_diff(
         .collect())
 }
 
+/// 查看独立目录里单个文件相对开工时的 Unified Diff，供界面在「带回工作目录」前审查。
+pub async fn diff_file(workdir: &Workdir, rel_path: &str) -> Result<sa_protocol::DeskDiff, String> {
+    let clean = rel_path.trim();
+    if clean.is_empty() || clean.starts_with('/') || clean.starts_with('\\') || clean.contains("..")
+    {
+        return Err("路径不合法".into());
+    }
+    let patch = task_git(
+        workdir,
+        &[
+            "diff",
+            "--no-ext-diff",
+            "--no-color",
+            "-U3",
+            &workdir.base_ref,
+            "HEAD",
+            "--",
+            clean,
+        ],
+    )
+    .await?;
+    let binary = patch.contains("Binary files ") && patch.contains(" differ");
+    const MAX_DIFF_BYTES: usize = 256 * 1024;
+    let truncated = patch.len() > MAX_DIFF_BYTES;
+    let patch = if truncated {
+        let mut end = MAX_DIFF_BYTES;
+        while end > 0 && !patch.is_char_boundary(end) {
+            end -= 1;
+        }
+        patch[..end].to_string()
+    } else {
+        patch
+    };
+    Ok(sa_protocol::DeskDiff {
+        path: clean.to_string(),
+        binary,
+        truncated,
+        patch,
+    })
+}
+
 /// 验收：先把独立目录里的改动提交掉，再带回它开出来的工作目录。带不回去时什么都不动。
 pub async fn bring_back(dir: &Workdir) -> Result<(), String> {
     commit_and_diff(dir, "带回前记下改动").await?;

@@ -6,6 +6,7 @@ import type { ExecCard } from "../api/execution";
 import { AuditPanel } from "./AuditPanel";
 import { ExecutionPanel } from "./ExecutionPanel";
 import { ExtensionsPanel } from "./ExtensionsPanel";
+import { FilesPanel } from "./FilesPanel";
 import { ModelsPanel } from "./ModelsPanel";
 import { LinksPanel } from "./LinksPanel";
 import { MembersPanel } from "./MembersPanel";
@@ -195,7 +196,7 @@ export function ContextPanel({
             task={(board.rooms[room.id] ?? []).find((task) => task.id === focusTask) ?? null}
           />
         )}
-        {tab === "files" && <p className="sa-panel-empty">还没有文件。</p>}
+        {tab === "files" && <FilesPanel key={room.id} room={room} members={members} />}
         {tab === "members" && <MembersPanel key={room.id} room={room} members={members} bots={bots} team={team} />}
         {tab === "activity" && (
             <TaskGraph
