@@ -82,10 +82,13 @@ pub struct ChatRequest {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Usage {
-    /// 输入 token 总数，包含命中缓存的部分。
+    /// 输入 token 总数，包含命中缓存（`cached_tokens`）与写入缓存（`cache_write_tokens`）的部分。
     pub input_tokens: u64,
     pub output_tokens: u64,
+    /// 命中提示词缓存（cache read）的输入 token 数。
     pub cached_tokens: u64,
+    /// 写入提示词缓存（Anthropic `cache_creation_input_tokens`）的输入 token 数。
+    pub cache_write_tokens: u64,
 }
 
 impl Usage {
@@ -93,6 +96,7 @@ impl Usage {
         self.input_tokens += other.input_tokens;
         self.output_tokens += other.output_tokens;
         self.cached_tokens += other.cached_tokens;
+        self.cache_write_tokens += other.cache_write_tokens;
     }
 }
 
@@ -224,6 +228,7 @@ mod tests {
                 input_tokens: 10,
                 output_tokens: 4,
                 cached_tokens: 2,
+                cache_write_tokens: 0,
             }),
             StreamEvent::Done {
                 stop: StopReason::ToolUse,

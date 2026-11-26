@@ -20,6 +20,17 @@ export function ExtensionsPanel() {
     setBusy(false);
   }, []);
 
+  const reload = useCallback(async () => {
+    setBusy(true);
+    try {
+      setFound(await api.reloadExtensions());
+      setError(null);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+    setBusy(false);
+  }, []);
+
   useEffect(() => {
     void load();
   }, [load]);
@@ -78,8 +89,7 @@ export function ExtensionsPanel() {
         </h3>
         {found.mcp.length === 0 ? (
           <p className="sa-panel-empty">
-            还没有接外部 MCP 服务。在 config.toml 里加一节 [mcp.名字]（里面有写法的例子），重新启动 sa serve
-            之后，它的工具会加给每个 Bot，每次调用都要你批准。
+            还没有接外部 MCP 服务。在 config.toml 里加一节 [mcp.名字] 后点下方「热重载」即可生效（只读工具将自动放行，写操作仍需批准）。
           </p>
         ) : (
           <ul className="sa-list" aria-label="MCP 服务">
@@ -101,8 +111,8 @@ export function ExtensionsPanel() {
           </ul>
         )}
       </section>
-      <button type="button" className="sa-button sa-button-quiet" disabled={busy} onClick={() => void load()}>
-        {busy ? "正在刷新…" : "刷新"}
+      <button type="button" className="sa-button sa-button-quiet" disabled={busy} onClick={() => void reload()}>
+        {busy ? "正在热重载…" : "刷新 / 热重载"}
       </button>
     </div>
   );

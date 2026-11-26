@@ -670,6 +670,7 @@ fn charge_unreported(request: &ChatRequest, reply: &mut Accumulator) {
         input_tokens: input as u64,
         output_tokens: output as u64,
         cached_tokens: 0,
+        cache_write_tokens: 0,
     });
 }
 

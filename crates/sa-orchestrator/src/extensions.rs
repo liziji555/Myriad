@@ -125,8 +125,28 @@ impl Orchestrator {
 
     /// 连一个外部 MCP 服务，连上了就把它的工具加给每个 Bot。返回加了哪些工具（服务自己的工具名）。
     pub async fn connect_mcp(&self, server: Arc<McpServer>) -> Result<Vec<String>, McpError> {
+        let gen = self
+            .shared
+            .mcp_generation
+            .load(std::sync::atomic::Ordering::SeqCst);
+        self.connect_mcp_in_gen(server, gen).await
+    }
+
+    async fn connect_mcp_in_gen(
+        &self,
+        server: Arc<McpServer>,
+        gen: u64,
+    ) -> Result<Vec<String>, McpError> {
         let name = server.name().to_string();
         {
+            if self
+                .shared
+                .mcp_generation
+                .load(std::sync::atomic::Ordering::SeqCst)
+                != gen
+            {
+                return Err(McpError("MCP 配置已热重载，取消旧连接".into()));
+            }
             let mut all = self.shared.mcp.lock().unwrap();
             if all.iter().any(|mcp| mcp.info.name == name) {
                 return Err(McpError(format!("已经有一个叫「{name}」的 MCP 服务了")));
@@ -145,6 +165,16 @@ impl Orchestrator {
             connected = server.connect() => connected,
             _ = self.shared.shutdown.cancelled() => Err(McpError("服务正在关闭".into())),
         };
+        // 若连接耗时期间发生了新一轮热重载，立即关掉过期连接，不污染新代际工具表。
+        if self
+            .shared
+            .mcp_generation
+            .load(std::sync::atomic::Ordering::SeqCst)
+            != gen
+        {
+            server.close().await;
+            return Err(McpError("MCP 配置已热重载，丢弃旧连接".into()));
+        }
         match connected {
             Ok(infos) => {
                 let mut added = vec![];
@@ -175,13 +205,54 @@ impl Orchestrator {
 
     /// 在后台把配置里的 MCP 服务都连上。马上返回；哪个没连上只记下原因，不耽误别的。
     pub fn start_mcp(self: &Arc<Self>, specs: Vec<McpSpec>) {
+        let gen = self
+            .shared
+            .mcp_generation
+            .load(std::sync::atomic::Ordering::SeqCst);
         self.set_mcp_specs(specs.clone());
         for spec in specs {
             let this = self.clone();
             tokio::spawn(async move {
-                let _ = this.connect_mcp(Arc::new(McpServer::new(spec))).await;
+                let _ = this
+                    .connect_mcp_in_gen(Arc::new(McpServer::new(spec)), gen)
+                    .await;
             });
         }
+    }
+
+    /// 热重载外部 MCP 服务：优雅断开旧连接、清理旧 `mcp__*` 工具并并行重连新配置，返回最新扩展状态。
+    pub async fn reload_mcp(self: &Arc<Self>, specs: Vec<McpSpec>) -> Extensions {
+        let _guard = self.shared.mcp_reload_lock.lock().await;
+        let gen = self
+            .shared
+            .mcp_generation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        let previous: Vec<Arc<McpServer>> = {
+            let mut all = self.shared.mcp.lock().unwrap();
+            all.drain(..).map(|mcp| mcp.server).collect()
+        };
+        {
+            let mut tools = self.shared.tools.write().unwrap();
+            tools.remove_by_prefix("mcp__");
+        }
+        for server in previous {
+            server.close().await;
+        }
+        // MCP 变更后驱逐常驻 ACP 进程，让下轮 ACP 重新带上最新 mcpServers。
+        self.shared.acp_pool.evict_all();
+        self.set_mcp_specs(specs.clone());
+
+        let futs = specs.into_iter().map(|spec| {
+            let this = self.clone();
+            async move {
+                let _ = this
+                    .connect_mcp_in_gen(Arc::new(McpServer::new(spec)), gen)
+                    .await;
+            }
+        });
+        futures_util::future::join_all(futs).await;
+        self.extensions()
     }
 
     /// 现在有哪些技能、哪些 MCP 服务。要读磁盘，别在异步线程上直接调。

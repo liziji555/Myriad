@@ -70,6 +70,11 @@ impl Tree {
         })
     }
 
+    /// 非阻塞检查直接启动的进程是否已经退出。
+    pub fn has_exited(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(Some(_)) | Err(_))
+    }
+
     /// 结束这个进程和它启动的所有进程，已经退出的也一样。
     pub fn kill(&mut self) {
         // 进程都已经没了时会报错：要的就是它们没了。

@@ -359,10 +359,12 @@ impl Seen {
             return None;
         }
         let cached = self.cache_read.unwrap_or(0);
+        let cache_write = self.cache_write.unwrap_or(0);
         Some(Usage {
-            input_tokens: self.input.unwrap_or(0) + cached + self.cache_write.unwrap_or(0),
+            input_tokens: self.input.unwrap_or(0) + cached + cache_write,
             output_tokens: self.output.unwrap_or(0),
             cached_tokens: cached,
+            cache_write_tokens: cache_write,
         })
     }
 }
@@ -621,7 +623,8 @@ mod tests {
             Some(Usage {
                 input_tokens: 12,
                 output_tokens: 3,
-                cached_tokens: 8
+                cached_tokens: 8,
+                cache_write_tokens: 0,
             })
         );
         let (headers, body) = server.seen.lock().unwrap()[0].clone();
@@ -749,7 +752,8 @@ mod tests {
             Some(Usage {
                 input_tokens: 10,
                 output_tokens: 9,
-                cached_tokens: 0
+                cached_tokens: 0,
+                cache_write_tokens: 6,
             })
         );
         let acc = collect(&provider, request()).await.unwrap();

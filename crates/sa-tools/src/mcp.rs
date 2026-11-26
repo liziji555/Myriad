@@ -85,12 +85,25 @@ impl Default for McpTimeouts {
     }
 }
 
+/// MCP 工具注解（依据 MCP 2025-06-18 `ToolAnnotations` 规范）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct McpToolAnnotations {
+    pub title: Option<String>,
+    /// 声明该工具不修改外部环境（为 `true` 且非破坏性时可免审批并在规划模式中使用）。
+    pub read_only_hint: Option<bool>,
+    /// 声明该工具可能执行破坏性写入/删除操作（审批卡上显式警示）。
+    pub destructive_hint: Option<bool>,
+    pub idempotent_hint: Option<bool>,
+    pub open_world_hint: Option<bool>,
+}
+
 /// 服务报出来的一个工具。
 #[derive(Debug, Clone, PartialEq)]
 pub struct McpToolInfo {
     pub name: String,
     pub description: String,
     pub input_schema: Value,
+    pub annotations: McpToolAnnotations,
 }
 
 type Reader = Box<dyn AsyncRead + Send + Unpin>;
@@ -388,10 +401,22 @@ async fn handshake(conn: &Connection, timeout: Duration) -> Result<Vec<McpToolIn
             let Some(name) = tool["name"].as_str().filter(|name| !name.is_empty()) else {
                 continue;
             };
+            let ann = &tool["annotations"];
+            let annotations = McpToolAnnotations {
+                title: ann["title"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string),
+                read_only_hint: ann["readOnlyHint"].as_bool(),
+                destructive_hint: ann["destructiveHint"].as_bool(),
+                idempotent_hint: ann["idempotentHint"].as_bool(),
+                open_world_hint: ann["openWorldHint"].as_bool(),
+            };
             tools.push(McpToolInfo {
                 name: name.to_string(),
                 description: tool["description"].as_str().unwrap_or("").to_string(),
                 input_schema: tool["inputSchema"].clone(),
+                annotations,
             });
         }
         cursor = page["nextCursor"].as_str().map(str::to_string);
@@ -571,12 +596,18 @@ impl McpServer {
                 schema if schema["type"] == "object" => schema.clone(),
                 _ => json!({ "type": "object" }),
             };
+            let read_only = info.annotations.read_only_hint == Some(true)
+                && info.annotations.destructive_hint != Some(true);
+            let destructive = info.annotations.destructive_hint == Some(true);
             tools.push(McpTool {
                 name,
                 remote: info.name.clone(),
+                display_title: info.annotations.title.clone(),
                 description: format!("（外部 MCP 服务「{}」提供的工具）{description}", self.name),
                 schema,
                 auto: self.auto_approve.iter().any(|auto| auto == &info.name),
+                read_only,
+                destructive,
                 server: self.clone(),
             });
         }
@@ -714,10 +745,16 @@ pub struct McpTool {
     name: String,
     /// 服务自己的工具名。
     remote: String,
+    /// 服务通过 `annotations.title` 给出的展示标题（可选）。
+    display_title: Option<String>,
     description: String,
     schema: Value,
-    /// 不用问人。
+    /// 在配置 `auto_approve` 中显式放行。
     auto: bool,
+    /// 服务通过 `annotations.readOnlyHint == true`（且非破坏性）声明只读。
+    read_only: bool,
+    /// 服务通过 `annotations.destructiveHint == true` 声明破坏性操作。
+    destructive: bool,
     server: Arc<McpServer>,
 }
 
@@ -743,11 +780,22 @@ impl Tool for McpTool {
     }
 
     fn title(&self, _input: &Value) -> String {
-        format!("调用 {} 的 {}", self.server.name, self.remote)
+        match &self.display_title {
+            Some(title) => format!("调用 {}：{title}", self.server.name),
+            None => format!("调用 {} 的 {}", self.server.name, self.remote),
+        }
+    }
+
+    fn is_read_only(&self, _input: &Value) -> bool {
+        self.read_only
+    }
+
+    fn is_concurrency_safe(&self, _input: &Value) -> bool {
+        self.read_only
     }
 
     async fn check_permission(&self, input: &Value, _ctx: &ToolCtx) -> Permission {
-        if self.auto {
+        if self.auto || self.read_only {
             return Permission::Allow;
         }
         // 批准之前要看得到交给它的是什么：路径、命令、发到哪去都在参数里。
@@ -759,8 +807,13 @@ impl Tool for McpTool {
         if shown.chars().count() > MAX_SHOWN_ARGUMENT_CHARS {
             arguments.push_str("…（太长，后面的没有显示）");
         }
+        let warn = if self.destructive {
+            "⚠️ 该工具声明为破坏性操作（destructiveHint=true），请仔细核对参数后再批准。\n"
+        } else {
+            ""
+        };
         Permission::Ask(format!(
-            "这是外部 MCP 服务「{}」的工具，下面的参数会交给它去执行：{arguments}",
+            "{warn}这是外部 MCP 服务「{}」的工具，下面的参数会交给它去执行：{arguments}",
             self.server.name
         ))
     }
@@ -1168,6 +1221,7 @@ mod tests {
             name: name.into(),
             description: "说明".repeat(1000),
             input_schema: schema,
+            annotations: McpToolAnnotations::default(),
         };
         let tools = server.tools(&[
             info("a b", json!({ "type": "object", "properties": {} })),
@@ -1199,5 +1253,76 @@ mod tests {
         assert_eq!(render(&json!({})).unwrap(), "（工具没有返回内容）");
         let failed = json!({ "content": [], "isError": true });
         assert!(render(&failed).unwrap_err().0.contains("没有说原因"));
+    }
+
+    #[tokio::test]
+    async fn mcp_tool_annotations_auto_allow_readonly_and_warn_destructive() {
+        let dialer: Dialer = Box::new(|| {
+            Box::pin(async {
+                let (ours, theirs) = tokio::io::duplex(64 * 1024);
+                tokio::spawn(async move {
+                    let (reader, mut writer) = tokio::io::split(theirs);
+                    let mut reader = BufReader::new(reader);
+                    let mut line = vec![];
+                    while let Ok(true) = read_line(&mut reader, &mut line).await {
+                        let msg: Value = serde_json::from_slice(&line).unwrap();
+                        let (Some(method), Some(id)) = (msg["method"].as_str(), msg.get("id"))
+                        else {
+                            continue;
+                        };
+                        let result = match method {
+                            "initialize" => json!({
+                                "protocolVersion": PROTOCOL_VERSION,
+                                "capabilities": { "tools": {} }
+                            }),
+                            "tools/list" => json!({
+                                "tools": [
+                                    {
+                                        "name": "read_docs",
+                                        "description": "读取文档",
+                                        "inputSchema": { "type": "object" },
+                                        "annotations": { "title": "查文档", "readOnlyHint": true }
+                                    },
+                                    {
+                                        "name": "drop_table",
+                                        "description": "删表",
+                                        "inputSchema": { "type": "object" },
+                                        "annotations": { "readOnlyHint": true, "destructiveHint": true }
+                                    }
+                                ]
+                            }),
+                            _ => json!({}),
+                        };
+                        let reply = json!({ "jsonrpc": "2.0", "id": id, "result": result });
+                        writer
+                            .write_all(format!("{reply}\n").as_bytes())
+                            .await
+                            .unwrap();
+                    }
+                });
+                let (reader, writer) = tokio::io::split(ours);
+                Ok(Pipe::new(reader, writer))
+            })
+        });
+        let server = Arc::new(McpServer::with_dialer("wiki", vec![], dialer));
+        let infos = server.connect().await.unwrap();
+        let tools = server.tools(&infos);
+        let ctx = ctx();
+
+        // readOnlyHint=true 且非破坏性 -> 自动免审批且标记只读/可并发。
+        assert!(tools[0].is_read_only(&json!({})));
+        assert!(tools[0].is_concurrency_safe(&json!({})));
+        assert_eq!(tools[0].title(&json!({})), "调用 wiki：查文档");
+        assert_eq!(
+            tools[0].check_permission(&json!({}), &ctx).await,
+            Permission::Allow
+        );
+
+        // 同时标 destructiveHint=true 时绝不按只读放行，审批提示明确警示破坏性操作。
+        assert!(!tools[1].is_read_only(&json!({})));
+        let Permission::Ask(reason) = tools[1].check_permission(&json!({}), &ctx).await else {
+            panic!("破坏性工具必须走审批");
+        };
+        assert!(reason.contains("破坏性操作"), "{reason}");
     }
 }

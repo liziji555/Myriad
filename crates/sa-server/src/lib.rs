@@ -45,6 +45,13 @@ pub trait UpdateAdmin: Send + Sync {
     fn apply(&self) -> futures_util::future::BoxFuture<'static, Result<UpdateApplyResult, String>>;
 }
 
+/// 界面里的「扩展热重载」背后的东西：从磁盘重读 `config.toml` 并热重载 MCP 服务与生命周期钩子。
+pub trait ExtensionsAdmin: Send + Sync {
+    fn reload(
+        &self,
+    ) -> futures_util::future::BoxFuture<'static, Result<sa_protocol::Extensions, String>>;
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub(crate) engine: Arc<Engine>,
@@ -56,6 +63,8 @@ pub struct AppState {
     pub(crate) models: Option<Arc<dyn ModelAdmin>>,
     /// 在线更新。单测里不接网时没有。
     pub(crate) updater: Option<Arc<dyn UpdateAdmin>>,
+    /// 扩展热重载（重读 config.toml 中的 MCP 与 Hooks）。
+    pub(crate) extensions_admin: Option<Arc<dyn ExtensionsAdmin>>,
     /// 置为 `true` 表示服务正在关闭：长连接（SSE）据此主动结束，否则优雅关闭会一直等它们。
     pub(crate) closing: watch::Sender<bool>,
 }
@@ -73,6 +82,7 @@ impl AppState {
             github_hook: None,
             models: None,
             updater: None,
+            extensions_admin: None,
             closing: watch::Sender::new(false),
         }
     }
@@ -90,6 +100,12 @@ impl AppState {
     /// 让界面能检查更新并一键更新服务端。
     pub fn with_updater(mut self, updater: Arc<dyn UpdateAdmin>) -> Self {
         self.updater = Some(updater);
+        self
+    }
+
+    /// 让界面能热重载 `config.toml` 中的 MCP 服务与生命周期钩子。
+    pub fn with_extensions_admin(mut self, admin: Arc<dyn ExtensionsAdmin>) -> Self {
+        self.extensions_admin = Some(admin);
         self
     }
 
@@ -199,6 +215,7 @@ pub fn router(state: AppState) -> Router {
         .route("/links/{link_id}", delete(routes::delete_link))
         .route("/rooms/{room_id}/pairing", post(routes::create_pairing))
         .route("/extensions", get(routes::extensions))
+        .route("/extensions/reload", post(routes::reload_extensions))
         .route("/models", get(routes::models).put(routes::save_models))
         .route("/models/test", post(routes::test_model))
         .route(

@@ -191,6 +191,11 @@ impl ToolRegistry {
         self.tools.iter().find(|tool| tool.name() == name)
     }
 
+    /// 移除所有名字以 `prefix` 开头的工具（用于 MCP 配置热重载时清理旧工具）。
+    pub fn remove_by_prefix(&mut self, prefix: &str) {
+        self.tools.retain(|tool| !tool.name().starts_with(prefix));
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = &Arc<dyn Tool>> {
         self.tools.iter()
     }

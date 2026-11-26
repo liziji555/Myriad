@@ -26,8 +26,10 @@ const SUMMARY_DAYS: u64 = 7;
 pub struct Price {
     /// 没有命中缓存的输入。
     pub input: f64,
-    /// 命中缓存的输入。
+    /// 命中缓存（cache read）的输入。
     pub cached_input: f64,
+    /// 写入缓存（Anthropic `cache_creation_input_tokens`）的输入。
+    pub cache_write: f64,
     pub output: f64,
 }
 
@@ -50,10 +52,14 @@ impl Budget {
     pub fn cost_micros(&self, model: &str, usage: Usage) -> i64 {
         let price = self.prices.get(model).unwrap_or(&self.default_price);
         let cached = usage.cached_tokens.min(usage.input_tokens);
-        let fresh = usage.input_tokens - cached;
+        let cache_write = usage
+            .cache_write_tokens
+            .min(usage.input_tokens.saturating_sub(cached));
+        let fresh = usage.input_tokens - cached - cache_write;
         // 价格是每百万 token 的，乘上 token 数正好是百万分之一个货币单位。
         let micros = fresh as f64 * price.input
             + cached as f64 * price.cached_input
+            + cache_write as f64 * price.cache_write
             + usage.output_tokens as f64 * price.output;
         micros.round().max(0.0) as i64
     }
@@ -290,6 +296,7 @@ mod tests {
             input_tokens: input,
             output_tokens: output,
             cached_tokens: cached,
+            cache_write_tokens: 0,
         }
     }
 
@@ -301,12 +308,14 @@ mod tests {
                 Price {
                     input: 2.0,
                     cached_input: 0.5,
+                    cache_write: 2.5,
                     output: 8.0,
                 },
             )]),
             default_price: Price {
                 input: 1.0,
                 cached_input: 1.0,
+                cache_write: 1.25,
                 output: 1.0,
             },
             ..Budget::default()
@@ -315,6 +324,19 @@ mod tests {
         assert_eq!(
             budget.cost_micros("big", usage(1_000_000, 400_000, 100_000)),
             2_200_000
+        );
+        // Anthropic 缓存写入独立计费（1.25×）：30 万新鲜×2 + 40 万命中×0.5 + 30 万写入×2.5 + 10 万输出×8 = 0.6 + 0.2 + 0.75 + 0.8 = 2.35
+        assert_eq!(
+            budget.cost_micros(
+                "big",
+                Usage {
+                    input_tokens: 1_000_000,
+                    output_tokens: 100_000,
+                    cached_tokens: 400_000,
+                    cache_write_tokens: 300_000,
+                }
+            ),
+            2_350_000
         );
         assert_eq!(budget.cost_micros("other", usage(1_000, 0, 500)), 1_500);
         // 上报的缓存数比输入还多：按全部命中缓存算，不会算出负数。

@@ -199,6 +199,7 @@ async fn a_routine_missed_for_too_long_or_over_budget_is_skipped_without_calling
         default_price: Price {
             input: 1_000_000.0,
             cached_input: 1_000_000.0,
+            cache_write: 1_250_000.0,
             output: 1_000_000.0,
         },
         ..Budget::default()

@@ -198,6 +198,8 @@ export const api = {
   audit: (query: AuditQuery) => request<AuditPage>(`/api/audit${auditSearch(query)}`),
   /** 现在有哪些技能、哪些外部 MCP 服务。 */
   extensions: () => request<Extensions>("/api/extensions"),
+  /** 热重载 config.toml 中的外部 MCP 服务、钩子并重新扫描技能（无需重启服务）。 */
+  reloadExtensions: () => postJson<Extensions>("/api/extensions/reload", {}),
   models: () => request<ModelSettings>("/api/models"),
   saveModels: (body: SaveModelsRequest) => postJson<ModelSettings>("/api/models", body, "PUT"),
   testModel: (body: TestModelRequest) => postJson<TestModelResult>("/api/models/test", body),

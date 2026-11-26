@@ -116,6 +116,8 @@ pub enum Progress {
         input_tokens: u64,
         output_tokens: u64,
         cached_tokens: u64,
+        #[serde(default)]
+        cache_write_tokens: u64,
     },
 }
 
@@ -150,6 +152,7 @@ impl Observer for Forward {
             input_tokens: usage.input_tokens,
             output_tokens: usage.output_tokens,
             cached_tokens: usage.cached_tokens,
+            cache_write_tokens: usage.cache_write_tokens,
         });
     }
 }
@@ -173,6 +176,7 @@ pub(crate) async fn show(progress: &str, observer: &dyn Observer) {
             input_tokens,
             output_tokens,
             cached_tokens,
+            cache_write_tokens,
         } => {
             observer
                 .usage(
@@ -181,6 +185,7 @@ pub(crate) async fn show(progress: &str, observer: &dyn Observer) {
                         input_tokens,
                         output_tokens,
                         cached_tokens,
+                        cache_write_tokens,
                     },
                 )
                 .await
@@ -283,6 +288,8 @@ impl Desks {
             session: job.session.as_deref(),
             permission: job.permission,
             mcp_servers: &[],
+            acp_pool: None,
+            acp_scope: None,
         };
         let finished = harness::run(&launch, observer, cancel).await;
         let changes = workdir::commit_and_diff(&job.workdir, &job.summary)

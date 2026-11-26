@@ -108,7 +108,12 @@ pub fn serve_until(
                 app.orchestrator.start_mcp(mcp);
             }
             let mut state = AppState::new(app.engine.clone(), app.orchestrator.clone(), token)
-                .with_updater(std::sync::Arc::new(crate::update::ServerUpdater::new()));
+                .with_updater(std::sync::Arc::new(crate::update::ServerUpdater::new()))
+                .with_extensions_admin(std::sync::Arc::new(ConfigExtensionsAdmin {
+                    config_path: data_dir.config(),
+                    workdir: std::path::PathBuf::from(&app.workdir),
+                    orchestrator: app.orchestrator.clone(),
+                }));
             if let Some(models) = &app.models {
                 state = state.with_models(models.clone());
             }
@@ -141,6 +146,42 @@ pub fn serve_until(
                 .audit(Audit::system("server.stopped", "sa serve 正常停下了"));
             Ok(())
         })
+}
+
+/// 响应 `POST /api/extensions/reload`：重读 `config.toml` 并热重载 MCP 服务与生命周期钩子。
+struct ConfigExtensionsAdmin {
+    config_path: std::path::PathBuf,
+    workdir: std::path::PathBuf,
+    orchestrator: std::sync::Arc<sa_orchestrator::Orchestrator>,
+}
+
+impl sa_server::ExtensionsAdmin for ConfigExtensionsAdmin {
+    fn reload(
+        &self,
+    ) -> futures_util::future::BoxFuture<'static, Result<sa_protocol::Extensions, String>> {
+        let config_path = self.config_path.clone();
+        let workdir = self.workdir.clone();
+        let orchestrator = self.orchestrator.clone();
+        Box::pin(async move {
+            let (specs, hooks, hidden_tokens) = tokio::task::spawn_blocking(move || {
+                let config = crate::config::Config::load_or_default(&config_path)
+                    .map_err(|e| format!("{e:#}"))?;
+                let env = |key: &str| std::env::var(key).ok().filter(|v| !v.is_empty());
+                let specs = config.mcp_specs(&workdir, env);
+                let hidden_tokens: Vec<String> = config
+                    .mcp
+                    .values()
+                    .filter_map(|server| server.token_env.clone())
+                    .collect();
+                Ok::<_, String>((specs, config.hooks, hidden_tokens))
+            })
+            .await
+            .map_err(|e| e.to_string())??;
+            sa_tools::hide_env_from_commands(hidden_tokens);
+            orchestrator.use_hooks(hooks);
+            Ok(orchestrator.reload_mcp(specs).await)
+        })
+    }
 }
 
 /// 等到有人要它停：Ctrl+C，或者（Linux、macOS 上）`kill` 发来的 SIGTERM——

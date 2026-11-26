@@ -14,10 +14,159 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
+
+/// 持久 ACP 会话池容量上限（超出时按最久未使用淘汰并清理进程树）。
+const ACP_POOL_MAX: usize = 16;
+/// 持久 ACP 会话空闲超时时间：超过后自动回收，避免闲置子进程长期占内存。
+const ACP_IDLE_TTL: Duration = Duration::from_secs(15 * 60);
+
+/// 房间工位对应的持久 ACP 会话作用域标识。
+pub(crate) fn acp_scope(room: &sa_protocol::RoomId, bot: &sa_protocol::BotId) -> String {
+    format!("room:{room}:bot:{bot}")
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct AcpKey {
+    scope: String,
+    command: String,
+    dir: PathBuf,
+}
+
+struct PooledAcp {
+    child: Tree,
+    stdin: tokio::process::ChildStdin,
+    reader: BufReader<tokio::process::ChildStdout>,
+    stderr: Option<tokio::task::JoinHandle<String>>,
+    session_id: String,
+    next_id: u64,
+    mcp_fingerprint: String,
+    available_modes: Vec<String>,
+    current_mode: Option<String>,
+    last_used: Instant,
+}
+
+impl Drop for PooledAcp {
+    fn drop(&mut self) {
+        self.child.kill();
+        if let Some(handle) = self.stderr.take() {
+            handle.abort();
+        }
+    }
+}
+
+/// 持久 ACP 进程池：同一房间工位的 ACP Agent 跨轮保持常驻进程与内存会话，免去每轮冷启动。
+#[derive(Default)]
+pub(crate) struct AcpPool {
+    entries: std::sync::Mutex<HashMap<AcpKey, PooledAcp>>,
+}
+
+impl AcpPool {
+    fn take(
+        &self,
+        key: &AcpKey,
+        expected_session: Option<&str>,
+        mcp_fingerprint: &str,
+    ) -> Option<PooledAcp> {
+        let mut stale = Vec::new();
+        let taken = {
+            let mut map = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+            let expired_keys: Vec<AcpKey> = map
+                .iter()
+                .filter(|(_, v)| v.last_used.elapsed() > ACP_IDLE_TTL)
+                .map(|(k, _)| k.clone())
+                .collect();
+            for k in expired_keys {
+                if let Some(v) = map.remove(&k) {
+                    stale.push(v);
+                }
+            }
+            map.remove(key)
+        };
+        drop(stale);
+        let mut conn = taken?;
+        let valid = !conn.child.has_exited()
+            && conn.mcp_fingerprint == mcp_fingerprint
+            && expected_session.is_none_or(|sid| sid == conn.session_id);
+        if valid {
+            Some(conn)
+        } else {
+            drop(conn);
+            None
+        }
+    }
+
+    fn put(&self, key: AcpKey, mut conn: PooledAcp) {
+        conn.last_used = Instant::now();
+        let mut evicted = Vec::new();
+        {
+            let mut map = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+            let expired_keys: Vec<AcpKey> = map
+                .iter()
+                .filter(|(_, v)| v.last_used.elapsed() > ACP_IDLE_TTL)
+                .map(|(k, _)| k.clone())
+                .collect();
+            for k in expired_keys {
+                if let Some(v) = map.remove(&k) {
+                    evicted.push(v);
+                }
+            }
+            while map.len() >= ACP_POOL_MAX {
+                if let Some(oldest) = map
+                    .iter()
+                    .min_by_key(|(_, v)| v.last_used)
+                    .map(|(k, _)| k.clone())
+                {
+                    if let Some(v) = map.remove(&oldest) {
+                        evicted.push(v);
+                    }
+                } else {
+                    break;
+                }
+            }
+            if let Some(prev) = map.insert(key, conn) {
+                evicted.push(prev);
+            }
+        }
+        drop(evicted);
+    }
+
+    /// 驱逐指定作用域（例如重置工位会话、关闭工位）的全部常驻 ACP 进程。
+    pub(crate) fn evict_scope(&self, scope: &str) {
+        let mut evicted = Vec::new();
+        {
+            let mut map = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+            let keys: Vec<AcpKey> = map.keys().filter(|k| k.scope == scope).cloned().collect();
+            for k in keys {
+                if let Some(v) = map.remove(&k) {
+                    evicted.push(v);
+                }
+            }
+        }
+        drop(evicted);
+    }
+
+    /// 驱逐所有常驻 ACP 进程（服务关闭或 MCP 热重载时调用）。
+    pub(crate) fn evict_all(&self) {
+        let evicted: Vec<PooledAcp> = {
+            let mut map = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+            map.drain().map(|(_, v)| v).collect()
+        };
+        drop(evicted);
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.entries.lock().unwrap_or_else(|e| e.into_inner()).len()
+    }
+}
+
+fn mcp_fingerprint(specs: &[McpSpec]) -> String {
+    serde_json::to_string(&acp_mcp_servers(specs)).unwrap_or_default()
+}
 
 /// 出错时最多带上这么多字的标准错误输出。
 const STDERR_TAIL: usize = 2000;
@@ -41,6 +190,10 @@ pub(crate) struct Launch<'a> {
     pub permission: PermissionMode,
     /// Myriad 已配置的 MCP 服务：按各 CLI 支持的格式自动注入（Claude `--mcp-config`、Codex `-c`、ACP `mcpServers`）。
     pub mcp_servers: &'a [McpSpec],
+    /// 可选的持久 ACP 进程池：传入时复用同工位的常驻 ACP 进程，免去每轮冷启动。
+    pub acp_pool: Option<&'a AcpPool>,
+    /// 与 `acp_pool` 配对的作用域键（如 `room:{id}:bot:{id}`）。
+    pub acp_scope: Option<&'a str>,
 }
 
 static TEMP_MCP_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -922,24 +1075,149 @@ async fn send_acp(stdin: &mut tokio::process::ChildStdin, value: &Value) -> Resu
     stdin.flush().await.map_err(|e| e.to_string())
 }
 
+/// 从 ACP `session/new` / `session/load` 返回体里提取可用模式列表与当前模式。
+fn parse_acp_modes(result: &Value) -> (Vec<String>, Option<String>) {
+    let modes_obj = &result["modes"];
+    let available: Vec<String> = modes_obj["availableModes"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|m| {
+                    m["id"]
+                        .as_str()
+                        .or_else(|| m.as_str())
+                        .filter(|s| !s.is_empty())
+                        .map(String::from)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let current = modes_obj["currentModeId"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    (available, current)
+}
+
+fn is_acp_plan_mode(mode: &str) -> bool {
+    let lower = mode.to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "plan" | "architect" | "read-only" | "readonly" | "read_only"
+    )
+}
+
+/// 根据房间权限档位与 ACP Agent 声明的模式列表，决定是否需要调用 `session/set_mode`。
+fn desired_acp_mode(
+    available: &[String],
+    current: Option<&str>,
+    permission: PermissionMode,
+) -> Option<String> {
+    if available.is_empty() {
+        return None;
+    }
+    let target = if permission == PermissionMode::Plan {
+        available.iter().find(|m| is_acp_plan_mode(m))?
+    } else if current.is_some_and(is_acp_plan_mode) {
+        available
+            .iter()
+            .find(|m| {
+                let lower = m.to_ascii_lowercase();
+                matches!(lower.as_str(), "default" | "code" | "agent" | "ask")
+            })
+            .or_else(|| available.iter().find(|m| !is_acp_plan_mode(m)))?
+    } else {
+        return None;
+    };
+    if current == Some(target.as_str()) {
+        None
+    } else {
+        Some(target.clone())
+    }
+}
+
 /// 通用 ACP（Agent Client Protocol）stdio JSON-RPC 驱动：
 /// 支持 `cursor-agent acp`、`gemini --acp`、`kimi acp`、`opencode acp`、`goose acp` 等所有 ACP Agent。
+/// 当传入 `acp_pool` + `acp_scope` 时复用常驻子进程与内存会话，免去每轮冷启动。
 async fn run_acp(
     launch: &Launch<'_>,
     observer: &dyn Observer,
     cancel: &CancellationToken,
 ) -> Finished {
+    let mcp_fp = mcp_fingerprint(launch.mcp_servers);
+    let pool_key = match (launch.acp_pool, launch.acp_scope) {
+        (Some(_), Some(scope)) => Some(AcpKey {
+            scope: scope.to_string(),
+            command: launch.command.trim().to_string(),
+            dir: launch.dir.to_path_buf(),
+        }),
+        _ => None,
+    };
+
+    // 先尝试复用常驻会话；若复用连接在首包发送或等待响应前即已断开，自动降级为冷启动重试一次。
+    if let (Some(pool), Some(key)) = (launch.acp_pool, pool_key.as_ref()) {
+        if let Some(conn) = pool.take(key, launch.session, &mcp_fp) {
+            match run_acp_turn_on(conn, launch, observer, cancel, true).await {
+                AcpTurnOutcome::ReusedDeadBeforeOutput => {
+                    // 静默回退到冷启动
+                }
+                AcpTurnOutcome::Done { finished, keep } => {
+                    if let Some(conn) = keep {
+                        pool.put(key.clone(), *conn);
+                    }
+                    return finished;
+                }
+            }
+        }
+    }
+
+    let conn = match spawn_acp_session(launch, &mcp_fp, cancel).await {
+        Ok(conn) => conn,
+        Err((end, session)) => {
+            return Finished {
+                end,
+                session,
+                text: String::new(),
+                reasoning: None,
+            };
+        }
+    };
+
+    match run_acp_turn_on(conn, launch, observer, cancel, false).await {
+        AcpTurnOutcome::Done { finished, keep } => {
+            if let (Some(pool), Some(key), Some(conn)) = (launch.acp_pool, pool_key, keep) {
+                pool.put(key, *conn);
+            }
+            finished
+        }
+        AcpTurnOutcome::ReusedDeadBeforeOutput => Finished {
+            end: TurnEnd::Failed("ACP Agent 启动后立即退出了".into()),
+            session: launch.session.map(String::from),
+            text: String::new(),
+            reasoning: None,
+        },
+    }
+}
+
+enum AcpTurnOutcome {
+    /// 复用池中的旧连接在任何输出产生前就断开了，调用方应无感冷启动重试。
+    ReusedDeadBeforeOutput,
+    Done {
+        finished: Finished,
+        /// 仅在完全正常结束本轮且会话同步干净时归还连接池。
+        keep: Option<Box<PooledAcp>>,
+    },
+}
+
+/// 启动一个新的 ACP 子进程，完成 `initialize` + `session/load`（失败回退 `session/new`）。
+async fn spawn_acp_session(
+    launch: &Launch<'_>,
+    mcp_fp: &str,
+    cancel: &CancellationToken,
+) -> Result<PooledAcp, (TurnEnd, Option<String>)> {
     let mut session = launch.session.map(String::from);
-    let failed = |reason: String, session: Option<String>| Finished {
-        end: TurnEnd::Failed(reason),
-        session,
-        text: String::new(),
-        reasoning: None,
-    };
-    let (program, args, _, _temp_file) = match plan(launch) {
-        Ok(plan) => plan,
-        Err(reason) => return failed(reason, session),
-    };
+    let (program, args, _, _temp_file) =
+        plan(launch).map_err(|reason| (TurnEnd::Failed(reason), session.clone()))?;
     let mut command = build_command(&program, &args);
     command
         .current_dir(launch.dir)
@@ -951,20 +1229,23 @@ async fn run_acp(
     for name in sa_tools::hidden_env() {
         command.env_remove(name);
     }
-    let mut child = match Tree::spawn(command) {
-        Ok(child) => child,
-        Err(error) => return failed(format!("ACP Agent 启动不了：{error}"), session),
-    };
-    let mut stdin = match child.stdin() {
-        Some(stdin) => stdin,
-        None => return failed("ACP Agent 标准输入不可用".into(), session),
-    };
+    let mut child = Tree::spawn(command).map_err(|error| {
+        (
+            TurnEnd::Failed(format!("ACP Agent 启动不了：{error}")),
+            session.clone(),
+        )
+    })?;
+    let mut stdin = child.stdin().ok_or_else(|| {
+        (
+            TurnEnd::Failed("ACP Agent 标准输入不可用".into()),
+            session.clone(),
+        )
+    })?;
     let stderr = child
         .stderr()
         .map(|err| tokio::spawn(read_stderr_tail(err)));
     let mut reader = BufReader::new(child.stdout().expect("上面接了管道"));
 
-    // 1. initialize
     let init = json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -977,23 +1258,254 @@ async fn run_acp(
     });
     if let Err(error) = send_acp(&mut stdin, &init).await {
         child.kill();
-        return failed(format!("ACP initialize 发送失败：{error}"), session);
+        return Err((
+            TurnEnd::Failed(format!("ACP initialize 发送失败：{error}")),
+            session,
+        ));
     }
 
-    let mut text = String::new();
-    let mut reasoning = String::new();
-    let mut open: HashMap<String, (String, String)> = HashMap::new();
-    let mut stage = 1u8; // 1 = wait init, 2 = wait session, 3 = wait prompt
-    let mut tried_load = false;
-    let mut perm_seq = 0u64;
-    let mut failure: Option<String> = None;
     let cwd = launch.dir.display().to_string();
     let acp_mcps = acp_mcp_servers(launch.mcp_servers);
+    let mut stage = 1u8; // 1 = wait init, 2 = wait session
+    let mut tried_load = false;
+    let mut failure: Option<String> = None;
 
     let stopped = loop {
         let line = tokio::select! {
             _ = cancel.cancelled() => break true,
             line = tokio::time::timeout(IDLE_TIMEOUT, read_bounded_line(&mut reader)) => match line {
+                Ok(res) => res,
+                Err(_) => {
+                    failure = Some("ACP Agent 握手超时，已自动停止".into());
+                    break false;
+                }
+            },
+        };
+        let Ok(Some(line)) = line else { break false };
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(msg) = serde_json::from_str::<Value>(trimmed) else {
+            continue;
+        };
+        if msg.get("method").is_some() {
+            continue;
+        }
+        let id = msg["id"].as_u64();
+        if let Some(err) = msg.get("error").filter(|v| !v.is_null()) {
+            if id == Some(2) && stage == 2 && tried_load {
+                tried_load = false;
+                session = None;
+                let fallback = json!({
+                    "jsonrpc": "2.0",
+                    "id": 20,
+                    "method": "session/new",
+                    "params": { "cwd": cwd, "mcpServers": acp_mcps }
+                });
+                if let Err(error) = send_acp(&mut stdin, &fallback).await {
+                    failure = Some(format!("ACP 创建新会话失败：{error}"));
+                    break false;
+                }
+                continue;
+            }
+            let reason = str_of(err, "message");
+            failure = Some(if reason.is_empty() {
+                format!("ACP Agent 报错：{err}")
+            } else {
+                reason.to_string()
+            });
+            break false;
+        }
+        if id == Some(1) && stage == 1 {
+            stage = 2;
+            let req = match &session {
+                Some(sid) => {
+                    tried_load = true;
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": 2,
+                        "method": "session/load",
+                        "params": { "sessionId": sid, "cwd": cwd, "mcpServers": acp_mcps }
+                    })
+                }
+                None => json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "session/new",
+                    "params": { "cwd": cwd, "mcpServers": acp_mcps }
+                }),
+            };
+            if let Err(error) = send_acp(&mut stdin, &req).await {
+                failure = Some(format!("ACP 创建会话失败：{error}"));
+                break false;
+            }
+        } else if matches!(id, Some(2) | Some(20)) && stage == 2 {
+            if let Some(sid) = msg["result"]["sessionId"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+            {
+                session = Some(sid.to_string());
+            }
+            let (available_modes, current_mode) = parse_acp_modes(&msg["result"]);
+            let Some(sid) = session else {
+                failure = Some("ACP Agent 没有返回 sessionId".into());
+                break false;
+            };
+            return Ok(PooledAcp {
+                child,
+                stdin,
+                reader,
+                stderr,
+                session_id: sid,
+                next_id: 30,
+                mcp_fingerprint: mcp_fp.to_string(),
+                available_modes,
+                current_mode,
+                last_used: Instant::now(),
+            });
+        }
+    };
+
+    drop(stdin);
+    child.kill();
+    let _ = child.wait().await;
+    if stopped {
+        if let Some(h) = stderr {
+            h.abort();
+        }
+        return Err((TurnEnd::Cancelled, session));
+    }
+    let said = match stderr {
+        Some(mut task) => match tokio::time::timeout(DRAIN, &mut task).await {
+            Ok(said) => said.unwrap_or_default(),
+            Err(_) => {
+                task.abort();
+                String::new()
+            }
+        },
+        None => String::new(),
+    };
+    let reason = match failure {
+        Some(r) => r,
+        None => {
+            let tail = tail(said.trim(), STDERR_TAIL);
+            if tail.is_empty() {
+                "ACP Agent 提前退出了".into()
+            } else {
+                format!("ACP Agent 提前退出了：{tail}")
+            }
+        }
+    };
+    Err((TurnEnd::Failed(reason), session))
+}
+
+/// 在已握手就绪的 ACP 会话上执行一轮 `session/prompt`（必要时先同步模式）。
+async fn run_acp_turn_on(
+    mut conn: PooledAcp,
+    launch: &Launch<'_>,
+    observer: &dyn Observer,
+    cancel: &CancellationToken,
+    reused: bool,
+) -> AcpTurnOutcome {
+    let sid = conn.session_id.clone();
+
+    // 若 Agent 声明了模式（如 plan / default），自动随房间权限档位切换。
+    if let Some(target_mode) = desired_acp_mode(
+        &conn.available_modes,
+        conn.current_mode.as_deref(),
+        launch.permission,
+    ) {
+        let mode_id = conn.next_id;
+        conn.next_id += 1;
+        let req = json!({
+            "jsonrpc": "2.0",
+            "id": mode_id,
+            "method": "session/set_mode",
+            "params": { "sessionId": sid, "modeId": target_mode }
+        });
+        if send_acp(&mut conn.stdin, &req).await.is_err() {
+            if reused {
+                return AcpTurnOutcome::ReusedDeadBeforeOutput;
+            }
+        } else {
+            // 等待 `session/set_mode` 响应（超时或报错不阻断本轮，继续按权限拦截兜底）。
+            let deadline = tokio::time::sleep(Duration::from_secs(5));
+            tokio::pin!(deadline);
+            loop {
+                let line = tokio::select! {
+                    _ = cancel.cancelled() => {
+                        return AcpTurnOutcome::Done {
+                            finished: Finished {
+                                end: TurnEnd::Cancelled,
+                                session: Some(sid),
+                                text: String::new(),
+                                reasoning: None,
+                            },
+                            keep: None,
+                        };
+                    }
+                    _ = &mut deadline => break,
+                    line = read_bounded_line(&mut conn.reader) => line,
+                };
+                let Ok(Some(line)) = line else {
+                    if reused {
+                        return AcpTurnOutcome::ReusedDeadBeforeOutput;
+                    }
+                    break;
+                };
+                let Ok(msg) = serde_json::from_str::<Value>(line.trim()) else {
+                    continue;
+                };
+                if msg.get("method").is_none() && msg["id"].as_u64() == Some(mode_id) {
+                    if msg.get("error").is_none_or(Value::is_null) {
+                        conn.current_mode = Some(target_mode);
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    let prompt_id = conn.next_id;
+    conn.next_id += 1;
+    let prompt_req = json!({
+        "jsonrpc": "2.0",
+        "id": prompt_id,
+        "method": "session/prompt",
+        "params": {
+            "sessionId": sid,
+            "prompt": [{ "type": "text", "text": launch.prompt }]
+        }
+    });
+    if let Err(error) = send_acp(&mut conn.stdin, &prompt_req).await {
+        if reused {
+            return AcpTurnOutcome::ReusedDeadBeforeOutput;
+        }
+        return AcpTurnOutcome::Done {
+            finished: Finished {
+                end: TurnEnd::Failed(format!("ACP 发送提示词失败：{error}")),
+                session: Some(sid),
+                text: String::new(),
+                reasoning: None,
+            },
+            keep: None,
+        };
+    }
+
+    let mut text = String::new();
+    let mut reasoning = String::new();
+    let mut open: HashMap<String, (String, String)> = HashMap::new();
+    let mut perm_seq = 0u64;
+    let mut plan_seq = 0u64;
+    let mut saw_any_frame = false;
+    let mut got_prompt_response = false;
+    let mut failure: Option<String> = None;
+
+    let stopped = loop {
+        let line = tokio::select! {
+            _ = cancel.cancelled() => break true,
+            line = tokio::time::timeout(IDLE_TIMEOUT, read_bounded_line(&mut conn.reader)) => match line {
                 Ok(res) => res,
                 Err(_) => {
                     failure = Some("ACP Agent 长时间无响应，已自动停止".into());
@@ -1009,91 +1521,26 @@ async fn run_acp(
         let Ok(msg) = serde_json::from_str::<Value>(trimmed) else {
             continue;
         };
+        saw_any_frame = true;
 
-        // 响应我方发出的请求（id = 1 / 2 / 20 / 3）。
         if msg.get("method").is_none() {
             let id = msg["id"].as_u64();
-            if let Some(err) = msg.get("error").filter(|v| !v.is_null()) {
-                // `session/load` 不被支持或旧会话已过期时，自动回退到 `session/new` 新建会话。
-                if id == Some(2) && stage == 2 && tried_load {
-                    tried_load = false;
-                    session = None;
-                    let fallback = json!({
-                        "jsonrpc": "2.0",
-                        "id": 20,
-                        "method": "session/new",
-                        "params": { "cwd": cwd, "mcpServers": acp_mcps }
+            if id == Some(prompt_id) {
+                if let Some(err) = msg.get("error").filter(|v| !v.is_null()) {
+                    let reason = str_of(err, "message");
+                    failure = Some(if reason.is_empty() {
+                        format!("ACP Agent 报错：{err}")
+                    } else {
+                        reason.to_string()
                     });
-                    if let Err(error) = send_acp(&mut stdin, &fallback).await {
-                        failure = Some(format!("ACP 创建新会话失败：{error}"));
-                        break false;
-                    }
-                    continue;
-                }
-                let reason = str_of(err, "message");
-                failure = Some(if reason.is_empty() {
-                    format!("ACP Agent 报错：{err}")
                 } else {
-                    reason.to_string()
-                });
-                break false;
-            }
-            if id == Some(1) && stage == 1 {
-                stage = 2;
-                let req = match &session {
-                    Some(sid) => {
-                        tried_load = true;
-                        json!({
-                            "jsonrpc": "2.0",
-                            "id": 2,
-                            "method": "session/load",
-                            "params": { "sessionId": sid, "cwd": cwd, "mcpServers": acp_mcps }
-                        })
-                    }
-                    None => json!({
-                        "jsonrpc": "2.0",
-                        "id": 2,
-                        "method": "session/new",
-                        "params": { "cwd": cwd, "mcpServers": acp_mcps }
-                    }),
-                };
-                if let Err(error) = send_acp(&mut stdin, &req).await {
-                    failure = Some(format!("ACP 创建会话失败：{error}"));
-                    break false;
+                    got_prompt_response = true;
                 }
-            } else if matches!(id, Some(2) | Some(20)) && stage == 2 {
-                if let Some(sid) = msg["result"]["sessionId"]
-                    .as_str()
-                    .filter(|s| !s.is_empty())
-                {
-                    session = Some(sid.to_string());
-                }
-                let Some(sid) = session.clone() else {
-                    failure = Some("ACP Agent 没有返回 sessionId".into());
-                    break false;
-                };
-                stage = 3;
-                let req = json!({
-                    "jsonrpc": "2.0",
-                    "id": 3,
-                    "method": "session/prompt",
-                    "params": {
-                        "sessionId": sid,
-                        "prompt": [{ "type": "text", "text": launch.prompt }]
-                    }
-                });
-                if let Err(error) = send_acp(&mut stdin, &req).await {
-                    failure = Some(format!("ACP 发送提示词失败：{error}"));
-                    break false;
-                }
-            } else if id == Some(3) && stage == 3 {
-                // 本轮 prompt 正常结束。
                 break false;
             }
             continue;
         }
 
-        // Agent 主动发来的通知或请求。
         match str_of(&msg, "method") {
             "session/update" => {
                 let update = &msg["params"]["update"];
@@ -1109,6 +1556,33 @@ async fn run_acp(
                         let chunk = str_of(&update["content"], "text");
                         if !chunk.is_empty() {
                             reasoning.push_str(chunk);
+                        }
+                    }
+                    "plan" => {
+                        if let Some(entries) = update["entries"].as_array() {
+                            let summary: Vec<String> = entries
+                                .iter()
+                                .filter_map(|e| {
+                                    let content = str_of(e, "content");
+                                    if content.is_empty() {
+                                        return None;
+                                    }
+                                    let status = match str_of(e, "status") {
+                                        "completed" => "[x]",
+                                        "in_progress" => "[-]",
+                                        _ => "[ ]",
+                                    };
+                                    Some(format!("{status} {content}"))
+                                })
+                                .collect();
+                            if !summary.is_empty() {
+                                plan_seq += 1;
+                                let key = format!("acp-plan-{plan_seq}");
+                                observer.tool_started(&key, "todo", "更新计划", "").await;
+                                observer
+                                    .tool_finished(&key, StepEnd::Ok, &summary.join("\n"))
+                                    .await;
+                            }
                         }
                     }
                     "tool_call" | "tool_call_update" => {
@@ -1157,6 +1631,7 @@ async fn run_acp(
                                         input_tokens: used,
                                         output_tokens: 0,
                                         cached_tokens: 0,
+                                        cache_write_tokens: 0,
                                     },
                                 )
                                 .await;
@@ -1184,15 +1659,32 @@ async fn run_acp(
                 });
                 let deny_id = pick(&["reject_once", "reject_always"]);
 
-                let approved = if launch.permission == PermissionMode::Full {
+                let tool_kind = str_of(&params["toolCall"], "kind");
+                let mutating = matches!(tool_kind, "execute" | "edit" | "delete" | "move");
+
+                let approved = if launch.permission == PermissionMode::Plan && mutating {
+                    perm_seq += 1;
+                    let key = format!("acp-plan-deny-{perm_seq}");
+                    let title = match str_of(&params["toolCall"], "title") {
+                        "" => "规划模式拦截写操作",
+                        t => t,
+                    };
+                    observer.tool_started(&key, "harness", title, "").await;
+                    observer
+                        .tool_finished(
+                            &key,
+                            StepEnd::Stopped,
+                            "当前处于规划模式（Plan Mode），已自动拒绝修改文件/执行命令请求。",
+                        )
+                        .await;
+                    false
+                } else if launch.permission == PermissionMode::Full {
                     true
                 } else {
                     let title = match str_of(&params["toolCall"], "title") {
                         "" => "ACP Agent 请求执行操作",
                         t => t,
                     };
-                    // 绑定到已打开的 `acp-{toolCallId}` 步骤，若尚未建步骤则先登记临时审批步骤，
-                    // 确保前端界面能真实渲染出审批卡，而不是找不到步骤导致干等超时。
                     let raw_call_id = str_of(&params["toolCall"], "toolCallId");
                     let existing_key =
                         (!raw_call_id.is_empty()).then(|| format!("acp-{raw_call_id}"));
@@ -1244,31 +1736,17 @@ async fn run_acp(
                     "id": req_id,
                     "result": { "outcome": outcome }
                 });
-                let _ = send_acp(&mut stdin, &reply).await;
+                let _ = send_acp(&mut conn.stdin, &reply).await;
             }
             _ => {}
         }
     };
 
-    // 取消时先按 ACP 协议发 `session/cancel` 通知，让外部 Agent 有机会体面收尾再结束进程树。
-    if stopped {
-        if let Some(sid) = session.as_deref() {
-            let cancel_note = json!({
-                "jsonrpc": "2.0",
-                "method": "session/cancel",
-                "params": { "sessionId": sid }
-            });
-            let _ = tokio::time::timeout(
-                Duration::from_millis(300),
-                send_acp(&mut stdin, &cancel_note),
-            )
-            .await;
-        }
+    // 如果复用的常驻进程在吐出任何消息前就 EOF 退出了，无感退回冷启动。
+    if reused && !stopped && !saw_any_frame && !got_prompt_response && failure.is_none() {
+        return AcpTurnOutcome::ReusedDeadBeforeOutput;
     }
 
-    drop(stdin);
-    child.kill();
-    let _ = child.wait().await;
     if !reasoning.trim().is_empty() {
         observer
             .tool_started("acp-think", "think", "思考", "")
@@ -1278,15 +1756,54 @@ async fn run_acp(
             .await;
     }
     let reasoning_out = (!reasoning.trim().is_empty()).then_some(reasoning);
+
     if stopped {
-        return Finished {
-            end: TurnEnd::Cancelled,
-            session,
-            text,
-            reasoning: reasoning_out,
+        let cancel_note = json!({
+            "jsonrpc": "2.0",
+            "method": "session/cancel",
+            "params": { "sessionId": sid }
+        });
+        let _ = tokio::time::timeout(
+            Duration::from_millis(300),
+            send_acp(&mut conn.stdin, &cancel_note),
+        )
+        .await;
+        drop(conn);
+        return AcpTurnOutcome::Done {
+            finished: Finished {
+                end: TurnEnd::Cancelled,
+                session: Some(sid),
+                text,
+                reasoning: reasoning_out,
+            },
+            keep: None,
         };
     }
-    let said = match stderr {
+
+    if got_prompt_response && failure.is_none() {
+        let keep = if launch.acp_pool.is_some() && launch.acp_scope.is_some() {
+            Some(Box::new(conn))
+        } else {
+            drop(conn);
+            None
+        };
+        return AcpTurnOutcome::Done {
+            finished: Finished {
+                end: TurnEnd::Completed,
+                session: Some(sid),
+                text,
+                reasoning: reasoning_out,
+            },
+            keep,
+        };
+    }
+
+    // 异常退出或报错：回收 stderr 摘要并丢弃该进程（不放回池中）。
+    let stderr_handle = conn.stderr.take();
+    conn.child.kill();
+    let _ = conn.child.wait().await;
+    drop(conn);
+    let said = match stderr_handle {
         Some(mut task) => match tokio::time::timeout(DRAIN, &mut task).await {
             Ok(said) => said.unwrap_or_default(),
             Err(_) => {
@@ -1298,7 +1815,6 @@ async fn run_acp(
     };
     let end = match failure {
         Some(reason) => TurnEnd::Failed(reason),
-        None if stage == 3 => TurnEnd::Completed,
         None => {
             let tail = tail(said.trim(), STDERR_TAIL);
             TurnEnd::Failed(if tail.is_empty() {
@@ -1308,11 +1824,14 @@ async fn run_acp(
             })
         }
     };
-    Finished {
-        end,
-        session,
-        text,
-        reasoning: reasoning_out,
+    AcpTurnOutcome::Done {
+        finished: Finished {
+            end,
+            session: Some(sid),
+            text,
+            reasoning: reasoning_out,
+        },
+        keep: None,
     }
 }
 
@@ -1474,10 +1993,12 @@ fn parse_claude(value: &Value) -> Vec<Event> {
         }
         "result" => {
             if let Some(u) = value.get("usage").filter(|v| v.is_object()) {
-                let input_tokens = u["input_tokens"].as_u64().unwrap_or(0);
+                let uncached = u["input_tokens"].as_u64().unwrap_or(0);
                 let output_tokens = u["output_tokens"].as_u64().unwrap_or(0);
                 let cached_tokens = u["cache_read_input_tokens"].as_u64().unwrap_or(0);
-                if input_tokens + output_tokens + cached_tokens > 0 {
+                let cache_write_tokens = u["cache_creation_input_tokens"].as_u64().unwrap_or(0);
+                let input_tokens = uncached + cached_tokens + cache_write_tokens;
+                if input_tokens + output_tokens > 0 {
                     let model = match str_of(value, "model") {
                         "" => "claude-code",
                         m => m,
@@ -1488,6 +2009,7 @@ fn parse_claude(value: &Value) -> Vec<Event> {
                             input_tokens,
                             output_tokens,
                             cached_tokens,
+                            cache_write_tokens,
                         },
                     });
                 }
@@ -1620,6 +2142,7 @@ fn parse_codex(value: &Value) -> Vec<Event> {
                     input_tokens,
                     output_tokens,
                     cached_tokens,
+                    cache_write_tokens: 0,
                 },
             }]
         }
@@ -1675,16 +2198,19 @@ fn parse_opencode(value: &Value) -> Vec<Event> {
         }
         "step_finish" => {
             let tokens = &part["tokens"];
-            let input_tokens = tokens["input"].as_u64().unwrap_or(0);
+            let uncached = tokens["input"].as_u64().unwrap_or(0);
             let output_tokens = tokens["output"].as_u64().unwrap_or(0);
             let cached_tokens = tokens["cache"]["read"].as_u64().unwrap_or(0);
-            if input_tokens + output_tokens + cached_tokens > 0 {
+            let cache_write_tokens = tokens["cache"]["write"].as_u64().unwrap_or(0);
+            let input_tokens = uncached + cached_tokens + cache_write_tokens;
+            if input_tokens + output_tokens > 0 {
                 events.push(Event::Usage {
                     model: "opencode".into(),
                     usage: Usage {
                         input_tokens,
                         output_tokens,
                         cached_tokens,
+                        cache_write_tokens,
                     },
                 });
             }
@@ -1753,6 +2279,7 @@ fn parse_gemini(value: &Value) -> Vec<Event> {
                             input_tokens,
                             output_tokens,
                             cached_tokens,
+                            cache_write_tokens: 0,
                         },
                     });
                 }
@@ -1868,6 +2395,8 @@ mod tests {
             session: Some("thr_123"),
             permission: PermissionMode::Full,
             mcp_servers: &[],
+            acp_pool: None,
+            acp_scope: None,
         };
         let (_, args, stdin, _guard) = plan(&launch).unwrap();
         assert!(stdin);
@@ -1898,6 +2427,8 @@ mod tests {
             session: None,
             permission: PermissionMode::Full,
             mcp_servers: &specs,
+            acp_pool: None,
+            acp_scope: None,
         };
         let (_, args, _, guard) = plan(&launch).unwrap();
         assert!(args.contains(&"--dangerously-skip-permissions".to_string()));
@@ -1951,12 +2482,21 @@ mod tests {
             Harness::ClaudeCode,
             &json!({
                 "type": "result",
-                "usage": {"input_tokens": 120, "output_tokens": 45, "cache_read_input_tokens": 30}
+                "usage": {
+                    "input_tokens": 120,
+                    "output_tokens": 45,
+                    "cache_read_input_tokens": 30,
+                    "cache_creation_input_tokens": 20
+                }
             }),
         );
         assert!(matches!(
             claude_usage.as_slice(),
-            [Event::Usage { usage, .. }] if usage.input_tokens == 120 && usage.output_tokens == 45 && usage.cached_tokens == 30
+            [Event::Usage { usage, .. }]
+                if usage.input_tokens == 170
+                    && usage.output_tokens == 45
+                    && usage.cached_tokens == 30
+                    && usage.cache_write_tokens == 20
         ));
 
         let codex = parse(
@@ -2049,6 +2589,8 @@ mod tests {
             session: None,
             permission: PermissionMode::Ask,
             mcp_servers: &[],
+            acp_pool: None,
+            acp_scope: None,
         };
         let done = run(&launch, &Null, &CancellationToken::new()).await;
         assert!(matches!(done.end, TurnEnd::Failed(msg) if msg.contains("找不到")));
@@ -2061,8 +2603,158 @@ mod tests {
             session: None,
             permission: PermissionMode::Ask,
             mcp_servers: &[],
+            acp_pool: None,
+            acp_scope: None,
         };
         let done = run(&codex, &Null, &CancellationToken::new()).await;
         assert!(matches!(done.end, TurnEnd::Failed(msg) if msg.contains("Codex")));
+    }
+
+    #[test]
+    fn acp_mode_selection_switches_into_and_out_of_plan_mode() {
+        let (modes, current) = parse_acp_modes(&json!({
+            "modes": {
+                "currentModeId": "code",
+                "availableModes": [
+                    { "id": "code", "name": "Code" },
+                    { "id": "plan", "name": "Plan" }
+                ]
+            }
+        }));
+        assert_eq!(modes, vec!["code", "plan"]);
+        assert_eq!(current.as_deref(), Some("code"));
+        assert_eq!(
+            desired_acp_mode(&modes, current.as_deref(), PermissionMode::Plan).as_deref(),
+            Some("plan")
+        );
+        assert_eq!(
+            desired_acp_mode(&modes, Some("plan"), PermissionMode::Plan),
+            None
+        );
+        assert_eq!(
+            desired_acp_mode(&modes, Some("plan"), PermissionMode::Ask).as_deref(),
+            Some("code")
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn acp_pool_reuses_live_process_across_turns_and_enforces_plan_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        struct Null;
+        #[async_trait::async_trait]
+        impl Observer for Null {
+            async fn text_delta(&self, _: &str) {}
+            async fn tool_started(&self, _: &str, _: &str, _: &str, _: &str) {}
+            async fn tool_finished(&self, _: &str, _: StepEnd, _: &str) {}
+            async fn usage(&self, _: &str, _: sa_llm::Usage) {}
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fake-acp.py");
+        std::fs::write(
+            &script,
+            r#"#!/usr/bin/env python3
+import json, os, sys
+pid = os.getpid()
+turn = 0
+for raw in sys.stdin:
+    raw = raw.strip()
+    if not raw:
+        continue
+    msg = json.loads(raw)
+    method = msg.get("method")
+    mid = msg.get("id")
+    if method == "initialize":
+        print(json.dumps({"jsonrpc": "2.0", "id": mid, "result": {"protocolVersion": 1}}), flush=True)
+    elif method in ("session/new", "session/load"):
+        print(json.dumps({
+            "jsonrpc": "2.0",
+            "id": mid,
+            "result": {
+                "sessionId": f"sess-{pid}",
+                "modes": {"currentModeId": "code", "availableModes": [{"id": "code"}, {"id": "plan"}]}
+            }
+        }), flush=True)
+    elif method == "session/set_mode":
+        print(json.dumps({"jsonrpc": "2.0", "id": mid, "result": {}}), flush=True)
+    elif method == "session/prompt":
+        turn += 1
+        text = msg["params"]["prompt"][0]["text"]
+        if "try-write" in text:
+            print(json.dumps({
+                "jsonrpc": "2.0",
+                "id": 999,
+                "method": "session/request_permission",
+                "params": {
+                    "toolCall": {"toolCallId": "tc1", "kind": "edit", "title": "edit file"},
+                    "options": [
+                        {"optionId": "allow", "kind": "allow_once"},
+                        {"optionId": "deny", "kind": "reject_once"}
+                    ]
+                }
+            }), flush=True)
+            resp = json.loads(sys.stdin.readline())
+            chosen = resp["result"]["outcome"].get("optionId", "none")
+            out = f"pid={pid},turn={turn},perm={chosen}"
+        else:
+            out = f"pid={pid},turn={turn}"
+        print(json.dumps({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {"update": {"sessionUpdate": "agent_message_chunk", "content": {"text": out}}}
+        }), flush=True)
+        print(json.dumps({"jsonrpc": "2.0", "id": mid, "result": {"stopReason": "end_turn"}}), flush=True)
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let pool = AcpPool::default();
+        let cmd = script.display().to_string();
+        let first = run(
+            &Launch {
+                harness: Harness::Acp,
+                command: &cmd,
+                dir: dir.path(),
+                prompt: "hello",
+                session: None,
+                permission: PermissionMode::Ask,
+                mcp_servers: &[],
+                acp_pool: Some(&pool),
+                acp_scope: Some("room:r1:bot:b1"),
+            },
+            &Null,
+            &CancellationToken::new(),
+        )
+        .await;
+        assert_eq!(first.end, TurnEnd::Completed);
+        assert_eq!(pool.len(), 1);
+        assert!(first.text.contains("turn=1"), "{}", first.text);
+
+        // 第二轮复用同一个常驻进程（pid 相同、turn 递增），且 Plan 模式自动拒绝 edit 权限请求。
+        let second = run(
+            &Launch {
+                harness: Harness::Acp,
+                command: &cmd,
+                dir: dir.path(),
+                prompt: "try-write",
+                session: first.session.as_deref(),
+                permission: PermissionMode::Plan,
+                mcp_servers: &[],
+                acp_pool: Some(&pool),
+                acp_scope: Some("room:r1:bot:b1"),
+            },
+            &Null,
+            &CancellationToken::new(),
+        )
+        .await;
+        assert_eq!(second.end, TurnEnd::Completed);
+        assert_eq!(second.session, first.session);
+        assert!(second.text.contains("turn=2"), "{}", second.text);
+        assert!(second.text.contains("perm=deny"), "{}", second.text);
+        pool.evict_all();
+        assert_eq!(pool.len(), 0);
     }
 }
