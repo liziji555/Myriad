@@ -2,12 +2,12 @@
 //! 每次启动一轮对话或任务时自动从工作目录根部读取项目约定（总上限 32 KiB），
 //! 用明确边界包裹后注入系统提示词，避免项目规则覆盖核心安全原则。
 
-use std::path::Path;
+use sa_tools::Fence;
 
 const CANDIDATES: &[&str] = &["AGENTS.md", "CLAUDE.md", ".myriad/RULES.md"];
 const MAX_TOTAL_BYTES: usize = 32 * 1024;
 
-pub(crate) fn load_project_docs(root: &Path) -> String {
+pub(crate) fn load_project_docs(fence: &Fence) -> String {
     let mut sections = Vec::new();
     let mut remaining = MAX_TOTAL_BYTES;
 
@@ -15,7 +15,10 @@ pub(crate) fn load_project_docs(root: &Path) -> String {
         if remaining == 0 {
             break;
         }
-        let path = root.join(rel);
+        // 通过 Fence 解析路径，防止仓库内恶意符号链接指向工作区外或数据目录里的敏感文件。
+        let Ok(path) = fence.resolve(rel) else {
+            continue;
+        };
         let Ok(meta) = std::fs::metadata(&path) else {
             continue;
         };
@@ -73,7 +76,8 @@ mod tests {
         fs::create_dir_all(dir.path().join(".myriad")).unwrap();
         fs::write(dir.path().join(".myriad/RULES.md"), "禁止强推 main。\n").unwrap();
 
-        let block = load_project_docs(dir.path());
+        let fence = Fence::new(dir.path(), &[]).unwrap();
+        let block = load_project_docs(&fence);
         assert!(block.contains("AGENTS.md"));
         assert!(block.contains("统一用 pnpm"));
         assert!(block.contains("CLAUDE.md"));
@@ -84,6 +88,7 @@ mod tests {
     #[test]
     fn returns_empty_when_no_instruction_files_exist() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(load_project_docs(dir.path()).is_empty());
+        let fence = Fence::new(dir.path(), &[]).unwrap();
+        assert!(load_project_docs(&fence).is_empty());
     }
 }

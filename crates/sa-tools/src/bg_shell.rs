@@ -79,6 +79,23 @@ impl BgShellManager {
         jobs.clear();
     }
 
+    /// 结束指定作用域（例如已验收或取消的任务 `task:<id>`）下启动的全部后台进程，释放端口与槽位。
+    pub fn kill_scope(&self, scope: &str) {
+        let mut jobs = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
+        let ids: Vec<String> = jobs
+            .values()
+            .filter(|j| j.scope == scope)
+            .map(|j| j.id.clone())
+            .collect();
+        for id in ids {
+            if let Some(mut job) = jobs.remove(&id) {
+                if let Some(tx) = job.killer.take() {
+                    let _ = tx.send(());
+                }
+            }
+        }
+    }
+
     fn running_count(jobs: &HashMap<String, BgJob>) -> usize {
         jobs.values()
             .filter(|j| {

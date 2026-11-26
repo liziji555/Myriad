@@ -6,21 +6,25 @@ use crate::{arg, blocking, parse_input, Tool, ToolCtx, ToolError, ToolResult};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::path::{Component, Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 const MAX_MEMORY_BYTES: usize = 64 * 1024;
 const MAX_FILES_PER_SCOPE: usize = 100;
 const INDEX_CHAR_BUDGET: usize = 4_000;
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct MemoryStore {
     root: PathBuf,
+    write_lock: Mutex<()>,
 }
 
 impl MemoryStore {
     pub fn new(root: PathBuf) -> Self {
-        Self { root }
+        Self {
+            root,
+            write_lock: Mutex::new(()),
+        }
     }
 
     fn scope_dir(&self, scope: &str, bot_id: &str) -> Result<PathBuf, ToolError> {
@@ -58,7 +62,13 @@ impl MemoryStore {
         }
         let mut parts = Vec::new();
         for seg in trimmed.split('/') {
-            if seg.is_empty() || seg == "." || seg == ".." || seg.contains('\0') {
+            // 禁止目录穿越、空字节以及 Windows 盘符前缀（如 C:foo.md）。
+            if seg.is_empty()
+                || seg == "."
+                || seg == ".."
+                || seg.contains('\0')
+                || seg.contains(':')
+            {
                 return Err(ToolError(format!("记忆路径不合法：{key}")));
             }
             parts.push(seg);
@@ -69,6 +79,12 @@ impl MemoryStore {
         let mut rel = parts.join("/");
         if !rel.ends_with(".md") {
             rel.push_str(".md");
+        }
+        if !Path::new(&rel)
+            .components()
+            .all(|c| matches!(c, Component::Normal(_)))
+        {
+            return Err(ToolError(format!("记忆路径不合法：{key}")));
         }
         let base = self.scope_dir(scope, bot_id)?;
         Ok((base.join(&rel), rel))
@@ -364,6 +380,8 @@ impl Tool for MemoryWriteTool {
         let store = self.store.clone();
         let bot_id = self.bot_id.clone();
         blocking(move || {
+            // 串行化读-改-写与文件数上限校验，避免并行 Bot 同时 append 同一份共享记忆时互相覆盖。
+            let _guard = store.write_lock.lock().unwrap_or_else(|e| e.into_inner());
             let dir = store.scope_dir(&input.scope, &bot_id)?;
             let (path, rel) = store.resolve_key(&input.scope, &bot_id, &input.key)?;
             let existing_files = list_md_files(&dir);

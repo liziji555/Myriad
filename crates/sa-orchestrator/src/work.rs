@@ -10,7 +10,9 @@ use crate::room::{db, RoomObserver};
 use crate::{render_work_prompt, workdir, Orchestrator, OrchestratorError, Shared};
 use async_trait::async_trait;
 use sa_engine::{EngineError, NewTask, RunOutcome, Workdir};
-use sa_kernel::{run_turn, Inbox, Transcript, TurnConfig, TurnEnd, UserInput};
+use sa_kernel::{
+    run_turn, ApprovalRequest, Inbox, Observer, StepEnd, Transcript, TurnConfig, TurnEnd, UserInput,
+};
 use sa_llm::RetryPolicy;
 use sa_protocol::{
     ArtifactKind, Bot, CreateTaskRequest, Harness, MessageKind, MessageState, ModelTier,
@@ -294,70 +296,137 @@ async fn run_task(shared: &Arc<Shared>, task: Task, cancel: &CancellationToken) 
         .sessions_dir
         .join(format!("{session_id}.jsonl"));
     let work_max_steps = shared.settings.max_steps * WORK_STEPS_FACTOR;
+    let (engine, r) = (shared.engine.clone(), task.room_id.clone());
+    let (is_linked, permission) = db(move || {
+        let linked = engine.list_links()?.iter().any(|link| link.room_id == r);
+        let full = engine.get_room(&r)?.permission == PermissionMode::Full && !linked;
+        Ok((
+            linked,
+            if full {
+                PermissionMode::Full
+            } else {
+                PermissionMode::Ask
+            },
+        ))
+    })
+    .await
+    .unwrap_or((false, PermissionMode::Ask));
     let end = if bot.harness != Harness::Builtin {
-        // 外部 CLI Harness Bot 负责的任务：直接在其独立任务目录中运行真实 CLI Harness，而非静默退回内置模型。
-        match Transcript::open(&path) {
-            Err(error) => TurnEnd::Failed(format!("任务的会话记录打不开：{error}")),
-            Ok(mut transcript) => {
-                let mut inbox = WorkInbox {
-                    shared: shared.clone(),
-                    task: task.clone(),
-                    fresh: transcript.entries().is_empty(),
-                    first: true,
-                };
-                let inputs = inbox.drain().await;
-                let prompt = inputs
-                    .iter()
-                    .map(|i| i.content.as_str())
-                    .collect::<Vec<_>>()
-                    .join("\n\n");
-                for input in inputs {
-                    let _ = transcript.append(sa_kernel::EntryBody::User {
-                        content: input.content,
-                        message_id: input.message_id,
-                        message_seq: input.message_seq,
-                    });
-                }
-                let (engine, r) = (shared.engine.clone(), task.room_id.clone());
-                let permission = db(move || {
-                    let full = engine.get_room(&r)?.permission == PermissionMode::Full
-                        && !engine.list_links()?.iter().any(|link| link.room_id == r);
-                    Ok(if full {
-                        PermissionMode::Full
-                    } else {
-                        PermissionMode::Ask
-                    })
-                })
-                .await
-                .unwrap_or(PermissionMode::Ask);
-                let slots = shared.harness_slots.clone();
-                let slot = tokio::select! {
-                    _ = cancel.cancelled() => None,
-                    permit = slots.acquire_owned() => permit.ok(),
-                };
-                if let Some(_permit) = slot {
-                    let mcp_servers = shared.mcp_specs.lock().unwrap().clone();
-                    let launch = crate::harness::Launch {
-                        harness: bot.harness,
-                        command: &bot.harness_command,
-                        dir: Path::new(&workdir.path),
-                        prompt: &prompt,
-                        session: None,
-                        permission,
-                        mcp_servers: &mcp_servers,
+        // 外部 CLI Harness Bot 负责的任务：先走与房间一致的启动审批闸门，再在独立任务目录中运行真实 CLI Harness。
+        let label = bot.harness.label();
+        let title = format!("让 {}（{label}）在任务独立目录里动手", bot.name);
+        let approval_input = json!({
+            "bot": bot.id.as_str(),
+            "harness": bot.harness,
+            "command": bot.harness_command.trim(),
+        });
+        observer
+            .tool_started(
+                "harness-start",
+                "harness",
+                &title,
+                &approval_input.to_string(),
+            )
+            .await;
+        let mut reason = format!(
+            "{label} 会自己改文件、执行命令，Myriad 管不到它里面的每一步。它只在任务「{}」的独立目录里干活，改动要你验收后才带回。",
+            task.title
+        );
+        let command = bot.harness_command.trim();
+        if !command.is_empty() {
+            reason.push_str(&format!("\n启动的命令：{command}"));
+        }
+        let asked = observer.request_approval(ApprovalRequest {
+            call_id: "harness-start",
+            tool: "harness",
+            title: &title,
+            reason: &reason,
+            input: &approval_input,
+        });
+        let allowed = tokio::select! {
+            allowed = asked => allowed,
+            _ = cancel.cancelled() => false,
+        };
+        if cancel.is_cancelled() {
+            observer
+                .tool_finished("harness-start", StepEnd::Stopped, "")
+                .await;
+            TurnEnd::Cancelled
+        } else if !allowed {
+            observer
+                .tool_finished("harness-start", StepEnd::Stopped, "没有批准")
+                .await;
+            TurnEnd::Failed(format!("你没有批准 {} 在任务里动手", bot.name))
+        } else {
+            observer
+                .tool_finished("harness-start", StepEnd::Ok, "")
+                .await;
+            match Transcript::open(&path) {
+                Err(error) => TurnEnd::Failed(format!("任务的会话记录打不开：{error}")),
+                Ok(mut transcript) => {
+                    let prior_exists = !transcript.entries().is_empty();
+                    let mut inbox = WorkInbox {
+                        shared: shared.clone(),
+                        task: task.clone(),
+                        fresh: !prior_exists,
+                        first: true,
                     };
-                    let finished = crate::harness::run(&launch, &observer, cancel).await;
-                    if !finished.text.is_empty() {
-                        let _ = transcript.append(sa_kernel::EntryBody::Assistant {
-                            content: finished.text,
-                            reasoning: finished.reasoning,
-                            tool_calls: vec![],
+                    let inputs = inbox.drain().await;
+                    let latest = inputs
+                        .iter()
+                        .map(|i| i.content.as_str())
+                        .collect::<Vec<_>>()
+                        .join("\n\n");
+                    // 任务续跑时新启动的 CLI 没有上次内存上下文：附带完整任务说明与前轮摘录，避免丢失上下文。
+                    let prompt = if prior_exists {
+                        let brief = inbox.brief().await;
+                        let prior_summary = recent_transcript_excerpt(&transcript);
+                        if prior_summary.is_empty() {
+                            format!("{brief}\n\n【本轮继续/新指示】\n{latest}")
+                        } else {
+                            format!(
+                                "{brief}\n\n【此前执行摘要】\n{prior_summary}\n\n【本轮继续/新指示】\n{latest}"
+                            )
+                        }
+                    } else {
+                        latest
+                    };
+                    for input in inputs {
+                        let _ = transcript.append(sa_kernel::EntryBody::User {
+                            content: input.content,
+                            message_id: input.message_id,
+                            message_seq: input.message_seq,
                         });
                     }
-                    observer.settle_steps().await;
-                    finished.end
-                } else {
-                    TurnEnd::Cancelled
+                    let slots = shared.harness_slots.clone();
+                    let slot = tokio::select! {
+                        _ = cancel.cancelled() => None,
+                        permit = slots.acquire_owned() => permit.ok(),
+                    };
+                    if let Some(_permit) = slot {
+                        let mcp_servers = shared.mcp_specs.lock().unwrap().clone();
+                        let launch = crate::harness::Launch {
+                            harness: bot.harness,
+                            command: &bot.harness_command,
+                            dir: Path::new(&workdir.path),
+                            prompt: &prompt,
+                            session: None,
+                            permission,
+                            mcp_servers: &mcp_servers,
+                        };
+                        let finished = crate::harness::run(&launch, &observer, cancel).await;
+                        if !finished.text.is_empty() {
+                            let _ = transcript.append(sa_kernel::EntryBody::Assistant {
+                                content: finished.text,
+                                reasoning: finished.reasoning,
+                                tool_calls: vec![],
+                            });
+                        }
+                        observer.settle_steps().await;
+                        finished.end
+                    } else {
+                        TurnEnd::Cancelled
+                    }
                 }
             }
         }
@@ -370,13 +439,17 @@ async fn run_task(shared: &Arc<Shared>, task: Task, cancel: &CancellationToken) 
             (_, Err(reason)) => TurnEnd::Failed(reason),
             (Ok(mut transcript), Ok(model)) => {
                 let skills = shared.skills_for(&bot.name).await;
-                let wd_root = fence.root().to_path_buf();
+                let wd_fence = fence.clone();
                 let project_docs = tokio::task::spawn_blocking(move || {
-                    crate::project_docs::load_project_docs(&wd_root)
+                    crate::project_docs::load_project_docs(&wd_fence)
                 })
                 .await
                 .unwrap_or_default();
-                let memory_store = shared.memory.lock().unwrap().clone();
+                let memory_store = if is_linked {
+                    None
+                } else {
+                    shared.memory.lock().unwrap().clone()
+                };
                 let memory_block = match &memory_store {
                     Some(store) => {
                         let store = store.clone();
@@ -431,11 +504,6 @@ async fn run_task(shared: &Arc<Shared>, task: Task, cancel: &CancellationToken) 
                     tools.register(tool);
                 }
                 if let Some(store) = memory_store {
-                    let (engine, r) = (shared.engine.clone(), task.room_id.clone());
-                    let is_linked =
-                        db(move || Ok(engine.list_links()?.iter().any(|link| link.room_id == r)))
-                            .await
-                            .unwrap_or(false);
                     let bid = bot.id.to_string();
                     tools.register(sa_tools::MemoryListTool {
                         store: store.clone(),
@@ -448,7 +516,7 @@ async fn run_task(shared: &Arc<Shared>, task: Task, cancel: &CancellationToken) 
                     tools.register(sa_tools::MemoryWriteTool {
                         store,
                         bot_id: bid,
-                        require_approval: is_linked,
+                        require_approval: false,
                     });
                 }
                 let bg_scope = format!("task:{}", task.id);
@@ -644,12 +712,31 @@ fn delivered(
     }
 }
 
-/// 删掉任务的独立目录。
+/// 删掉任务的独立目录，并清理该任务启动的全部后台进程。
 async fn cleanup(shared: &Arc<Shared>, task_id: &TaskId) {
+    shared.bg_shell.kill_scope(&format!("task:{task_id}"));
     let (engine, id) = (shared.engine.clone(), task_id.clone());
     if let Ok(Some(dir)) = db(move || engine.task_workdir(&id)).await {
         workdir::remove(task_id, &dir).await;
     }
+}
+
+fn recent_transcript_excerpt(transcript: &Transcript) -> String {
+    let mut lines = Vec::new();
+    for entry in transcript.entries().iter().rev().take(6).rev() {
+        match &entry.body {
+            sa_kernel::EntryBody::User { content, .. } if !content.trim().is_empty() => {
+                let snippet: String = content.trim().chars().take(600).collect();
+                lines.push(format!("- 指令：{snippet}"));
+            }
+            sa_kernel::EntryBody::Assistant { content, .. } if !content.trim().is_empty() => {
+                let snippet: String = content.trim().chars().take(800).collect();
+                lines.push(format!("- 上轮回复：{snippet}"));
+            }
+            _ => {}
+        }
+    }
+    lines.join("\n")
 }
 
 /// 工作会话的输入：第一次是任务说明，之后是人补充的话。

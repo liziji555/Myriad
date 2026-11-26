@@ -851,15 +851,25 @@ async fn turn(
         }
         Ok(model) => {
             let skills = shared.skills_for(&bot.name).await;
+            let (engine, r) = (shared.engine.clone(), room_id.clone());
+            let is_linked =
+                db(move || Ok(engine.list_links()?.iter().any(|link| link.room_id == r)))
+                    .await
+                    .unwrap_or(false);
             let project_docs = if share.is_none() {
-                let root = shared.settings.fence.root().to_path_buf();
-                tokio::task::spawn_blocking(move || crate::project_docs::load_project_docs(&root))
+                let fence = shared.settings.fence.clone();
+                tokio::task::spawn_blocking(move || crate::project_docs::load_project_docs(&fence))
                     .await
                     .unwrap_or_default()
             } else {
                 String::new()
             };
-            let memory_store = shared.memory.lock().unwrap().clone();
+            // 外链房间（Telegram / GitHub）不加载也不暴露个人与团队持久记忆，防止跨房间隐私泄露。
+            let memory_store = if is_linked {
+                None
+            } else {
+                shared.memory.lock().unwrap().clone()
+            };
             let memory_block = match &memory_store {
                 Some(store) => {
                     let store = store.clone();
@@ -933,13 +943,8 @@ async fn turn(
             if let Some(tool) = skills.tool {
                 tools.register(tool);
             }
-            // 持久记忆工具（启用记忆目录时提供；外链房间写记忆须审批防提示词注入投毒）。
+            // 持久记忆工具（仅在本地非外链房间且启用记忆目录时提供）。
             if let Some(store) = memory_store {
-                let (engine, r) = (shared.engine.clone(), room_id.clone());
-                let is_linked =
-                    db(move || Ok(engine.list_links()?.iter().any(|link| link.room_id == r)))
-                        .await
-                        .unwrap_or(false);
                 let bid = bot.id.to_string();
                 tools.register(sa_tools::MemoryListTool {
                     store: store.clone(),
@@ -952,7 +957,7 @@ async fn turn(
                 tools.register(sa_tools::MemoryWriteTool {
                     store,
                     bot_id: bid,
-                    require_approval: is_linked,
+                    require_approval: false,
                 });
             }
             // 本地工作目录：支持后台命令（按房间隔离）、独立任务以及只读探索子代理（避免大型目录排查打爆主对话上下文和步数上限）。

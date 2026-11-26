@@ -347,10 +347,10 @@ impl Turn {
                 }
                 if !truncated {
                     if let Some(hooks) = config.hooks.as_deref() {
-                        if self.stop_hook_retries < 2 {
-                            if let HookOutcome::Block(feedback) =
-                                hooks.run_stop(&reply_text, cancel).await
-                            {
+                        if let HookOutcome::Block(feedback) =
+                            hooks.run_stop(&reply_text, cancel).await
+                        {
+                            if self.stop_hook_retries < 2 {
                                 self.stop_hook_retries += 1;
                                 transcript.append(EntryBody::User {
                                     content: format!(
@@ -361,6 +361,7 @@ impl Turn {
                                 })?;
                                 continue;
                             }
+                            return Ok(TurnEnd::Failed(format!("Stop 钩子验证未通过：{feedback}")));
                         }
                     }
                 }
@@ -678,7 +679,12 @@ fn none_if_empty(text: String) -> Option<String> {
 
 fn is_context_overflow(error: &LlmError) -> bool {
     let text = error.to_string().to_ascii_lowercase();
-    text.contains("context_length")
+    text.contains("（413）")
+        || text.contains("(413)")
+        || text.contains("413")
+        || text.contains("payload too large")
+        || text.contains("request entity too large")
+        || text.contains("context_length")
         || text.contains("maximum context")
         || text.contains("prompt is too long")
         || text.contains("too many tokens")
