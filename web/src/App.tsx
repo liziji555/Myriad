@@ -5,10 +5,17 @@ import { presenceOf, speakersOf, type Presence } from "./api/presence";
 import { executionOf } from "./api/execution";
 import { STATE_LABEL } from "./api/tasks";
 import { api } from "./api/client";
-import type { RoomId, SkillInfo, TaskId } from "./api/types";
+import type { RoomId, SkillInfo, TaskId, UpdateStatus } from "./api/types";
 import { useWorkspace } from "./api/useWorkspace";
-import { DESKTOP_CHANGED, DESKTOP_OPEN, desktopInvoke, type DesktopState } from "./api/desktop";
+import {
+  DESKTOP_CHANGED,
+  DESKTOP_OPEN,
+  desktopInvoke,
+  type DesktopState,
+  type DesktopUpdateInfo,
+} from "./api/desktop";
 import { ConnectPanel } from "./components/ConnectPanel";
+import { UpdatePanel } from "./components/UpdatePanel";
 import { noticesFor } from "./api/workspace";
 import { CommandPalette, type PaletteEntry } from "./components/CommandPalette";
 import { ComposerControls } from "./components/ComposerControls";
@@ -61,6 +68,9 @@ function Shell() {
   const [invokeDesktop] = useState(() => desktopInvoke());
   const [desktop, setDesktop] = useState<DesktopState | null>(null);
   const [connectOpen, setConnectOpen] = useState(false);
+  const [updateOpen, setUpdateOpen] = useState(false);
+  const [serverUpdate, setServerUpdate] = useState<UpdateStatus | null>(null);
+  const [desktopUpdate, setDesktopUpdate] = useState<DesktopUpdateInfo | null>(null);
   // 输入框的菜单里列的技能。技能是磁盘上的文件，随时会多会少：连上之后读一次，回到窗口时再读。
   // 没连上（没登录、还在加载）时不读：读了也是 401。技能不分房间，换房间不用重读。
   const [skills, setSkills] = useState<SkillInfo[]>([]);
@@ -83,6 +93,24 @@ function Shell() {
       window.removeEventListener("focus", load);
     };
   }, [ready]);
+  // 连上后静默查一次更新：有新版就在左栏版本号旁亮起「有更新」，失败不打扰人。
+  useEffect(() => {
+    if (!ready) return;
+    let stale = false;
+    void api.checkUpdate().then(
+      (found) => !stale && setServerUpdate(found),
+      () => {},
+    );
+    if (invokeDesktop) {
+      void (invokeDesktop("check_desktop_update") as Promise<DesktopUpdateInfo>).then(
+        (found) => !stale && setDesktopUpdate(found),
+        () => {},
+      );
+    }
+    return () => {
+      stale = true;
+    };
+  }, [ready, invokeDesktop]);
   useEffect(() => {
     if (!invokeDesktop) return;
     const refresh = () =>
@@ -477,6 +505,20 @@ function Shell() {
       {connectOpen && desktop && invokeDesktop && (
         <ConnectPanel state={desktop} invoke={invokeDesktop} onClose={() => setConnectOpen(false)} />
       )}
+      {updateOpen && (
+        <UpdatePanel
+          serverVersion={version}
+          desktop={desktop}
+          invokeDesktop={invokeDesktop}
+          initialServerUpdate={serverUpdate}
+          initialDesktopUpdate={desktopUpdate}
+          onChecked={(nextServer, nextDesktop) => {
+            setServerUpdate(nextServer);
+            setDesktopUpdate(nextDesktop);
+          }}
+          onClose={() => setUpdateOpen(false)}
+        />
+      )}
       {paletteOpen && (
         <CommandPalette
           entries={paletteEntries}
@@ -536,6 +578,8 @@ function Shell() {
             createSignal={createSignal}
             desktop={desktop}
             onConnect={openConnect}
+            updateAvailable={Boolean(serverUpdate?.available || desktopUpdate?.available)}
+            onUpdate={() => setUpdateOpen(true)}
           />
         </>
       )}

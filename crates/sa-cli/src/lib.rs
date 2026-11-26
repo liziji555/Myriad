@@ -16,12 +16,14 @@ mod service;
 mod share;
 mod task;
 mod team;
+mod update;
 mod usage;
 
 pub use app::{init_logging, RunArgs};
 pub use paths::DataDir;
 pub use remote::{answer_askpass, LoginDenied, SshTarget, Tunnel, TunnelStop};
 pub use serve::serve_until;
+pub use update::{check_desktop_update, download_desktop_installer, DesktopUpdateInfo};
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -93,6 +95,8 @@ enum Command {
     Audit(audit::AuditArgs),
     /// 检查配置、密钥、数据库、端口是否正常
     Doctor,
+    /// 检查并更新到 GitHub 最新 Release（自动校验 SHA-256 并重启 systemd 服务）
+    Update(update::UpdateArgs),
 }
 
 /// `sa` 的入口：解析命令行，做完返回退出码。
@@ -124,6 +128,7 @@ pub fn run() -> ExitCode {
         Command::Usage => usage::run(&data_dir),
         Command::Audit(args) => audit::run(&data_dir, args),
         Command::Doctor => Ok(doctor::run(&data_dir)),
+        Command::Update(args) => update::run(args).map(|()| ExitCode::SUCCESS),
     });
     match result {
         Ok(code) => code,

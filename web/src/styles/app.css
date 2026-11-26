@@ -568,6 +568,49 @@ button.sa-stage-room:hover,
   color: var(--sa-fg-muted);
 }
 
+.sa-version-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 6px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--sa-fg-muted);
+  font-size: var(--sa-text-xs);
+  cursor: pointer;
+}
+.sa-version-btn:hover {
+  background: var(--sa-hover);
+  color: var(--sa-fg);
+}
+.sa-update-badge {
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--sa-accent);
+  color: #fff;
+  font-size: 10px;
+  line-height: 16px;
+  font-weight: 600;
+}
+.sa-update-notes {
+  margin: 4px 0 0;
+  padding: 8px 10px;
+  max-height: 160px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  border-radius: 8px;
+  background: var(--sa-bg-subtle);
+  font-size: var(--sa-text-xs);
+  color: var(--sa-fg-muted);
+}
+.sa-update-notice {
+  margin: var(--sa-space-2) 0 0;
+  font-size: var(--sa-text-sm);
+  color: var(--sa-fg);
+}
+
 .sa-row {
   display: flex;
   align-items: center;

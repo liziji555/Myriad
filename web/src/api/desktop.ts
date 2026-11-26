@@ -1,5 +1,7 @@
 /** 桌面版里「连接」面板要的东西：现在用的是本机还是哪台服务器，正在连谁，上次为什么没连上。浏览器里没有。 */
 export interface DesktopState {
+  /** 桌面外壳自己的版本号（与远端服务器版本可能不同）。 */
+  version?: string;
   current: { mode: "local" } | { mode: "server"; server: string };
   /** 本机的工作目录。 */
   workdir: string | null;
@@ -19,6 +21,16 @@ export interface ConnectFailure {
   password?: boolean;
   /** 是自己取消的、或者又连了别的，不算失败。 */
   cancelled?: boolean;
+}
+
+/** 桌面版检查自身更新的结果。 */
+export interface DesktopUpdateInfo {
+  current: string;
+  latest: string | null;
+  available: boolean;
+  release_url: string | null;
+  asset_name: string | null;
+  can_download: boolean;
 }
 
 /** 面板里填的服务器。后三项可以留空。 */

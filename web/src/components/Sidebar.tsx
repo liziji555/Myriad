@@ -60,6 +60,9 @@ interface Props {
   /** 在桌面版里时：连的是本机还是哪台服务器。 */
   desktop: DesktopState | null;
   onConnect(): void;
+  /** 是否有可用的新版本（服务端或桌面版）。 */
+  updateAvailable: boolean;
+  onUpdate(): void;
 }
 
 export function Sidebar({
@@ -81,6 +84,8 @@ export function Sidebar({
   createSignal,
   desktop,
   onConnect,
+  updateAvailable,
+  onUpdate,
 }: Props) {
   const [creating, setCreating] = useState(false);
   useEffect(() => {
@@ -243,7 +248,18 @@ export function Sidebar({
       <footer className="sa-sidebar-foot" role="status" title={connected ? "已连接" : "连接中断，正在重连…"}>
         <span className="sa-dot" data-state={connected ? "idle" : "warn"} aria-hidden="true" />
         <span className="sa-nav-label">{connected ? "已连接" : "连接中断，正在重连…"}</span>
-        {version && <span className="sa-row-meta sa-nav-label">v{version}</span>}
+        {version && (
+          <button
+            type="button"
+            className="sa-version-btn sa-nav-label"
+            data-update={updateAvailable || undefined}
+            title={updateAvailable ? "发现新版本，点击更新" : "点击检查更新"}
+            onClick={onUpdate}
+          >
+            v{version}
+            {updateAvailable && <span className="sa-update-badge">有更新</span>}
+          </button>
+        )}
         {desktop && (
           <button
             type="button"

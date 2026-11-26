@@ -616,6 +616,39 @@ pub async fn extensions(State(state): State<AppState>) -> Result<Json<Extensions
     Ok(Json(found))
 }
 
+fn update_admin(state: &AppState) -> Result<std::sync::Arc<dyn crate::UpdateAdmin>, AppError> {
+    state.updater.clone().ok_or_else(|| {
+        AppError::new(
+            StatusCode::CONFLICT,
+            "conflict",
+            "当前运行模式不支持在线更新",
+        )
+    })
+}
+
+/// 检查服务端是否有新版本。
+pub async fn check_update(
+    State(state): State<AppState>,
+) -> Result<Json<sa_protocol::UpdateStatus>, AppError> {
+    let updater = update_admin(&state)?;
+    let status = updater.check().await.map_err(|message| {
+        AppError::new(StatusCode::BAD_GATEWAY, "update_check_failed", message)
+    })?;
+    Ok(Json(status))
+}
+
+/// 下载并替换当前服务端二进制，必要时自动触发重启。
+pub async fn apply_update(
+    State(state): State<AppState>,
+) -> Result<Json<sa_protocol::UpdateApplyResult>, AppError> {
+    let updater = update_admin(&state)?;
+    let result = updater
+        .apply()
+        .await
+        .map_err(|message| AppError::new(StatusCode::CONFLICT, "update_failed", message))?;
+    Ok(Json(result))
+}
+
 fn model_admin(state: &AppState) -> Result<std::sync::Arc<dyn crate::ModelAdmin>, AppError> {
     state.models.clone().ok_or_else(|| {
         AppError::new(

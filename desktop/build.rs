@@ -12,6 +12,8 @@ fn main() {
             "pick_workdir",
             "open_data_dir",
             "window_chrome",
+            "check_desktop_update",
+            "install_desktop_update",
             "retry",
         ]),
     ))
