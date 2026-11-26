@@ -24,12 +24,12 @@ pub(crate) struct AgentTool {
     pub shared: Arc<Shared>,
     pub room_id: RoomId,
     pub bot_id: BotId,
-    /// 用量记在哪个会话名下（派它的那个工作会话）。
+    /// 用量记在哪个会话名下（派它的那个工作会话或对话会话）。
     pub session_id: SessionId,
-    /// 花费算在哪个任务头上。
-    pub task_id: TaskId,
+    /// 花费算在哪个任务头上；在房间对话里派子代理时为 `None`。
+    pub task_id: Option<TaskId>,
     /// 子代理每有一点动静就记下时间：它在查资料时，派它的任务不算卡住。
-    pub pulse: Arc<AtomicI64>,
+    pub pulse: Option<Arc<AtomicI64>>,
 }
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -121,14 +121,15 @@ impl Tool for AgentTool {
             })),
             spill_dir: None,
             retry: RetryPolicy::default(),
+            max_truncated_recoveries: 0,
+            hooks: None,
         };
         let mut sub_ctx = ToolCtx::new(ctx.fence.clone());
         sub_ctx.cancel = ctx.cancel.clone();
         sub_ctx.allow_private_network = ctx.allow_private_network;
         let mut inbox = Once(Some(prompt.to_string()));
         let observer = Quiet(self);
-        let provider =
-            crate::budget::guard(shared, model.provider.clone(), Some(self.task_id.clone()));
+        let provider = crate::budget::guard(shared, model.provider.clone(), self.task_id.clone());
         let outcome = run_turn(
             &mut transcript,
             provider.as_ref(),
@@ -181,7 +182,9 @@ impl Drop for RemoveOnDrop {
 
 impl Quiet<'_> {
     fn beat(&self) {
-        self.0.pulse.store(sa_engine::now_ms(), Ordering::Relaxed);
+        if let Some(pulse) = &self.0.pulse {
+            pulse.store(sa_engine::now_ms(), Ordering::Relaxed);
+        }
     }
 }
 

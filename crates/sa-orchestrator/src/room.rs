@@ -1,5 +1,6 @@
 //! 一个房间的后台任务：有新消息就决定谁来接，让它跑一轮；它找了别的 Bot 就接着让那个 Bot 跑。
 
+use crate::agent::AgentTool;
 use crate::ask::AskBotTool;
 use crate::episode::Job;
 use crate::manage_bots::{CreateBotTool, CreateRoomTool, UpdateBotTool};
@@ -850,16 +851,59 @@ async fn turn(
         }
         Ok(model) => {
             let skills = shared.skills_for(&bot.name).await;
+            let (engine, r) = (shared.engine.clone(), room_id.clone());
+            let is_linked =
+                db(move || Ok(engine.list_links()?.iter().any(|link| link.room_id == r)))
+                    .await
+                    .unwrap_or(false);
+            let project_docs = if share.is_none() {
+                let fence = shared.settings.fence.clone();
+                tokio::task::spawn_blocking(move || crate::project_docs::load_project_docs(&fence))
+                    .await
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            };
+            // 外链房间（Telegram / GitHub）不加载也不暴露个人与团队持久记忆，防止跨房间隐私泄露。
+            let memory_store = if is_linked {
+                None
+            } else {
+                shared.memory.lock().unwrap().clone()
+            };
+            let memory_block = match &memory_store {
+                Some(store) => {
+                    let store = store.clone();
+                    let bid = bot.id.to_string();
+                    tokio::task::spawn_blocking(move || store.prompt_block(&bid))
+                        .await
+                        .unwrap_or_default()
+                }
+                None => String::new(),
+            };
+            let mut system_prompt = render_prompt(
+                &workspace(shared, share.as_deref()),
+                &shared.settings,
+                bot,
+                others,
+                &skills.prompt,
+            ) + &crate::lead_rules(bot, others, lead.as_ref())
+                + &share_rules(shared, share.as_deref());
+            if !project_docs.is_empty() {
+                system_prompt.push_str("\n\n");
+                system_prompt.push_str(&project_docs);
+            }
+            if !memory_block.is_empty() {
+                system_prompt.push_str("\n\n");
+                system_prompt.push_str(&memory_block);
+            }
+            let hooks = if share.is_none() {
+                shared.hooks.lock().unwrap().clone()
+            } else {
+                None
+            };
             let config = TurnConfig {
                 model: model.model.clone(),
-                system_prompt: render_prompt(
-                    &workspace(shared, share.as_deref()),
-                    &shared.settings,
-                    bot,
-                    others,
-                    &skills.prompt,
-                ) + &crate::lead_rules(bot, others, lead.as_ref())
-                    + &share_rules(shared, share.as_deref()),
+                system_prompt,
                 max_steps: shared.settings.max_steps,
                 max_tokens: None,
                 thinking: model.thinking,
@@ -873,6 +917,8 @@ async fn turn(
                     .parent()
                     .map(|d| d.join("spill")),
                 retry: RetryPolicy::default(),
+                max_truncated_recoveries: shared.max_truncated_recoveries.load(Ordering::Relaxed),
+                hooks,
             };
             let mut ctx = ToolCtx::new(shared.settings.fence.clone());
             ctx.cancel = cancel.clone();
@@ -897,8 +943,48 @@ async fn turn(
             if let Some(tool) = skills.tool {
                 tools.register(tool);
             }
-            // 任务要在服务这边开独立目录，共享目录开不了。
+            // 持久记忆工具（仅在本地非外链房间且启用记忆目录时提供）。
+            if let Some(store) = memory_store {
+                let bid = bot.id.to_string();
+                tools.register(sa_tools::MemoryListTool {
+                    store: store.clone(),
+                    bot_id: bid.clone(),
+                });
+                tools.register(sa_tools::MemoryReadTool {
+                    store: store.clone(),
+                    bot_id: bid.clone(),
+                });
+                tools.register(sa_tools::MemoryWriteTool {
+                    store,
+                    bot_id: bid,
+                    require_approval: false,
+                });
+            }
+            // 本地工作目录：支持后台命令（按房间隔离）、独立任务以及只读探索子代理（避免大型目录排查打爆主对话上下文和步数上限）。
             if share.is_none() {
+                if !leading {
+                    let scope = room_id.to_string();
+                    tools.register(sa_tools::BgShellStartTool {
+                        manager: shared.bg_shell.clone(),
+                        scope: scope.clone(),
+                    });
+                    tools.register(sa_tools::BgShellOutputTool {
+                        manager: shared.bg_shell.clone(),
+                        scope: scope.clone(),
+                    });
+                    tools.register(sa_tools::BgShellKillTool {
+                        manager: shared.bg_shell.clone(),
+                        scope,
+                    });
+                }
+                tools.register(AgentTool {
+                    shared: shared.clone(),
+                    room_id: room_id.clone(),
+                    bot_id: bot.id.clone(),
+                    session_id: session_id.clone(),
+                    task_id: None,
+                    pulse: None,
+                });
                 tools.register(CreateTaskTool {
                     shared: shared.clone(),
                     room_id: room_id.clone(),
@@ -1210,6 +1296,7 @@ async fn harness_turn(
             };
             let resume = resume_of(bot, &desk);
             let prompt = harness_prompt(bot, &said, resume.is_some(), &workdir.path);
+            let mcp_servers = shared.mcp_specs.lock().unwrap().clone();
             let launch = crate::harness::Launch {
                 harness: bot.harness,
                 command: &bot.harness_command,
@@ -1217,6 +1304,7 @@ async fn harness_turn(
                 prompt: &prompt,
                 session: resume.as_deref(),
                 permission,
+                mcp_servers: &mcp_servers,
             };
             if cancel.is_cancelled() {
                 return Ok(TurnEnd::Cancelled);

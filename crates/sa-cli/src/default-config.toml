@@ -45,6 +45,16 @@ currency = "CNY"
 [rooms]
 # 一个房间里同时最多几个 Bot 在说话，多的排队。几个一起说时花费也成倍上升。
 max_parallel_bots = 3
+# 一轮对话最多连续调用多少次模型（工具循环上限），默认 64，可按项目复杂度调整（1~500）。
+max_steps = 64
+
+# 生命周期钩子（可选）：在工具调用前后或回复结束前自动执行本地命令。
+# 退出码 0 放行（标准输出附给模型）；退出码 2 拦截并把标准错误反馈给模型要求修正。
+# [[hooks]]
+# event = "post_tool_use"
+# tool = "edit"
+# command = "cargo fmt --check"
+# timeout_secs = 15
 
 [prices]
 # 算花费用的价格：每一百万 token 多少钱，单位同上。

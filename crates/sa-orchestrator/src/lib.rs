@@ -17,6 +17,7 @@ mod extensions;
 mod github;
 pub mod harness;
 mod manage_bots;
+mod project_docs;
 mod room;
 mod router;
 mod routines;
@@ -166,6 +167,16 @@ pub(crate) struct Shared {
     pub shares: Arc<shares::Shares>,
     /// 「上下文用了多少」要用的：会话记录读过的大小，和每个会话上一轮带的系统提示词、工具说明有多大。
     pub context: desks::ContextCache,
+    /// 跨会话持久记忆存储（按 Bot 与团队共享两层）。
+    pub memory: Mutex<Option<Arc<sa_tools::MemoryStore>>>,
+    /// 生命周期钩子（PreToolUse / PostToolUse / Stop）。
+    pub hooks: Mutex<Option<Arc<sa_tools::HookRunner>>>,
+    /// 后台长耗时命令管理器（服务关闭时统一清理进程树）。
+    pub bg_shell: Arc<sa_tools::BgShellManager>,
+    /// 已配置的 MCP 服务规格列表（用于透传注入到外部 CLI Harness / ACP）。
+    pub mcp_specs: Mutex<Vec<sa_tools::mcp::McpSpec>>,
+    /// 单次输出超限被截断时的自动续写次数上限（生产默认 2，测试默认 0）。
+    pub max_truncated_recoveries: std::sync::atomic::AtomicUsize,
 }
 
 struct RoomHandle {
@@ -267,6 +278,11 @@ impl Orchestrator {
                 started_at: sa_engine::now_ms(),
                 shares: Arc::default(),
                 context: desks::ContextCache::default(),
+                memory: Mutex::default(),
+                hooks: Mutex::default(),
+                bg_shell: sa_tools::BgShellManager::new(),
+                mcp_specs: Mutex::default(),
+                max_truncated_recoveries: std::sync::atomic::AtomicUsize::new(0),
             }),
             rooms: Mutex::new(HashMap::new()),
         }
@@ -476,6 +492,7 @@ impl Orchestrator {
             let _ = handle.task.await;
         }
         work::shutdown(&self.shared).await;
+        self.shared.bg_shell.kill_all();
         extensions::shutdown(&self.shared).await;
     }
 

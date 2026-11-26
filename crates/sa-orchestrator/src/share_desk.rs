@@ -111,6 +111,12 @@ pub enum Progress {
         ok: bool,
         output: String,
     },
+    Usage {
+        model: String,
+        input_tokens: u64,
+        output_tokens: u64,
+        cached_tokens: u64,
+    },
 }
 
 /// 把 harness 的进展交给 `sa share`，由它转给服务。
@@ -138,7 +144,14 @@ impl Observer for Forward {
         });
     }
 
-    async fn usage(&self, _model: &str, _usage: Usage) {}
+    async fn usage(&self, model: &str, usage: Usage) {
+        let _ = self.0.send(Progress::Usage {
+            model: model.into(),
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            cached_tokens: usage.cached_tokens,
+        });
+    }
 }
 
 /// 服务这边：把那台电脑报回来的进展放进房间。
@@ -154,6 +167,23 @@ pub(crate) async fn show(progress: &str, observer: &dyn Observer) {
         Progress::Finished { id, ok, output } => {
             let end = if ok { StepEnd::Ok } else { StepEnd::Failed };
             observer.tool_finished(&id, end, &output).await
+        }
+        Progress::Usage {
+            model,
+            input_tokens,
+            output_tokens,
+            cached_tokens,
+        } => {
+            observer
+                .usage(
+                    &model,
+                    Usage {
+                        input_tokens,
+                        output_tokens,
+                        cached_tokens,
+                    },
+                )
+                .await
         }
     }
 }
@@ -252,6 +282,7 @@ impl Desks {
             prompt: &job.prompt,
             session: job.session.as_deref(),
             permission: job.permission,
+            mcp_servers: &[],
         };
         let finished = harness::run(&launch, observer, cancel).await;
         let changes = workdir::commit_and_diff(&job.workdir, &job.summary)
