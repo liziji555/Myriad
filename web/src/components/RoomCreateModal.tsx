@@ -17,16 +17,28 @@ interface Props {
 export function RoomCreateModal({ bots, defaultMasterId, onCreate, onOpenNewBot, onClose }: Props) {
   const enabledBots = bots.filter((b) => b.enabled);
   const initialSelected = enabledBots.slice(0, Math.min(2, enabledBots.length)).map((b) => b.id);
+  const pickBestHost = (ids: readonly BotId[], mode: Discussion, preferred?: BotId | null): BotId | null => {
+    const isEligible = (id: BotId) => {
+      if (!ids.includes(id)) return false;
+      if (mode !== "lead") return true;
+      const b = enabledBots.find((item) => item.id === id);
+      return b?.harness === "builtin";
+    };
+    if (preferred && isEligible(preferred)) return preferred;
+    if (defaultMasterId && isEligible(defaultMasterId)) return defaultMasterId;
+    return ids.find(isEligible) ?? ids[0] ?? null;
+  };
+  const initialDiscussion: Discussion =
+    initialSelected.length >= 2 &&
+    initialSelected.some((id) => enabledBots.find((b) => b.id === id)?.harness === "builtin")
+      ? "lead"
+      : "normal";
   const [name, setName] = useState("");
   const [selectedIds, setSelectedIds] = useState<BotId[]>(initialSelected);
-  const [hostId, setHostId] = useState<BotId | null>(
-    defaultMasterId && initialSelected.includes(defaultMasterId)
-      ? defaultMasterId
-      : (initialSelected[0] ?? null),
+  const [hostId, setHostId] = useState<BotId | null>(() =>
+    pickBestHost(initialSelected, initialDiscussion, defaultMasterId),
   );
-  const [discussion, setDiscussion] = useState<Discussion>(
-    initialSelected.length >= 2 ? "lead" : "normal",
-  );
+  const [discussion, setDiscussion] = useState<Discussion>(initialDiscussion);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -40,17 +52,26 @@ export function RoomCreateModal({ bots, defaultMasterId, onCreate, onOpenNewBot,
 
   const toggleMember = (id: BotId) => {
     setSelectedIds((prev) => {
-      if (prev.includes(id)) {
-        const next = prev.filter((item) => item !== id);
-        if (hostId === id) setHostId(next[0] ?? null);
-        return next;
+      const next = prev.includes(id)
+        ? prev.filter((item) => item !== id)
+        : prev.length >= MAX_ROOM_MEMBERS
+          ? prev
+          : [...prev, id];
+      if (next === prev) return prev;
+      const hasBuiltin = next.some((mid) => enabledBots.find((b) => b.id === mid)?.harness === "builtin");
+      let nextMode = discussion;
+      if (next.length >= 2 && discussion === "normal" && hasBuiltin) {
+        nextMode = "lead";
+        setDiscussion("lead");
       }
-      if (prev.length >= MAX_ROOM_MEMBERS) return prev;
-      const next = [...prev, id];
-      if (!hostId) setHostId(id);
-      if (next.length >= 2 && discussion === "normal") setDiscussion("lead");
+      setHostId((cur) => pickBestHost(next, nextMode, cur));
       return next;
     });
+  };
+
+  const changeDiscussion = (nextMode: Discussion) => {
+    setDiscussion(nextMode);
+    setHostId((cur) => pickBestHost(selectedIds, nextMode, cur));
   };
 
   const submit = async (event: FormEvent) => {
@@ -64,13 +85,21 @@ export function RoomCreateModal({ bots, defaultMasterId, onCreate, onOpenNewBot,
       setError("请至少选择 1 个 Bot 加入房间。");
       return;
     }
+    const effectiveHost = hostId ?? selectedIds[0];
+    const hostBot = enabledBots.find((b) => b.id === effectiveHost);
+    if (selectedIds.length >= 2 && discussion === "lead" && hostBot && hostBot.harness !== "builtin") {
+      setError(
+        "「主 Agent 派活」模式需要内置模型 Bot 担任主控（外部 CLI Bot 暂不支持派活），请改选内置 Bot 为主控或切换协作模式。",
+      );
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
       await onCreate({
         name: name.trim(),
         member_bot_ids: selectedIds,
-        host_bot_id: hostId ?? selectedIds[0],
+        host_bot_id: effectiveHost,
         discussion,
       });
       onClose();
@@ -158,9 +187,11 @@ export function RoomCreateModal({ bots, defaultMasterId, onCreate, onOpenNewBot,
                 >
                   {selectedIds.map((id) => {
                     const b = enabledBots.find((item) => item.id === id);
+                    const disabled = discussion === "lead" && b?.harness !== "builtin";
                     return (
-                      <option key={id} value={id}>
+                      <option key={id} value={id} disabled={disabled}>
                         {b?.name ?? id}
+                        {disabled ? "（外部 CLI 暂不支持派活）" : ""}
                       </option>
                     );
                   })}
@@ -169,7 +200,10 @@ export function RoomCreateModal({ bots, defaultMasterId, onCreate, onOpenNewBot,
 
               <label className="sa-field">
                 协作模式
-                <select value={discussion} onChange={(e) => setDiscussion(e.target.value as Discussion)}>
+                <select
+                  value={discussion}
+                  onChange={(e) => changeDiscussion(e.target.value as Discussion)}
+                >
                   {DISCUSSIONS.map((item) => (
                     <option key={item.id} value={item.id}>
                       {item.label}

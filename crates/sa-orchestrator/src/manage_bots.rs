@@ -8,7 +8,7 @@ use crate::Shared;
 use async_trait::async_trait;
 use sa_engine::BotPatch;
 use sa_protocol::{Bot, CreateRoomRequest, Discussion, Harness, ModelTier, RoomId};
-use sa_tools::{Tool, ToolCtx, ToolError, ToolResult};
+use sa_tools::{Permission, Tool, ToolCtx, ToolError, ToolResult};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -79,8 +79,8 @@ impl Tool for CreateBotTool {
         format!("创建 Bot「{name}」")
     }
 
-    fn is_read_only(&self, _input: &Value) -> bool {
-        true
+    async fn check_permission(&self, _input: &Value, _ctx: &ToolCtx) -> Permission {
+        Permission::Ask("这个操作会创建新的 Bot 并更新团队配置".into())
     }
 
     async fn call(&self, input: Value, _ctx: &ToolCtx) -> ToolResult {
@@ -171,8 +171,8 @@ impl Tool for UpdateBotTool {
         format!("调整 Bot「{name}」")
     }
 
-    fn is_read_only(&self, _input: &Value) -> bool {
-        true
+    async fn check_permission(&self, _input: &Value, _ctx: &ToolCtx) -> Permission {
+        Permission::Ask("这个操作会创建新的 Bot 并更新团队配置".into())
     }
 
     async fn call(&self, input: Value, _ctx: &ToolCtx) -> ToolResult {
@@ -262,8 +262,8 @@ impl Tool for CreateRoomTool {
         format!("组建房间「{name}」")
     }
 
-    fn is_read_only(&self, _input: &Value) -> bool {
-        true
+    async fn check_permission(&self, _input: &Value, _ctx: &ToolCtx) -> Permission {
+        Permission::Ask("这个操作会创建新的 Bot 并更新团队配置".into())
     }
 
     async fn call(&self, input: Value, _ctx: &ToolCtx) -> ToolResult {
@@ -279,8 +279,13 @@ impl Tool for CreateRoomTool {
             if let Some(h) = bots.iter().find(|b| b.id == host_id) {
                 names.push(h.name.clone());
             }
+            let mut missing = Vec::new();
             for raw in &input.members {
-                let wanted = raw.trim().trim_start_matches('@').to_lowercase();
+                let trimmed = raw.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                let wanted = trimmed.trim_start_matches('@').to_lowercase();
                 if let Some(found) = bots.iter().find(|b| {
                     b.id.as_str().eq_ignore_ascii_case(&wanted) || b.name.to_lowercase() == wanted
                 }) {
@@ -288,7 +293,15 @@ impl Tool for CreateRoomTool {
                         ids.push(found.id.clone());
                         names.push(found.name.clone());
                     }
+                } else {
+                    missing.push(trimmed.to_string());
                 }
+            }
+            if !missing.is_empty() {
+                return Err(sa_engine::EngineError::NotFound(format!(
+                    "找不到以下 Bot：{}（请先用 create_bot 创建或核对名字）",
+                    missing.join("、")
+                )));
             }
             let discussion = input.discussion.or(Some(if ids.len() >= 2 {
                 Discussion::Lead

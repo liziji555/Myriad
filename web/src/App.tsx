@@ -358,11 +358,18 @@ function Shell() {
 
   // ProkBot / GrokBot 风格：识别主控、每个 Bot 的 1v1 直聊房间、以及多 Bot 协作房间。
   const masterBot = workspace.bots.find((b) => b.enabled) ?? workspace.bots[0] ?? null;
-  const directRoomOf = (botId: string) =>
-    workspace.rooms.find(
-      (candidate) =>
-        candidate.member_bot_ids.length === 1 && candidate.member_bot_ids[0] === botId,
-    );
+  const directRoomOf = (botId: string) => {
+    const bot = workspace.bots.find((b) => b.id === botId);
+    const singles = workspace.rooms
+      .filter((candidate) => candidate.member_bot_ids.length === 1 && candidate.member_bot_ids[0] === botId)
+      .sort((a, b) => a.created_at - b.created_at);
+    if (singles.length === 0) return undefined;
+    if (bot) {
+      const exact = singles.find((candidate) => candidate.name === bot.name);
+      if (exact) return exact;
+    }
+    return singles[0];
+  };
   const directRoomIds = new Set(
     workspace.bots.flatMap((bot) => {
       const dm = directRoomOf(bot.id);
@@ -401,6 +408,11 @@ function Shell() {
   // 右侧单槽位互斥：打开任何工具面板时自动隐藏工作树，彻底告别四栏拥挤裁剪；收起工具面板后工作树自动回来。
   const showTrajectory = Boolean(!panelOpen && trajectoryOpen && !flowExpanded && flow);
   const toggleTrajectory = () => {
+    if (typeof window !== "undefined" && window.innerWidth <= 960) {
+      setPanelOpen(false);
+      setFlowExpanded((expanded) => !expanded);
+      return;
+    }
     if (panelOpen) {
       setPanelOpen(false);
       setTrajectoryOpen(true);

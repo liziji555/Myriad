@@ -394,5 +394,9 @@ mod tests {
         assert_eq!(room.member_bot_ids, vec![b.id.clone(), a.id.clone()]);
         assert_eq!(room.host_bot_id.as_ref(), Some(&a.id));
         assert_eq!(room.discussion, sa_protocol::Discussion::Lead);
+
+        // 从存储回读也必须保持建房时的成员顺序，不能被 BotId 字典序打乱。
+        let stored = engine.get_room(&room.id).unwrap();
+        assert_eq!(stored.member_bot_ids, vec![b.id, a.id]);
     }
 }

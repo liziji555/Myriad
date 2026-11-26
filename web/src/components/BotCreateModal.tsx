@@ -96,7 +96,8 @@ export function BotCreateModal({ onCreate, onClose }: Props) {
           persona: persona.trim(),
           tier,
           harness,
-          harness_command: command.trim() || undefined,
+          harness_command:
+            harness === "acp" || harness === "command" ? command.trim() || undefined : undefined,
         },
         openChat,
       );
