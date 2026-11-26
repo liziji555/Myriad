@@ -112,7 +112,12 @@ impl Tool for EditTool {
             }
             write_atomically(&path, updated.as_bytes()).map_err(io_error)?;
             if let Some(cp) = checkpoint {
-                cp.record_write(&fence, &path, Some(text.as_bytes()), updated.as_bytes());
+                cp.record_write(
+                    &fence,
+                    &path,
+                    crate::checkpoint::BeforeState::Bytes(text.as_bytes()),
+                    updated.as_bytes(),
+                );
             }
             Ok(format!("已修改 {shown}（替换了 {count} 处）。"))
         })

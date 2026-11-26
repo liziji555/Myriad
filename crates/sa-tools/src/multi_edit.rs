@@ -155,7 +155,12 @@ impl Tool for MultiEditTool {
             let after_lines = current.lines().count();
             write_atomically(&path, current.as_bytes()).map_err(io_error)?;
             if let Some(cp) = checkpoint {
-                cp.record_write(&fence, &path, Some(original.as_bytes()), current.as_bytes());
+                cp.record_write(
+                    &fence,
+                    &path,
+                    crate::checkpoint::BeforeState::Bytes(original.as_bytes()),
+                    current.as_bytes(),
+                );
             }
             Ok(format!(
                 "已批量修改 {shown}（{} 组编辑、共替换 {total_replacements} 处，行数 {before_lines} → {after_lines}）。",

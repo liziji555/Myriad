@@ -149,7 +149,8 @@ impl Orchestrator {
             return Ok(vec![]);
         };
         let room_key = room.to_string();
-        let records = tokio::task::spawn_blocking(move || store.list(&room_key))
+        let fence = self.shared.settings.fence.clone();
+        let records = tokio::task::spawn_blocking(move || store.list(&room_key, &fence))
             .await
             .map_err(|e| OrchestratorError::Internal(e.to_string()))?;
         Ok(records

@@ -73,15 +73,20 @@ impl Tool for WriteTool {
                 return Err(ToolError(format!("{shown} 是目录，不能当文件写。")));
             }
             let existed = path.exists();
-            let before = if existed && checkpoint.is_some() {
-                std::fs::read(&path).ok()
+            let before_bytes = if existed && checkpoint.is_some() {
+                Some(std::fs::read(&path))
             } else {
                 None
             };
             write_atomically(&path, input.content.as_bytes())
                 .map_err(|e| ToolError(format!("写不进 {shown}：{e}")))?;
             if let Some(cp) = checkpoint {
-                cp.record_write(&fence, &path, before.as_deref(), input.content.as_bytes());
+                let state = match &before_bytes {
+                    None => crate::checkpoint::BeforeState::Missing,
+                    Some(Ok(bytes)) => crate::checkpoint::BeforeState::Bytes(bytes.as_slice()),
+                    Some(Err(_)) => crate::checkpoint::BeforeState::Unreadable,
+                };
+                cp.record_write(&fence, &path, state, input.content.as_bytes());
             }
             let lines = input.content.lines().count();
             Ok(format!(

@@ -1240,7 +1240,7 @@ mod tests {
         assert_eq!(request.messages[0].role, Role::System);
         assert_eq!(request.messages[0].content, "你是测试助手");
         assert_eq!(request.messages[1].content, "你好");
-        assert_eq!(request.tools.len(), 8);
+        assert_eq!(request.tools.len(), 9);
         assert_eq!(request.session_id.as_deref(), Some("ses_test"));
     }
 

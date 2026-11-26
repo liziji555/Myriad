@@ -1,28 +1,50 @@
 //! 对话轮次级文件检查点（Checkpoint & Rewind）：
 //! 在内置 Bot 每次直接修改工作目录文件（`write` / `edit` / `multi_edit`）前，
-//! 以内容寻址（SHA-256 Blob）保存改动前的原始字节，改动后记下目标哈希。
-//! 用户可随时按轮次回滚到任意检查点，若文件在之后被外部改过则默认拒绝覆盖并列出冲突，避免误伤人工改动。
+//! 以内容寻址（SHA-256 Blob，Unix 下强制 `0o600` 权限）保存改动前的原始字节，改动后记下目标哈希与规范化工作目录身份。
+//! 用户可随时按轮次回滚到任意检查点：
+//! - 严格校验工作目录身份（切换项目后即使 `force=true` 也拒绝误回滚）；
+//! - 逐段检查相对路径组件，拒绝任何符号链接与目录替换；
+//! - 检测轮次内插队改动和轮次后外部改动（非 `force` 拒绝覆盖）；
+//! - 两阶段校验 + 失败补偿回退，避免部分写入残留；
+//! - 索引过期淘汰时自动回收无引用的孤立 Blob。
 
 use crate::write::{file_lock, write_atomically};
 use crate::Fence;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::collections::{BTreeMap, HashSet};
+use std::io::Write;
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 const MAX_CHECKPOINTS_PER_ROOM: usize = 50;
 const MAX_SNAPSHOT_BYTES: u64 = 20 * 1024 * 1024;
+
+/// 写入前目标文件的原始状态。
+pub(crate) enum BeforeState<'a> {
+    /// 文件原本不存在（本轮新建）。
+    Missing,
+    /// 成功读取到原本的完整字节。
+    Bytes(&'a [u8]),
+    /// 文件原本存在但无法读取（如权限仅写、超大文件等），不可按「新建文件」误删。
+    Unreadable,
+}
 
 /// 一个被某轮对话改动过的文件的前后快照。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileSnapshot {
     /// 相对工作目录的路径（正斜杠）。
     pub path: String,
-    /// 改动前的 SHA-256；`None` 表示该文件是这一轮新建的（回滚时删除）。
+    /// 改动前的 SHA-256；`None` 且 `!unreadable` 表示该文件是这一轮新建的（回滚时删除）。
     pub before_sha256: Option<String>,
     /// 改动后的 SHA-256（用于回滚前检测是否发生过外部二次修改）。
     pub after_sha256: String,
+    /// 文件原本存在但未能捕获原内容：绝不允许按新建文件删除。
+    #[serde(default)]
+    pub unreadable: bool,
+    /// 同一轮两次写入之间发生了外部修改（如用户或其他 Bot 插队编辑）：非 force 回滚应报冲突。
+    #[serde(default)]
+    pub intervening_conflict: bool,
 }
 
 /// 一轮对话产生的检查点记录。
@@ -30,6 +52,9 @@ pub struct FileSnapshot {
 pub struct CheckpointRecord {
     pub id: String,
     pub room_id: String,
+    /// 规范化后的工作目录根路径，防止切换工作区后把旧检查点误应用到新项目。
+    #[serde(default)]
+    pub workspace: String,
     pub bot_name: String,
     pub created_at: i64,
     pub files: Vec<FileSnapshot>,
@@ -62,15 +87,19 @@ impl CheckpointStore {
         self.root.join("blobs")
     }
 
+    fn rooms_dir(&self) -> PathBuf {
+        self.root.join("rooms")
+    }
+
     fn room_index_path(&self, room_id: &str) -> PathBuf {
         let safe: String = room_id
             .chars()
             .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
             .collect();
-        self.root.join("rooms").join(format!("{safe}.json"))
+        self.rooms_dir().join(format!("{safe}.json"))
     }
 
-    /// 为一轮对话创建一个检查点记录器；只有真的改动了文件时才会在结束或写入时落盘。
+    /// 为一轮对话创建一个检查点记录器；只有真的改动了文件时才会在写入时落盘。
     pub fn begin_turn(
         self: &Arc<Self>,
         room_id: impl Into<String>,
@@ -88,16 +117,23 @@ impl CheckpointStore {
         })
     }
 
-    /// 列出某个房间的所有检查点（最新的在前）。
-    pub fn list(&self, room_id: &str) -> Vec<CheckpointRecord> {
+    /// 列出某个房间在当前工作目录下产生的所有检查点（最新的在前）。
+    pub fn list(&self, room_id: &str, fence: &Fence) -> Vec<CheckpointRecord> {
         let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
-        let mut records = self.read_room_unlocked(room_id);
+        let active_ws = fence.root().to_string_lossy();
+        let mut records: Vec<CheckpointRecord> = self
+            .read_room_unlocked(room_id)
+            .into_iter()
+            .filter(|r| r.workspace == active_ws.as_ref())
+            .collect();
         records.reverse();
         records
     }
 
     /// 回滚指定检查点所做的全部文件改动。
-    /// `force == false` 时若检测到文件在检查点之后被外部修改，拒绝覆盖并列出冲突文件。
+    /// - 切换工作区后即使 `force == true` 也严格拒绝；
+    /// - 逐组件校验符号链接与目录替换，防符号链接劫持与部分回滚残留；
+    /// - `force == false` 时若检测到轮次内或轮次后的外部修改，拒绝覆盖并列出冲突文件。
     pub fn rewind(
         &self,
         room_id: &str,
@@ -115,32 +151,75 @@ impl CheckpointStore {
             .ok_or_else(|| format!("找不到检查点 {checkpoint_id}"))?
             .clone();
 
-        // 第一阶段：校验所有目标路径均仍在 Fence 内、未漂移为符号链接且无未预期的外部修改。
-        let mut plan: Vec<(String, PathBuf, Option<Vec<u8>>)> = Vec::new();
+        let active_ws = fence.root().to_string_lossy();
+        if record.workspace.is_empty() || record.workspace != active_ws.as_ref() {
+            return Err(format!(
+                "这个检查点来自工作目录 {}，当前工作目录是 {}，不能跨项目回滚。",
+                if record.workspace.is_empty() {
+                    "（未知目录）"
+                } else {
+                    record.workspace.as_str()
+                },
+                fence.root_display()
+            ));
+        }
+
+        // 第一阶段：严格预检每个路径的符号链接、文件类型、外部冲突，并备份当前内容以支持失败补偿。
+        struct PlannedOp {
+            rel: String,
+            target: PathBuf,
+            restore_bytes: Option<Vec<u8>>,
+            current_bytes: Option<Vec<u8>>,
+        }
+
+        let mut plan: Vec<PlannedOp> = Vec::new();
         let mut conflicts = Vec::new();
         for snap in &record.files {
+            if snap.unreadable {
+                return Err(format!(
+                    "文件 {} 在修改前无法读取原始快照，为避免数据丢失无法自动回滚。",
+                    snap.path
+                ));
+            }
+            // 先沿原始相对路径逐段检查，拒绝路径中间或末端出现任何符号链接（防止 Fence 跟随符号链接误伤目标）。
+            verify_no_symlinks_under(fence.root(), &snap.path)?;
+
             let (target, inside) = fence
                 .resolve_for_write(&snap.path)
                 .map_err(|e| format!("回滚路径 {} 受限：{}", snap.path, e.0))?;
             if !inside {
                 return Err(format!("拒绝回滚工作目录之外的路径：{}", snap.path));
             }
-            if let Ok(meta) = std::fs::symlink_metadata(&target) {
-                if meta.file_type().is_symlink() {
-                    return Err(format!("拒绝回滚已被替换为符号链接的路径：{}", snap.path));
+
+            let current_bytes = match std::fs::symlink_metadata(&target) {
+                Ok(meta) => {
+                    if meta.file_type().is_symlink() {
+                        return Err(format!("拒绝回滚已被替换为符号链接的路径：{}", snap.path));
+                    }
+                    if !meta.is_file() {
+                        return Err(format!(
+                            "路径 {} 当前不是普通文件（可能已被替换为目录），无法安全回滚。",
+                            snap.path
+                        ));
+                    }
+                    let bytes =
+                        std::fs::read(&target).map_err(|e| format!("读不了 {}：{e}", snap.path))?;
+                    Some(bytes)
                 }
-            }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                Err(e) => return Err(format!("检查 {} 状态失败：{e}", snap.path)),
+            };
+
             if !force {
-                let current_hash = match std::fs::read(&target) {
-                    Ok(bytes) => Some(sha256_hex(&bytes)),
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-                    Err(e) => return Err(format!("读不了 {}：{e}", snap.path)),
-                };
-                if current_hash.as_deref() != Some(snap.after_sha256.as_str()) {
+                let current_hash = current_bytes.as_deref().map(sha256_hex);
+                if snap.intervening_conflict
+                    || current_hash.as_deref() != Some(snap.after_sha256.as_str())
+                {
                     conflicts.push(snap.path.clone());
                 }
             }
-            let blob = match &snap.before_sha256 {
+
+            let restore_bytes = match &snap.before_sha256 {
                 Some(hash) => {
                     let blob_path = self.blobs_dir().join(hash);
                     let bytes = std::fs::read(&blob_path)
@@ -149,34 +228,69 @@ impl CheckpointStore {
                 }
                 None => None,
             };
-            plan.push((snap.path.clone(), target, blob));
+
+            plan.push(PlannedOp {
+                rel: snap.path.clone(),
+                target,
+                restore_bytes,
+                current_bytes,
+            });
         }
 
         if !conflicts.is_empty() {
             return Err(format!(
-                "以下文件在检查点之后被外部修改过，已取消回滚：{}。确认覆盖请传入 force=true。",
+                "以下文件在检查点期间或之后被外部修改过，已取消回滚：{}。确认覆盖请传入 force=true。",
                 conflicts.join("、")
             ));
         }
 
-        // 第二阶段：逐个恢复旧内容或删除该轮新建的文件。
+        // 第二阶段：逐个恢复或删除，若中途任一文件失败，自动补偿还原前面已改过的文件。
+        let mut applied: Vec<&PlannedOp> = Vec::new();
         let mut restored = Vec::new();
         let mut removed = Vec::new();
-        for (rel, target, maybe_bytes) in plan {
-            match maybe_bytes {
-                Some(bytes) => {
-                    write_atomically(&target, &bytes)
-                        .map_err(|e| format!("恢复 {rel} 失败：{e}"))?;
-                    restored.push(rel);
-                }
+        for op in &plan {
+            let res = match &op.restore_bytes {
+                Some(bytes) => write_atomically(&op.target, bytes)
+                    .map(|()| restored.push(op.rel.clone()))
+                    .map_err(|e| format!("恢复 {} 失败：{e}", op.rel)),
                 None => {
-                    if target.exists() {
-                        std::fs::remove_file(&target)
-                            .map_err(|e| format!("删除新建文件 {rel} 失败：{e}"))?;
+                    if op.target.exists() {
+                        std::fs::remove_file(&op.target)
+                            .map(|()| removed.push(op.rel.clone()))
+                            .map_err(|e| format!("删除新建文件 {} 失败：{e}", op.rel))
+                    } else {
+                        removed.push(op.rel.clone());
+                        Ok(())
                     }
-                    removed.push(rel);
                 }
+            };
+            if let Err(err) = res {
+                let mut comp_errors = Vec::new();
+                for prev in applied.into_iter().rev() {
+                    let undo = match &prev.current_bytes {
+                        Some(bytes) => write_atomically(&prev.target, bytes),
+                        None => {
+                            if prev.target.exists() {
+                                std::fs::remove_file(&prev.target)
+                            } else {
+                                Ok(())
+                            }
+                        }
+                    };
+                    if let Err(ue) = undo {
+                        comp_errors.push(format!("{}({ue})", prev.rel));
+                    }
+                }
+                return if comp_errors.is_empty() {
+                    Err(format!("{err}（已自动撤销本批前面恢复的改动）"))
+                } else {
+                    Err(format!(
+                        "{err}；尝试补偿撤销时以下文件失败：{}",
+                        comp_errors.join("、")
+                    ))
+                };
             }
+            applied.push(op);
         }
 
         Ok(RewindOutcome {
@@ -186,7 +300,7 @@ impl CheckpointStore {
         })
     }
 
-    fn save_blob(&self, bytes: &[u8]) -> Result<String, String> {
+    fn save_blob_unlocked(&self, bytes: &[u8]) -> Result<String, String> {
         let hash = sha256_hex(bytes);
         let path = self.blobs_dir().join(&hash);
         if path.exists() {
@@ -194,14 +308,14 @@ impl CheckpointStore {
         }
         std::fs::create_dir_all(self.blobs_dir())
             .map_err(|e| format!("创建检查点目录失败：{e}"))?;
-        write_atomically(&path, bytes).map_err(|e| format!("保存快照 Blob 失败：{e}"))?;
+        write_private_atomically(&path, bytes).map_err(|e| format!("保存快照 Blob 失败：{e}"))?;
         Ok(hash)
     }
 
-    fn upsert_record(&self, record: CheckpointRecord) {
-        let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+    fn upsert_record_unlocked(&self, record: CheckpointRecord) {
         let room_id = record.room_id.clone();
         let mut records = self.read_room_unlocked(&room_id);
+        let mut pruned = false;
         if let Some(existing) = records.iter_mut().find(|r| r.id == record.id) {
             *existing = record;
         } else {
@@ -209,11 +323,49 @@ impl CheckpointStore {
             if records.len() > MAX_CHECKPOINTS_PER_ROOM {
                 let drain = records.len() - MAX_CHECKPOINTS_PER_ROOM;
                 records.drain(..drain);
+                pruned = true;
             }
         }
         let path = self.room_index_path(&room_id);
         if let Ok(bytes) = serde_json::to_vec_pretty(&records) {
-            let _ = write_atomically(&path, &bytes);
+            let _ = write_private_atomically(&path, &bytes);
+        }
+        if pruned {
+            self.gc_blobs_unlocked();
+        }
+    }
+
+    /// 回收不再被任何房间检查点引用的孤立 Blob。
+    fn gc_blobs_unlocked(&self) {
+        let mut referenced: HashSet<String> = HashSet::new();
+        if let Ok(entries) = std::fs::read_dir(self.rooms_dir()) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                    continue;
+                }
+                if let Ok(bytes) = std::fs::read(&path) {
+                    if let Ok(records) = serde_json::from_slice::<Vec<CheckpointRecord>>(&bytes) {
+                        for rec in records {
+                            for file in rec.files {
+                                if let Some(hash) = file.before_sha256 {
+                                    referenced.insert(hash);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if let Ok(entries) = std::fs::read_dir(self.blobs_dir()) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    if !name.starts_with(".sa-tmp-") && !referenced.contains(name) {
+                        let _ = std::fs::remove_file(path);
+                    }
+                }
+            }
         }
     }
 
@@ -224,6 +376,52 @@ impl CheckpointStore {
             .and_then(|bytes| serde_json::from_slice::<Vec<CheckpointRecord>>(&bytes).ok())
             .unwrap_or_default()
     }
+}
+
+/// 沿原始相对路径逐段检查，拒绝路径中间目录或目标文件本身是符号链接。
+fn verify_no_symlinks_under(root: &Path, rel: &str) -> Result<(), String> {
+    let mut cur = root.to_path_buf();
+    for comp in Path::new(rel).components() {
+        let Component::Normal(seg) = comp else {
+            return Err(format!("检查点路径不合法：{rel}"));
+        };
+        cur.push(seg);
+        match std::fs::symlink_metadata(&cur) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err(format!("拒绝沿着符号链接回滚路径：{rel}"));
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => break,
+            Err(e) => return Err(format!("检查路径 {rel} 失败：{e}")),
+        }
+    }
+    Ok(())
+}
+
+/// 始终以仅当前用户可读（Unix `0o600`）原子写入快照 Blob 与索引文件。
+fn write_private_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let dir = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("路径没有上级目录"))?;
+    std::fs::create_dir_all(dir)?;
+    let temp = dir.join(format!(".sa-tmp-{}", uuid::Uuid::new_v4().simple()));
+    let result = (|| {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        std::fs::rename(&temp, path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    result
 }
 
 /// 绑定到单轮对话上下文（`ToolCtx`）的文件检查点录制器。
@@ -243,7 +441,7 @@ impl TurnCheckpoint {
         &self,
         fence: &Fence,
         target: &Path,
-        before_bytes: Option<&[u8]>,
+        before: BeforeState<'_>,
         after_bytes: &[u8],
     ) {
         // 只为工作目录内的文件建检查点（工作目录外的写入走显式审批）。
@@ -254,21 +452,34 @@ impl TurnCheckpoint {
         if rel.is_empty() {
             return;
         }
+        let workspace = fence.root().to_string_lossy().into_owned();
         let after_hash = sha256_hex(after_bytes);
+        let _store_guard = self.store.lock.lock().unwrap_or_else(|e| e.into_inner());
         let mut map = self.files.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(existing) = map.get_mut(&rel) {
-            // 同一轮里多次改同一个文件：保留本轮最开始的 before_sha256，只刷新最新 after_sha256。
-            existing.after_sha256 = after_hash;
-        } else {
-            let before_hash = match before_bytes {
-                Some(bytes) if (bytes.len() as u64) <= MAX_SNAPSHOT_BYTES => {
-                    match self.store.save_blob(bytes) {
-                        Ok(h) => Some(h),
-                        Err(_) => return,
+            // 同一轮里多次改同一个文件：对比本次写前内容和上次写后内容，发现外部插队修改则标冲突。
+            match before {
+                BeforeState::Bytes(bytes) => {
+                    if sha256_hex(bytes) != existing.after_sha256 {
+                        existing.intervening_conflict = true;
                     }
                 }
-                Some(_) => return,
-                None => None,
+                BeforeState::Missing | BeforeState::Unreadable => {
+                    existing.intervening_conflict = true;
+                }
+            }
+            existing.after_sha256 = after_hash;
+        } else {
+            let (before_hash, unreadable) = match before {
+                BeforeState::Missing => (None, false),
+                BeforeState::Unreadable => (None, true),
+                BeforeState::Bytes(bytes) if (bytes.len() as u64) <= MAX_SNAPSHOT_BYTES => {
+                    match self.store.save_blob_unlocked(bytes) {
+                        Ok(h) => (Some(h), false),
+                        Err(_) => (None, true),
+                    }
+                }
+                BeforeState::Bytes(_) => (None, true),
             };
             map.insert(
                 rel.clone(),
@@ -276,14 +487,17 @@ impl TurnCheckpoint {
                     path: rel,
                     before_sha256: before_hash,
                     after_sha256: after_hash,
+                    unreadable,
+                    intervening_conflict: false,
                 },
             );
         }
         let snapshot_list: Vec<FileSnapshot> = map.values().cloned().collect();
         drop(map);
-        self.store.upsert_record(CheckpointRecord {
+        self.store.upsert_record_unlocked(CheckpointRecord {
             id: self.id.clone(),
             room_id: self.room_id.clone(),
+            workspace,
             bot_name: self.bot_name.clone(),
             created_at: self.created_at,
             files: snapshot_list,
@@ -305,17 +519,21 @@ mod tests {
     use std::fs;
 
     #[tokio::test]
-    async fn snapshots_and_rewinds_edited_and_created_files_with_conflict_guard() {
+    async fn snapshots_and_rewinds_edited_and_created_files_with_conflict_and_workspace_guards() {
         let dir = tempfile::tempdir().unwrap();
-        let work = dir.path().join("work");
+        let work_a = dir.path().join("work_a");
+        let work_b = dir.path().join("work_b");
         let data = dir.path().join("data");
-        fs::create_dir_all(&work).unwrap();
-        fs::write(work.join("app.rs"), "fn main() { let x = 1; }\n").unwrap();
+        fs::create_dir_all(&work_a).unwrap();
+        fs::create_dir_all(&work_b).unwrap();
+        fs::write(work_a.join("app.rs"), "fn main() { let x = 1; }\n").unwrap();
+        fs::write(work_b.join("app.rs"), "fn main() { let x = 99; }\n").unwrap();
 
-        let fence = Fence::new(&work, &[]).unwrap();
+        let fence_a = Fence::new(&work_a, &[]).unwrap();
+        let fence_b = Fence::new(&work_b, &[]).unwrap();
         let store = Arc::new(CheckpointStore::new(data.join("checkpoints")));
         let cp = store.begin_turn("room_1", "msg_1", "助手", 1000);
-        let mut ctx = ToolCtx::new(fence.clone());
+        let mut ctx = ToolCtx::new(fence_a.clone());
         ctx.checkpoint = Some(cp);
 
         // 同一轮里改两次 app.rs 并新建 new.txt。
@@ -341,23 +559,62 @@ mod tests {
             .await
             .unwrap();
 
-        let list = store.list("room_1");
-        assert_eq!(list.len(), 1);
-        assert_eq!(list[0].files.len(), 2);
+        let list_a = store.list("room_1", &fence_a);
+        assert_eq!(list_a.len(), 1);
+        assert_eq!(list_a[0].files.len(), 2);
+        // 切换工作目录 B 后看不到 A 的检查点，强制回滚也会被拒绝。
+        assert!(store.list("room_1", &fence_b).is_empty());
+        let ws_err = store.rewind("room_1", "msg_1", &fence_b, true).unwrap_err();
+        assert!(ws_err.contains("跨项目回滚"), "{ws_err}");
 
         // 模拟外部修改冲突检测。
-        fs::write(work.join("app.rs"), "external change\n").unwrap();
-        let conflict = store.rewind("room_1", "msg_1", &fence, false).unwrap_err();
+        fs::write(work_a.join("app.rs"), "external change\n").unwrap();
+        let conflict = store
+            .rewind("room_1", "msg_1", &fence_a, false)
+            .unwrap_err();
         assert!(conflict.contains("app.rs"), "{conflict}");
 
         // force=true 强制回滚：app.rs 回到最初始的 x = 1，new.txt 被删除。
-        let report = store.rewind("room_1", "msg_1", &fence, true).unwrap();
+        let report = store.rewind("room_1", "msg_1", &fence_a, true).unwrap();
         assert_eq!(report.restored, vec!["app.rs"]);
         assert_eq!(report.removed, vec!["new.txt"]);
         assert_eq!(
-            fs::read_to_string(work.join("app.rs")).unwrap(),
+            fs::read_to_string(work_a.join("app.rs")).unwrap(),
             "fn main() { let x = 1; }\n"
         );
-        assert!(!work.join("new.txt").exists());
+        assert!(!work_a.join("new.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn detects_intervening_edit_between_two_writes_in_same_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let work = dir.path().join("work");
+        fs::create_dir_all(&work).unwrap();
+        fs::write(work.join("doc.txt"), "title\nbody\nfooter\n").unwrap();
+
+        let fence = Fence::new(&work, &[]).unwrap();
+        let store = Arc::new(CheckpointStore::new(dir.path().join("cp")));
+        let mut ctx = ToolCtx::new(fence.clone());
+        ctx.checkpoint = Some(store.begin_turn("room_1", "msg_2", "助手", 2000));
+
+        EditTool
+            .call(
+                json!({"path": "doc.txt", "old_string": "title", "new_string": "TITLE"}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        // 模拟用户在两步之间修改了 body。
+        fs::write(work.join("doc.txt"), "TITLE\nUSER_BODY\nfooter\n").unwrap();
+        EditTool
+            .call(
+                json!({"path": "doc.txt", "old_string": "footer", "new_string": "FOOTER"}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        let err = store.rewind("room_1", "msg_2", &fence, false).unwrap_err();
+        assert!(err.contains("doc.txt"), "{err}");
     }
 }
