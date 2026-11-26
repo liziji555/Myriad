@@ -1402,3 +1402,47 @@ async fn context_usage_grows_with_the_conversation() {
         .unwrap();
     assert_eq!(missing.status(), StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn cross_origin_mutations_are_rejected() {
+    let (app, _engine) = app();
+    // 同机不同端口发来的 Origin 与 Host 不一致，必须拒绝（防止跨端口 CSRF）。
+    let cross_origin = Request::post("/api/rooms")
+        .header(AUTHORIZATION, format!("Bearer {TOKEN}"))
+        .header("host", "127.0.0.1:4517")
+        .header("origin", "http://127.0.0.1:3000")
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"name":"bad"}"#))
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(cross_origin).await.unwrap().status(),
+        StatusCode::FORBIDDEN
+    );
+
+    // Sec-Fetch-Site: same-site（同机不同端口）同样拒绝。
+    let same_site = Request::post("/api/rooms")
+        .header(AUTHORIZATION, format!("Bearer {TOKEN}"))
+        .header("host", "127.0.0.1:4517")
+        .header("sec-fetch-site", "same-site")
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"name":"bad2"}"#))
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(same_site).await.unwrap().status(),
+        StatusCode::FORBIDDEN
+    );
+
+    // 同源请求放行。
+    let same_origin = Request::post("/api/rooms")
+        .header(AUTHORIZATION, format!("Bearer {TOKEN}"))
+        .header("host", "127.0.0.1:4517")
+        .header("origin", "http://127.0.0.1:4517")
+        .header("sec-fetch-site", "same-origin")
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"name":"ok-room"}"#))
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(same_origin).await.unwrap().status(),
+        StatusCode::CREATED
+    );
+}

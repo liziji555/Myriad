@@ -349,6 +349,8 @@ impl SshTarget {
             "-o",
             "NumberOfPasswordPrompts=1",
             "-o",
+            "PermitLocalCommand=no",
+            "-o",
             "ControlMaster=no",
             "-o",
             "ControlPath=none",
@@ -357,18 +359,24 @@ impl SshTarget {
             INSTALL_KEY,
         ]);
         // 命令行里由 ssh 在终端问密码，Windows 上要留着控制台；桌面版由我们来答，不弹窗。
-        if let Some(password) = password {
+        // 密码写进仅当前用户可读的临时文件，不放进环境变量，免得被同用户别的进程从 /proc/*/environ 读走。
+        let _askpass_file = if let Some(password) = password {
             hide_console(&mut command);
             let exe = std::env::current_exe().context("找不到自己的可执行文件")?;
+            let file = AskpassFile::create(password)?;
             command
+                .env("LC_ALL", "C")
                 .env("SSH_ASKPASS", exe)
                 .env("SSH_ASKPASS_REQUIRE", "force")
-                .env(ASKPASS_ENV, password);
+                .env(ASKPASS_FILE_ENV, &file.path);
             // 老版本的 ssh 没有 SSH_ASKPASS_REQUIRE，要有 DISPLAY 才肯用 SSH_ASKPASS。
             if std::env::var_os("DISPLAY").is_none() {
                 command.env("DISPLAY", ":0");
             }
-        }
+            Some(file)
+        } else {
+            None
+        };
         let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
@@ -405,20 +413,53 @@ awk -v k=\"$kind\" -v b=\"$blob\" \"\\$1 !~ /^#/ { for (i = 1; i < NF; i++) if (
 if [ -s ~/.ssh/authorized_keys ] && [ -n \"$(tail -c 1 ~/.ssh/authorized_keys)\" ]; then echo >> ~/.ssh/authorized_keys; fi; \
 printf \"%s\\n\" \"$key\" >> ~/.ssh/authorized_keys'";
 
-/// ssh 问密码时，把密码交给它的环境变量。
-const ASKPASS_ENV: &str = "SA_ASKPASS_PASSWORD";
+/// ssh 问密码时，存放密码的临时文件路径（权限 0600，用完即删）。
+const ASKPASS_FILE_ENV: &str = "SA_ASKPASS_FILE";
+
+struct AskpassFile {
+    path: PathBuf,
+}
+
+impl AskpassFile {
+    fn create(password: &str) -> Result<Self> {
+        let name = format!("sa-askpass-{}", sa_protocol::RoutineId::new());
+        let path = std::env::temp_dir().join(name);
+        let mut opts = std::fs::OpenOptions::new();
+        opts.create_new(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut file = opts.open(&path).context("创建临时密码文件失败")?;
+        file.write_all(password.as_bytes())
+            .context("写入临时密码文件失败")?;
+        file.flush().context("写入临时密码文件失败")?;
+        Ok(Self { path })
+    }
+}
+
+impl Drop for AskpassFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
 
 /// ssh 把我们自己当成 SSH_ASKPASS 来调时，在这里答完就退出。`sa` 和桌面版启动时最先调它。
 /// 只回答问密码的提示，别的（比如确认指纹）一律不答。
 pub fn answer_askpass() {
-    let Some(password) = std::env::var_os(ASKPASS_ENV) else {
+    let Some(path) = std::env::var_os(ASKPASS_FILE_ENV) else {
         return;
     };
     let prompt = std::env::args().nth(1).unwrap_or_default();
     if !prompt.to_lowercase().contains("password") {
         std::process::exit(1);
     }
-    println!("{}", password.to_string_lossy());
+    let Ok(password) = std::fs::read_to_string(&path) else {
+        std::process::exit(1);
+    };
+    let _ = std::fs::remove_file(&path);
+    println!("{password}");
     std::process::exit(0);
 }
 

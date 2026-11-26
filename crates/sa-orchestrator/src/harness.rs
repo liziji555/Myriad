@@ -155,6 +155,7 @@ fn plan(launch: &Launch<'_>) -> Result<(PathBuf, Vec<String>, bool), String> {
             if let Some(session) = launch.session {
                 args.extend(["--session".to_string(), session.to_string()]);
             }
+            args.push("--".into());
             args.push(launch.prompt.to_string());
             stdin = false;
         }
@@ -173,6 +174,69 @@ fn plan(launch: &Launch<'_>) -> Result<(PathBuf, Vec<String>, bool), String> {
 /// 「以后都允许」记的是哪个 Bot 用哪个 harness、哪条命令：换了 harness 或命令就要重新问。
 pub fn approval_key(bot: &str, harness: Harness, command: &str) -> String {
     format!("{bot}\n{harness:?}\n{}", command.trim())
+}
+
+/// stderr 最多在内存里保留的末尾字节数，避免失控子进程把内存撑爆。
+const MAX_STDERR_BYTES: usize = 32 * 1024;
+/// stdout 单行最多读入的字节数，超出部分丢弃到下一个换行符。
+const MAX_STDOUT_LINE_BYTES: usize = 4 * 1024 * 1024;
+
+async fn read_stderr_tail(mut err: tokio::process::ChildStderr) -> String {
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 4096];
+    while let Ok(n) = err.read(&mut chunk).await {
+        if n == 0 {
+            break;
+        }
+        buf.extend_from_slice(&chunk[..n]);
+        if buf.len() > MAX_STDERR_BYTES * 2 {
+            let drain = buf.len() - MAX_STDERR_BYTES;
+            buf.drain(..drain);
+        }
+    }
+    if buf.len() > MAX_STDERR_BYTES {
+        let drain = buf.len() - MAX_STDERR_BYTES;
+        buf.drain(..drain);
+    }
+    String::from_utf8_lossy(&buf).into_owned()
+}
+
+async fn read_bounded_line<R: tokio::io::AsyncBufRead + Unpin>(
+    reader: &mut R,
+) -> std::io::Result<Option<String>> {
+    let mut out = Vec::new();
+    let mut capped = false;
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            if out.is_empty() {
+                return Ok(None);
+            }
+            break;
+        }
+        let newline = available.iter().position(|&b| b == b'\n');
+        let take = newline.map_or(available.len(), |pos| pos + 1);
+        if !capped {
+            let remaining = MAX_STDOUT_LINE_BYTES.saturating_sub(out.len());
+            if take <= remaining {
+                out.extend_from_slice(&available[..take]);
+            } else {
+                out.extend_from_slice(&available[..remaining]);
+                capped = true;
+            }
+        }
+        reader.consume(take);
+        if newline.is_some() {
+            break;
+        }
+    }
+    if out.ends_with(b"\n") {
+        out.pop();
+        if out.ends_with(b"\r") {
+            out.pop();
+        }
+    }
+    Ok(Some(String::from_utf8_lossy(&out).into_owned()))
 }
 
 /// 跑一次 harness，直到它结束、出错或者被停下。
@@ -229,14 +293,10 @@ pub(crate) async fn run(
             let _ = stdin.shutdown().await;
         });
     }
-    let stderr = child.stderr().map(|mut err| {
-        tokio::spawn(async move {
-            let mut text = String::new();
-            let _ = err.read_to_string(&mut text).await;
-            text
-        })
-    });
-    let mut lines = BufReader::new(child.stdout().expect("上面接了管道")).lines();
+    let stderr = child
+        .stderr()
+        .map(|err| tokio::spawn(read_stderr_tail(err)));
+    let mut reader = BufReader::new(child.stdout().expect("上面接了管道"));
     let mut text = String::new();
     let mut open: HashMap<String, ()> = HashMap::new();
     let mut failure: Option<String> = None;
@@ -254,11 +314,11 @@ pub(crate) async fn run(
             }
             line = async {
                 if draining {
-                    tokio::time::timeout(DRAIN, lines.next_line())
+                    tokio::time::timeout(DRAIN, read_bounded_line(&mut reader))
                         .await
                         .unwrap_or(Ok(None))
                 } else {
-                    lines.next_line().await
+                    read_bounded_line(&mut reader).await
                 }
             } => line,
         };

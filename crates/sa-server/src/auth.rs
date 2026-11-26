@@ -1,8 +1,8 @@
 use crate::error::AppError;
 use crate::AppState;
 use axum::extract::{Query, Request, State};
-use axum::http::header::{AUTHORIZATION, COOKIE, HOST, LOCATION, SET_COOKIE};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::header::{AUTHORIZATION, COOKIE, HOST, LOCATION, ORIGIN, SET_COOKIE};
+use axum::http::{HeaderMap, Method, StatusCode};
 use axum::middleware::Next;
 use axum::response::{Html, IntoResponse, Response};
 use serde::Deserialize;
@@ -30,9 +30,54 @@ pub async fn require_token(
     next: Next,
 ) -> Result<Response, AppError> {
     match presented_token(request.headers()) {
-        Some(token) if tokens_match(token, &state.token) => Ok(next.run(request).await),
+        Some(token) if tokens_match(token, &state.token) => {
+            if !same_origin_mutation(&request) {
+                return Err(AppError::new(
+                    StatusCode::FORBIDDEN,
+                    "forbidden",
+                    "拒绝跨源请求",
+                ));
+            }
+            Ok(next.run(request).await)
+        }
         _ => Err(AppError::unauthorized()),
     }
+}
+
+/// 浏览器发来的会改状态的请求，只认同一个源（协议 + 主机 + 端口都对得上）。
+/// 本机别的端口上的网页和我们同站但不同源，不能借着 Cookie 替人操作。
+/// 非浏览器客户端不带 `Origin` 和 `Sec-Fetch-Site`，不受影响。
+fn same_origin_mutation(request: &Request) -> bool {
+    if matches!(
+        *request.method(),
+        Method::GET | Method::HEAD | Method::OPTIONS
+    ) {
+        return true;
+    }
+    let headers = request.headers();
+    if let Some(site) = headers
+        .get("sec-fetch-site")
+        .and_then(|value| value.to_str().ok())
+    {
+        if !matches!(site, "same-origin" | "none") {
+            return false;
+        }
+    }
+    if let Some(origin) = headers.get(ORIGIN).and_then(|value| value.to_str().ok()) {
+        let Some(host) = headers.get(HOST).and_then(|value| value.to_str().ok()) else {
+            return false;
+        };
+        let Some(origin_authority) = origin
+            .strip_prefix("http://")
+            .or_else(|| origin.strip_prefix("https://"))
+        else {
+            return false;
+        };
+        if !origin_authority.eq_ignore_ascii_case(host) {
+            return false;
+        }
+    }
+    true
 }
 
 #[derive(Deserialize)]

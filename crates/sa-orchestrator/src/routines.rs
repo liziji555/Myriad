@@ -42,6 +42,22 @@ const POLL: Duration = Duration::from_millis(50);
 /// 停下一个超时的定时任务之后，最多等这么久让它收尾。
 const STOP_GRACE: Duration = Duration::from_secs(10);
 
+/// 占住一个房间的定时任务名额；离开作用域（包括 panic）自动释放。
+struct RoomLease {
+    shared: Arc<crate::Shared>,
+    room: RoomId,
+}
+
+impl Drop for RoomLease {
+    fn drop(&mut self) {
+        self.shared
+            .routine_rooms
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.room);
+    }
+}
+
 impl Orchestrator {
     /// 启动定时器：每隔一阵看一遍，直到服务关闭。
     /// 到点的放到后台去做，不等它做完：一个做得慢的定时任务不耽误别的房间按时开始。
@@ -54,9 +70,9 @@ impl Orchestrator {
                     _ = tokio::time::sleep(every) => {}
                     _ = this.shared.shutdown.cancelled() => return,
                 }
-                for routine in this.claim_due().await {
+                for (routine, lease) in this.claim_due().await {
                     let this = this.clone();
-                    tokio::spawn(async move { this.fire(routine, false).await });
+                    tokio::spawn(async move { this.fire(routine, lease, false).await });
                 }
             }
         });
@@ -66,14 +82,16 @@ impl Orchestrator {
     /// 同一个房间里到点的不止一个时，这一遍只做一个，剩下的下一遍再做。
     pub async fn routines_tick(&self) -> Vec<Routine> {
         let claimed = self.claim_due().await;
-        let fired = claimed.into_iter().map(|routine| self.fire(routine, false));
+        let fired = claimed
+            .into_iter()
+            .map(|(routine, lease)| self.fire(routine, lease, false));
         let done = futures_util::future::join_all(fired).await;
         done.into_iter().flatten().collect()
     }
 
     /// 抢下到点的定时任务。一个房间一次只抢一个：租约是从抢到那一刻算的，
     /// 排在后面的要是先抢下来，等前面的做完时租约早就过期了。
-    async fn claim_due(&self) -> Vec<Routine> {
+    async fn claim_due(&self) -> Vec<(Routine, RoomLease)> {
         let engine = self.shared.engine.clone();
         let due = match db(move || engine.due_routines(now_ms())).await {
             Ok(due) => due,
@@ -85,17 +103,17 @@ impl Orchestrator {
         let mut claimed = vec![];
         for routine in due {
             // 房间里正在对话，或者正在做另一个定时任务：不插话，下一遍再看。
-            if self.room_busy(&routine.room_id) {
+            // 先原子占住房间再抢库里的租约，避免并发调用同时放行同一个房间。
+            let Some(lease) = self.try_reserve_room(&routine.room_id) else {
                 continue;
-            }
+            };
             match self.claim(&routine.id).await {
-                Ok(true) => {
-                    let mut rooms = self.shared.routine_rooms.lock().unwrap();
-                    rooms.insert(routine.room_id.clone());
-                    claimed.push(routine);
+                Ok(true) => claimed.push((routine, lease)),
+                Ok(false) => drop(lease),
+                Err(error) => {
+                    drop(lease);
+                    tracing::error!(routine = %routine.id, "租约没抢成：{error}");
                 }
-                Ok(false) => {}
-                Err(error) => tracing::error!(routine = %routine.id, "租约没抢成：{error}"),
             }
         }
         claimed
@@ -111,23 +129,19 @@ impl Orchestrator {
         }
         let (engine, routine_id) = (self.shared.engine.clone(), id.clone());
         let routine = db(move || engine.get_routine(&routine_id)).await?;
-        if self.room_busy(&routine.room_id) {
+        let Some(lease) = self.try_reserve_room(&routine.room_id) else {
             return Err(OrchestratorError::Conflict(
                 "房间里正在对话，等它说完再试".into(),
             ));
-        }
+        };
         if !self.claim(id).await? {
             return Err(OrchestratorError::Conflict(
                 "这个定时任务正在做，等它做完再试".into(),
             ));
         }
-        {
-            let mut rooms = self.shared.routine_rooms.lock().unwrap();
-            rooms.insert(routine.room_id.clone());
-        }
         let this = self.clone();
         let firing = routine.clone();
-        tokio::spawn(async move { this.fire(firing, true).await });
+        tokio::spawn(async move { this.fire(firing, lease, true).await });
         Ok(routine)
     }
 
@@ -138,8 +152,22 @@ impl Orchestrator {
         db(move || engine.claim_routine(&id, &owner, until)).await
     }
 
-    fn room_busy(&self, room_id: &RoomId) -> bool {
-        self.shared.routine_rooms.lock().unwrap().contains(room_id) || self.room_active(room_id)
+    fn try_reserve_room(&self, room_id: &RoomId) -> Option<RoomLease> {
+        if self.room_active(room_id) {
+            return None;
+        }
+        let mut rooms = self
+            .shared
+            .routine_rooms
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if !rooms.insert(room_id.clone()) {
+            return None;
+        }
+        Some(RoomLease {
+            shared: self.shared.clone(),
+            room: room_id.clone(),
+        })
     }
 
     /// 房间的后台任务是不是正在干活。
@@ -151,11 +179,8 @@ impl Orchestrator {
     }
 
     /// 做一次已经抢到租约的定时任务。`forced`：人点的「现在就做」，不管是不是错过太久。
-    async fn fire(&self, routine: Routine, forced: bool) -> Option<Routine> {
-        let room_id = routine.room_id.clone();
-        let done = self.fire_claimed(routine, forced).await;
-        self.shared.routine_rooms.lock().unwrap().remove(&room_id);
-        done
+    async fn fire(&self, routine: Routine, _lease: RoomLease, forced: bool) -> Option<Routine> {
+        self.fire_claimed(routine, forced).await
     }
 
     async fn fire_claimed(&self, routine: Routine, forced: bool) -> Option<Routine> {

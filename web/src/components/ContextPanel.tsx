@@ -164,6 +164,7 @@ export function ContextPanel({
         )}
         {tab === "tasks" && (
           <TasksPanel
+            key={room.id}
             room={room}
             board={board}
             members={members.filter((bot) => bot.enabled)}
@@ -175,6 +176,7 @@ export function ContextPanel({
         )}
         {tab === "routines" && (
           <RoutinesPanel
+            key={room.id}
             room={room}
             members={members.filter((bot) => bot.enabled)}
             bots={bots}
@@ -182,7 +184,7 @@ export function ContextPanel({
             actions={routineActions}
           />
         )}
-        {tab === "links" && <LinksPanel room={room} links={links} actions={linkActions} />}
+        {tab === "links" && <LinksPanel key={room.id} room={room} links={links} actions={linkActions} />}
         {tab === "models" && <ModelsPanel />}
         {tab === "extensions" && <ExtensionsPanel />}
         {tab === "usage" && <UsagePanel refreshKey={usageKey} />}
@@ -194,7 +196,7 @@ export function ContextPanel({
           />
         )}
         {tab === "files" && <p className="sa-panel-empty">还没有文件。</p>}
-        {tab === "members" && <MembersPanel room={room} members={members} bots={bots} team={team} />}
+        {tab === "members" && <MembersPanel key={room.id} room={room} members={members} bots={bots} team={team} />}
         {tab === "activity" && (
             <TaskGraph
               key={room.id}

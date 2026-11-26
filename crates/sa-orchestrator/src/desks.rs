@@ -179,6 +179,8 @@ impl Orchestrator {
             return self.close_shared_desk(room, bot, &name, dir, accept).await;
         }
         if accept {
+            // 与 accept_task 共用同一把工作目录合并锁，避免并发 git merge / apply 互相破坏。
+            let _one_at_a_time = shared.works.accepting.lock().await;
             if !std::path::Path::new(&dir.path).is_dir() {
                 return Err(OrchestratorError::Conflict(
                     "它的独立目录已经不在了，没有改动可以带回".into(),

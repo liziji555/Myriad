@@ -30,7 +30,7 @@ pub use shell::{
 pub use skills::{Skill, SkillSet, SkillTool, MAX_SKILLS};
 pub use todo::TodoTool;
 pub use web_fetch::WebFetchTool;
-pub use write::WriteTool;
+pub use write::{in_git_dir, WriteTool};
 
 use async_trait::async_trait;
 use serde::de::DeserializeOwned;
