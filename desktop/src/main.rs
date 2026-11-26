@@ -807,10 +807,10 @@ fn change_workdir(handle: &AppHandle, dir: PathBuf) {
     relaunch(handle);
 }
 
-/// 在系统的文件管理器里打开数据目录。
+/// 在系统的文件管理器里打开数据目录。只有本机页面能调，避免远程服务器页面打开本机目录。
 #[tauri::command]
 fn open_data_dir(window: WebviewWindow) -> Result<(), String> {
-    from_main(&window)?;
+    from_local(&window)?;
     show_data_dir(window.app_handle()).map_err(|error| error.to_string())
 }
 

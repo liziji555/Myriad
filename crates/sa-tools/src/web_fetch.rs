@@ -328,16 +328,26 @@ fn is_public(ip: IpAddr) -> bool {
             if let Some(v4) = v6.to_ipv4_mapped() {
                 return is_public_v4(v4);
             }
-            let first = v6.segments()[0];
+            if let Some(v4) = v6.to_ipv4() {
+                return is_public_v4(v4);
+            }
+            let seg = v6.segments();
+            let first = seg[0];
             !(v6.is_loopback()
                 || v6.is_unspecified()
                 || v6.is_multicast()
-                // fc00::/7 内网，fe80::/10 链路本地。
+                // fc00::/7 内网，fe80::/10 链路本地，fec0::/10 旧站点本地。
                 || (first & 0xfe00) == 0xfc00
                 || (first & 0xffc0) == 0xfe80
+                || (first & 0xffc0) == 0xfec0
+                // 100::/64 丢弃前缀，2001:db8::/32 文档，2002::/16 6to4（可嵌入内网 IPv4）。
+                || seg[..4] == [0x0100, 0, 0, 0]
+                || (seg[0] == 0x2001 && seg[1] == 0x0db8)
+                || first == 0x2002
+                // 64:ff9b:1::/48 本地 NAT64。
+                || seg[..3] == [0x0064, 0xff9b, 0x0001]
                 // 64:ff9b::/96 是 NAT64，里面包着一个 IPv4 地址。
-                || (v6.segments()[..6] == [0x64, 0xff9b, 0, 0, 0, 0]
-                    && !is_public_v4(embedded_v4(v6))))
+                || (seg[..6] == [0x64, 0xff9b, 0, 0, 0, 0] && !is_public_v4(embedded_v4(v6))))
         }
     }
 }
@@ -599,7 +609,14 @@ mod tests {
             "ff02::1",
             "::ffff:127.0.0.1",
             "::ffff:10.0.0.1",
+            "::127.0.0.1",
+            "::169.254.169.254",
             "64:ff9b::7f00:1",
+            "64:ff9b:1::1",
+            "fec0::1",
+            "100::1",
+            "2001:db8::1",
+            "2002:7f00:1::1",
         ] {
             assert!(!is_public(private.parse().unwrap()), "{private}");
         }

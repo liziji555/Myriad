@@ -37,6 +37,8 @@ impl Anthropic {
         let http = reqwest::Client::builder()
             .user_agent(concat!("superagent/", env!("CARGO_PKG_VERSION")))
             .connect_timeout(CONNECT_TIMEOUT)
+            // 密钥在自定义头 x-api-key 里，跨源重定向不能跟着跳，免得把密钥带给别的站点。
+            .redirect(same_origin_redirects())
             .build()
             .map_err(|e| LlmError::Network(e.to_string()))?;
         let base = base_url.trim_end_matches('/');
@@ -68,6 +70,27 @@ impl Anthropic {
     }
 }
 
+/// 只跟着同源的重定向跳：防止自定义头（`x-api-key`、`session_header`）被带到别的域名或端口。
+pub(crate) fn same_origin_redirects() -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(|attempt| {
+        if attempt.previous().len() >= 10 {
+            return attempt.error("重定向次数太多");
+        }
+        let Some(first) = attempt.previous().first() else {
+            return attempt.follow();
+        };
+        let next = attempt.url();
+        let same = first.scheme() == next.scheme()
+            && first.host_str() == next.host_str()
+            && first.port_or_known_default() == next.port_or_known_default();
+        if same {
+            attempt.follow()
+        } else {
+            attempt.error("拒绝跨源重定向")
+        }
+    })
+}
+
 #[async_trait]
 impl Provider for Anthropic {
     async fn stream(
@@ -75,10 +98,13 @@ impl Provider for Anthropic {
         request: ChatRequest,
         cancel: CancellationToken,
     ) -> Result<EventStream, LlmError> {
+        let mut key_header = reqwest::header::HeaderValue::from_str(&self.api_key)
+            .map_err(|_| LlmError::BadRequest("API Key 里有不能放进请求头的字符".into()))?;
+        key_header.set_sensitive(true);
         let mut call = self
             .http
             .post(&self.url)
-            .header("x-api-key", &self.api_key)
+            .header("x-api-key", key_header)
             .header("anthropic-version", VERSION)
             .json(&request_body(&request));
         if let (Some(header), Some(session)) = (&self.session_header, &request.session_id) {

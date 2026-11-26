@@ -179,19 +179,29 @@ export function useWorkspace(): WorkspaceView {
   const activeRoom = useRef<RoomId | null>(null);
   const chatRef = useRef(chat);
   chatRef.current = chat;
+  /** 每次 `ready`/`resync` 重置消息时递增，用来作废在途的 `openRoom`/`loadOlder`。 */
+  const resetGen = useRef(0);
+  /** 每个房间的 `openRoom` 序号，防止旧请求覆盖新请求。 */
+  const roomLoadGen = useRef<Record<RoomId, number>>({});
+  /** 每个房间队列的更新序号（SSE 或本地改动都会递增），防止旧的 `listQueue` 覆盖新队列。 */
+  const queueVersion = useRef<Record<RoomId, number>>({});
 
   useEffect(() => {
-    const source = new EventSource("/api/events");
+    let source: EventSource | null = null;
     let closed = false;
     let buffered: Event[] | null = null;
     // 每次 `ready` 换一代；旧一代的快照和重试作废。
     let generation = 0;
     let retry: ReturnType<typeof setTimeout> | undefined;
+    let reconnect: ReturnType<typeof setTimeout> | undefined;
+    let reconnectDelay = SNAPSHOT_RETRY_MS;
 
     const stop = () => {
       closed = true;
       clearTimeout(retry);
-      source.close();
+      clearTimeout(reconnect);
+      source?.close();
+      source = null;
     };
 
     const loadSnapshot = async (mine: number) => {
@@ -221,47 +231,76 @@ export function useWorkspace(): WorkspaceView {
     };
 
     const reloadMessages = () => {
+      resetGen.current += 1;
       setChat(resetChat(activeRoom.current));
       setBoard(resetBoard(activeRoom.current));
       setEpoch((n) => n + 1);
     };
 
-    source.addEventListener("ready", () => {
-      setConnected(true);
-      clearTimeout(retry);
-      buffered = [];
-      void loadSnapshot(++generation);
-      reloadMessages();
-    });
+    const connect = () => {
+      if (closed) return;
+      clearTimeout(reconnect);
+      source?.close();
+      const current = new EventSource("/api/events");
+      source = current;
 
-    source.addEventListener("resync", reloadMessages);
+      current.addEventListener("ready", () => {
+        if (closed || source !== current) return;
+        reconnectDelay = SNAPSHOT_RETRY_MS;
+        setConnected(true);
+        clearTimeout(retry);
+        buffered = [];
+        void loadSnapshot(++generation);
+        reloadMessages();
+      });
 
-    source.addEventListener("delta", (message) => {
-      const delta = JSON.parse((message as MessageEvent<string>).data) as MessageDelta;
-      setChat((current) => applyDelta(current, delta));
-    });
+      current.addEventListener("resync", () => {
+        if (closed || source !== current) return;
+        reloadMessages();
+      });
 
-    source.onmessage = (message) => {
-      const event = JSON.parse(message.data) as Event;
-      setChat((current) => applyChatEvent(current, event));
-      setBoard((current) => applyTaskEvent(current, event));
-      if (buffered) buffered.push(event);
-      else setWorkspace((current) => applyEvent(current, event));
-    };
+      current.addEventListener("delta", (message) => {
+        if (closed || source !== current) return;
+        const delta = JSON.parse((message as MessageEvent<string>).data) as MessageDelta;
+        setChat((state) => applyDelta(state, delta));
+      });
 
-    source.onerror = async () => {
-      setConnected(false);
-      // EventSource 不告诉我们失败原因，用一次普通请求区分「没有令牌」和「服务没开」。
-      try {
-        await api.listRooms();
-      } catch (error) {
-        if (!closed && error instanceof ApiRequestError && error.status === 401) {
-          setPhase("unauthorized");
-          stop();
+      current.onmessage = (message) => {
+        if (closed || source !== current) return;
+        const event = JSON.parse(message.data) as Event;
+        if (event.kind === "queue.updated" && event.room_id) {
+          queueVersion.current[event.room_id] = (queueVersion.current[event.room_id] ?? 0) + 1;
         }
-      }
+        setChat((state) => applyChatEvent(state, event));
+        setBoard((state) => applyTaskEvent(state, event));
+        if (buffered) buffered.push(event);
+        else setWorkspace((state) => applyEvent(state, event));
+      };
+
+      current.onerror = async () => {
+        if (closed || source !== current) return;
+        setConnected(false);
+        const permanentlyClosed = current.readyState === EventSource.CLOSED;
+        // EventSource 不告诉我们失败原因，用一次普通请求区分「没有令牌」和「服务没开」。
+        try {
+          await api.listRooms();
+        } catch (error) {
+          if (!closed && error instanceof ApiRequestError && error.status === 401) {
+            setPhase("unauthorized");
+            stop();
+            return;
+          }
+        }
+        // 非 200（例如反向代理 502/503）会让浏览器把 EventSource 置为 CLOSED 并永久放弃重连，这里主动重建。
+        if (!closed && source === current && permanentlyClosed) {
+          const wait = reconnectDelay;
+          reconnectDelay = Math.min(reconnectDelay * 2, 15_000);
+          reconnect = setTimeout(connect, wait);
+        }
+      };
     };
 
+    connect();
     return stop;
   }, []);
 
@@ -305,6 +344,10 @@ export function useWorkspace(): WorkspaceView {
 
   const openRoom = useCallback(async (roomId: RoomId) => {
     activeRoom.current = roomId;
+    const myReset = resetGen.current;
+    const myGen = (roomLoadGen.current[roomId] ?? 0) + 1;
+    roomLoadGen.current[roomId] = myGen;
+    const myQueueVer = queueVersion.current[roomId] ?? 0;
     // 先关注再拉：拉取期间事件流送来的消息会留下来，和拉到的那一页合并。
     setChat((current) => watchRoom(current, roomId));
     setBoard((current) => watchTasks(current, roomId));
@@ -313,7 +356,12 @@ export function useWorkspace(): WorkspaceView {
       api.listTasks(roomId),
       api.listQueue(roomId),
     ]);
-    setChat((current) => setQueue(mergePage(current, roomId, page, false), queue));
+    if (resetGen.current !== myReset || roomLoadGen.current[roomId] !== myGen) return;
+    const keepLiveQueue = (queueVersion.current[roomId] ?? 0) !== myQueueVer;
+    setChat((current) => {
+      const merged = mergePage(current, roomId, page, false);
+      return keepLiveQueue ? merged : setQueue(merged, queue);
+    });
     setBoard((current) => mergeTasks(current, roomId, tasks));
   }, []);
 
@@ -378,7 +426,10 @@ export function useWorkspace(): WorkspaceView {
   const loadOlder = useCallback(async (roomId: RoomId) => {
     const oldest = chatRef.current.rooms[roomId]?.messages[0];
     if (!oldest) return;
+    const myReset = resetGen.current;
+    const myGen = roomLoadGen.current[roomId] ?? 0;
     const page = await api.listMessages(roomId, oldest.seq);
+    if (resetGen.current !== myReset || (roomLoadGen.current[roomId] ?? 0) !== myGen) return;
     setChat((current) => mergePage(current, roomId, page, true));
   }, []);
 
@@ -391,6 +442,7 @@ export function useWorkspace(): WorkspaceView {
   // 接口返回的就是最新的整个队列，直接放进去，不用等事件流。
   const queueMessage = useCallback(async (roomId: RoomId, content: string) => {
     const queue = await api.queueMessage(roomId, content);
+    queueVersion.current[roomId] = (queueVersion.current[roomId] ?? 0) + 1;
     setChat((current) => setQueue(current, queue));
   }, []);
 

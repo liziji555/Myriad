@@ -61,7 +61,7 @@ fn check_url(name: &str, base_url: &str) -> Result<(), String> {
     let host = url.host_str().unwrap_or_default();
     let host = host.trim_start_matches('[').trim_end_matches(']');
     let local = match host.parse::<std::net::IpAddr>() {
-        Ok(std::net::IpAddr::V4(ip)) => ip.is_loopback() || ip.is_private() || ip.is_link_local(),
+        Ok(std::net::IpAddr::V4(ip)) => ip.is_loopback() || ip.is_private(),
         Ok(std::net::IpAddr::V6(ip)) => ip.is_loopback() || (ip.segments()[0] & 0xfe00) == 0xfc00,
         // 内网里按名字找的机器：没有点的短名字，或者只在内网里解析的后缀。
         Err(_) => {
@@ -836,6 +836,7 @@ strong = { provider = "old", model = "m" }
         for bad in [
             "http://api.example.com/v1",
             "http://8.8.8.8",
+            "http://169.254.169.254/v1",
             "ftp://x",
             "nope",
         ] {

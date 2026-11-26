@@ -393,6 +393,11 @@ impl Sharer {
         if tool.name() != "shell" && !tool.is_read_only(&input) {
             let path = input["path"].as_str().unwrap_or_default();
             match self.fence.resolve_for_write(path) {
+                Ok((real, true)) if sa_tools::in_git_dir(&real) && !self.commands => {
+                    return Err(format!(
+                        "路径 {path} 是 git 内部文件（里面的配置能让 git 执行命令），共享目录未开启 --commands 时不能改。"
+                    ));
+                }
                 Ok((_, true)) => {}
                 Ok((_, false)) => {
                     return Err(format!("路径 {path} 在共享目录之外，不能改。"));

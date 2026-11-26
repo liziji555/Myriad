@@ -89,7 +89,10 @@ export function MembersPanel({ room, members, bots, team }: Props) {
   const [desks, setDesks] = useState<readonly HarnessDesk[]>([]);
   const hasHarness = members.some((bot) => bot.harness !== "builtin");
   useEffect(() => {
-    if (!hasHarness) return;
+    if (!hasHarness) {
+      setDesks([]);
+      return;
+    }
     let live = true;
     api.listDesks(room.id).then(
       (found) => live && setDesks(found),

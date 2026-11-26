@@ -52,9 +52,9 @@ pub(crate) struct Works {
     halted: Mutex<HashMap<TaskId, String>>,
     /// 正在跑的任务最后一次有动静（出字、调用工具、收到用量）是什么时候。
     pulses: Mutex<HashMap<TaskId, Arc<AtomicI64>>>,
-    /// 验收一次只做一个：把改动带回工作目录不能并发。打回、继续、取消也拿这把锁，
+    /// 验收一次只做一个：把改动带回工作目录不能并发。打回、继续、取消和 harness 工位带回也拿这把锁，
     /// 这样验收从检查状态到标成完成的中间，任务不会被别的操作挪走。
-    accepting: tokio::sync::Mutex<()>,
+    pub(crate) accepting: tokio::sync::Mutex<()>,
 }
 
 /// 有任务可能要开工了：叫醒调度（没有就先启动它）。
@@ -877,6 +877,18 @@ impl Orchestrator {
                 .map_err(|reason| {
                     OrchestratorError::Conflict(format!("任务目录里的改动没能记下来：{reason}"))
                 })?;
+            workdir::back_to_branch(dir)
+                .await
+                .map_err(OrchestratorError::Conflict)?;
+            let outside = workdir::outside_changes(dir)
+                .await
+                .map_err(OrchestratorError::Conflict)?;
+            if !outside.is_empty() {
+                return Err(OrchestratorError::Conflict(format!(
+                    "任务还改了工作目录外面的文件，不能验收：{}",
+                    outside.join("、")
+                )));
+            }
             // 开了 PR 的任务，改动走 PR 合进去，不再往本地合一遍（否则 PR 合并时会和本地撞上）。
             if in_pr {
                 // PR 里只有推上去的东西。之后又改过而没推的话，验收会把那些改动留在本地分支上没人管。

@@ -100,7 +100,7 @@ pub(crate) fn write_permission(path: &str, ctx: &ToolCtx) -> Permission {
 }
 
 /// 路径里有没有一段是 `.git`。
-fn in_git_dir(real: &std::path::Path) -> bool {
+pub fn in_git_dir(real: &std::path::Path) -> bool {
     real.components()
         .any(|part| part.as_os_str().eq_ignore_ascii_case(".git"))
 }

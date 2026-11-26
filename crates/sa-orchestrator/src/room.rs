@@ -933,10 +933,11 @@ async fn turn(
                 &cancel,
             )
             .await;
-            observer.settle_steps().await;
             Ok(outcome.end)
         }
     };
+    // 内置 Bot 与 harness 共用收尾：把任何还停在 Running / Waiting 的步骤落盘收口。
+    observer.settle_steps().await;
     (*cursor, *ahead) = (inbox.rest.last_seq, std::mem::take(&mut inbox.rest.ahead));
     session.save_cursor();
 

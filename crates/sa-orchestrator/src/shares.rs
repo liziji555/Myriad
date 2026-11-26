@@ -588,10 +588,18 @@ impl Tool for Remote {
         } else if self.is_read_only(input) {
             Permission::Allow
         } else {
-            Permission::Ask(format!(
-                "会改动共享目录「{}」里的文件（在那台电脑上）",
-                self.name
-            ))
+            let path = input["path"].as_str().unwrap_or_default();
+            if sa_tools::in_git_dir(std::path::Path::new(path)) {
+                Permission::Ask(format!(
+                    "要改的是共享目录「{}」里的 git 内部文件（里面的配置能让 git 执行命令）：{}",
+                    self.name, path
+                ))
+            } else {
+                Permission::Ask(format!(
+                    "会改动共享目录「{}」里的文件（在那台电脑上）",
+                    self.name
+                ))
+            }
         }
     }
 

@@ -36,6 +36,7 @@ impl OpenAiCompat {
             // 用自己的名字，不用 HTTP 库的默认值：网关按它识别客户端。
             .user_agent(concat!("superagent/", env!("CARGO_PKG_VERSION")))
             .connect_timeout(CONNECT_TIMEOUT)
+            .redirect(crate::anthropic::same_origin_redirects())
             .build()
             .map_err(|e| LlmError::Network(e.to_string()))?;
         Ok(Self {
