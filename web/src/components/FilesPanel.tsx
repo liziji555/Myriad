@@ -1,37 +1,74 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { api } from "../api/client";
 import type { Bot, BotId, DeskDiff, HarnessDesk, Room, WorkspaceEntry, WorkspaceFile } from "../api/types";
+import { Icon } from "./Icon";
 
 interface Props {
   room: Room;
   members: readonly Bot[];
 }
 
-/** 渲染带行色标注的 Unified Diff。 */
+interface ParsedDiffLine {
+  cls: string;
+  lineNo: string;
+  text: string;
+}
+
+function parsePatch(patch: string): { lines: ParsedDiffLine[]; added: number; removed: number } {
+  const lines: ParsedDiffLine[] = [];
+  let added = 0;
+  let removed = 0;
+  let newNo = 0;
+
+  for (const raw of patch.split("\n")) {
+    if (raw.startsWith("@@")) {
+      const m = /\+(\d+)/.exec(raw);
+      if (m) newNo = Number(m[1]) - 1;
+      lines.push({ cls: "sa-diff-hunk", lineNo: "⋯", text: raw });
+    } else if (raw.startsWith("+++") || raw.startsWith("---") || raw.startsWith("diff ") || raw.startsWith("index ")) {
+      continue;
+    } else if (raw.startsWith("+")) {
+      added++;
+      newNo++;
+      lines.push({ cls: "sa-diff-add", lineNo: String(newNo), text: raw });
+    } else if (raw.startsWith("-")) {
+      removed++;
+      lines.push({ cls: "sa-diff-del", lineNo: "−", text: raw });
+    } else {
+      if (newNo > 0) newNo++;
+      lines.push({ cls: "sa-diff-ctx", lineNo: newNo > 0 ? String(newNo) : "", text: raw || " " });
+    }
+  }
+  return { lines, added, removed };
+}
+
+/** 渲染带精确行号与统计的 Unified Diff（Lancer / t3code 风格）。 */
 export function DiffView({ diff }: { diff: DeskDiff }) {
+  const parsed = useMemo(() => parsePatch(diff.patch), [diff.patch]);
+
   if (diff.binary) {
     return <p className="sa-panel-empty">二进制文件，无法文本预览。</p>;
   }
-  if (!diff.patch.trim()) {
+  if (!diff.patch.trim() || parsed.lines.length === 0) {
     return <p className="sa-panel-empty">没有可见的文本差异。</p>;
   }
   return (
-    <div className="sa-diff" role="region" aria-label={`Diff ${diff.path}`}>
-      {diff.patch.split("\n").map((line, i) => {
-        const cls = line.startsWith("@@")
-          ? "sa-diff-hunk"
-          : line.startsWith("+") && !line.startsWith("+++")
-            ? "sa-diff-add"
-            : line.startsWith("-") && !line.startsWith("---")
-              ? "sa-diff-del"
-              : "sa-diff-ctx";
-        return (
-          <div key={i} className={cls}>
-            {line || " "}
+    <div className="sa-diff-wrap">
+      <div className="sa-diff-stats">
+        <span className="sa-diff-stat-add">+{parsed.added}</span>
+        <span className="sa-diff-stat-del">−{parsed.removed}</span>
+      </div>
+      <div className="sa-diff" role="region" aria-label={`Diff ${diff.path}`}>
+        {parsed.lines.map((row, i) => (
+          <div key={i} className={`sa-diff-row ${row.cls}`}>
+            <span className="sa-diff-ln" aria-hidden="true">
+              {row.lineNo}
+            </span>
+            <span className="sa-diff-code">{row.text}</span>
           </div>
-        );
-      })}
-      {diff.truncated && <p className="sa-panel-note">差异内容超过 256 KB，已截断显示。</p>}
+        ))}
+        {diff.truncated && <p className="sa-panel-note">差异内容超过 256 KB，已截断显示。</p>}
+      </div>
     </div>
   );
 }
@@ -117,6 +154,7 @@ export function FilesPanel({ room, members }: Props) {
     <div className="sa-files-panel">
       <div className="sa-files-bar">
         <select
+          className="sa-select"
           aria-label="查看范围"
           value={scope}
           onChange={(event) => {
@@ -128,10 +166,10 @@ export function FilesPanel({ room, members }: Props) {
             if (next === "workspace") setMode("all");
           }}
         >
-          <option value="workspace">主工作目录</option>
+          <option value="workspace">主工作目录 (main)</option>
           {desks.map((desk) => (
             <option key={desk.bot_id} value={desk.bot_id}>
-              {botName(desk.bot_id)} 独立目录（{desk.changes.length} 处改动）
+              {botName(desk.bot_id)} 工位（{desk.changes.length} 改动）
             </option>
           ))}
         </select>
@@ -171,7 +209,7 @@ export function FilesPanel({ room, members }: Props) {
 
       {mode === "changes" && activeDesk ? (
         activeDesk.changes.length === 0 ? (
-          <p className="sa-panel-empty">这个独立目录里还没有改动。</p>
+          <p className="sa-panel-empty">这个独立工位里还没有改动。</p>
         ) : (
           <ul className="sa-files-list">
             {activeDesk.changes.map((change) => (
@@ -213,7 +251,9 @@ export function FilesPanel({ room, members }: Props) {
                     data-active={selectedFile?.path === entry.path || undefined}
                     onClick={() => (entry.is_dir ? setDir(entry.path) : openFile(entry.path))}
                   >
-                    <span className="sa-file-kind">{entry.is_dir ? "📁" : "📄"}</span>
+                    <span className="sa-file-kind" aria-hidden="true">
+                      <Icon name={entry.is_dir ? "file" : "read"} size={13} />
+                    </span>
                     <span className="sa-file-path">{entry.name}</span>
                   </button>
                 </li>

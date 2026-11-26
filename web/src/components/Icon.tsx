@@ -27,7 +27,9 @@ export type IconName =
   | "shield"
   | "file"
   | "graph"
-  | "server";
+  | "server"
+  | "split"
+  | "play";
 
 /** 16×16 的线条图标，颜色跟着文字走。 */
 const PATHS: Record<IconName, ReactNode> = {
@@ -168,6 +170,13 @@ const PATHS: Record<IconName, ReactNode> = {
       <path d="M5.4 4.6 10.6 7.4M5.4 11.4l5.2-2.8" />
     </>
   ),
+  split: (
+    <>
+      <rect x="2" y="2.75" width="12" height="10.5" rx="2" />
+      <path d="M8.5 2.75v10.5" />
+    </>
+  ),
+  play: <path d="M5 3.5 12.5 8 5 12.5V3.5Z" fill="currentColor" stroke="none" />,
 };
 
 export function Icon({ name, size = 16 }: { name: IconName; size?: number }) {

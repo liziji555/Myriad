@@ -8,12 +8,18 @@ import { WindowControls } from "./WindowControls";
 
 const THEME_ICON = { system: "auto", light: "sun", dark: "moon" } as const;
 
+export type MainView = "split" | "chat" | "flow";
+
 interface Props {
   room: Room | undefined;
   presence: readonly Presence[];
   connected: boolean;
   /** 等人处理的任务有几个。 */
   pendingTasks: number;
+  /** 当前主视图：同屏工作树（Lancer 风格双栏）、纯对话、或全屏流线图。 */
+  view: MainView;
+  liveLanes: number;
+  onView(view: MainView): void;
   /** 宽窗口：左栏常驻，这里只写房间名；窄窗口：点房间名开关抽屉。 */
   docked: boolean;
   roomsOpen: boolean;
@@ -30,14 +36,16 @@ interface Props {
 }
 
 /**
- * 顶上的现场栏：现在在哪个房间、每个 Bot 此刻在做什么。
- * 牌子上的话会变，点一下跳到主线上对应的地方。
+ * 顶上的现场栏：现在在哪个房间、主视图分段切换、每个 Bot 此刻在做什么（也是跨栏飞线的顶部锚点）。
  */
 export function StageBar({
   room,
   presence,
   connected,
   pendingTasks,
+  view,
+  liveLanes,
+  onView,
   docked,
   roomsOpen,
   drawerOpen,
@@ -74,24 +82,69 @@ export function StageBar({
         </button>
       )}
 
+      {room && (
+        <div className="sa-seg-group" role="tablist" aria-label="主视图模式">
+          <button
+            type="button"
+            role="tab"
+            className="sa-seg-btn"
+            aria-selected={view === "split"}
+            onClick={() => onView("split")}
+            title="左侧对话 + 右侧实时工作树与跨栏飞线"
+          >
+            <Icon name="split" size={13} />
+            <span>同屏工作树</span>
+            {liveLanes > 0 && <i className="sa-seg-live" aria-hidden="true" />}
+          </button>
+          <button
+            type="button"
+            role="tab"
+            className="sa-seg-btn"
+            aria-selected={view === "chat"}
+            onClick={() => onView("chat")}
+            title="宽屏纯对话视图"
+          >
+            <span>对话</span>
+          </button>
+          <button
+            type="button"
+            role="tab"
+            className="sa-seg-btn"
+            aria-selected={view === "flow"}
+            onClick={() => onView("flow")}
+            title="全屏多泳道协作流线图"
+          >
+            <Icon name="graph" size={13} />
+            <span>全屏流线</span>
+          </button>
+        </div>
+      )}
+
       <ul className="sa-presence" aria-label={`现场：${presenceSummary(presence)}`}>
         {presence.map((row) => {
           const jumps = Boolean(row.messageId || row.taskId);
+          const running =
+            row.state === "tool" || row.state === "writing" || row.state === "working";
           return (
             <li key={row.botId}>
               <button
                 type="button"
                 className="sa-presence-chip"
+                data-presence-bot={row.botId}
                 data-state={row.state}
                 disabled={!jumps}
                 title={jumps ? `${row.name}：${row.text}（点一下去看）` : `${row.name}：${row.text}`}
                 aria-label={`${row.name}：${row.text}`}
                 onClick={() => onPick(row)}
               >
+                {running && (
+                  <svg className="light-running-border" aria-hidden="true">
+                    <rect x="1" y="1" width="calc(100% - 2px)" height="calc(100% - 2px)" rx="999" pathLength="100" />
+                  </svg>
+                )}
                 <BotAvatar id={row.botId} name={row.name} state={row.state} />
                 <span className="sa-presence-name">{row.name}</span>
                 <span className="sa-presence-text">{row.text}</span>
-                {/* 窗口窄的时候只剩头像；有事等人时多留两个字。 */}
                 {(row.state === "approval" || row.state === "asking") && (
                   <span className="sa-presence-short" aria-hidden="true">
                     等你
@@ -124,7 +177,7 @@ export function StageBar({
           >
             <Icon name="tasks" />
             <span>任务</span>
-            {pendingTasks > 0 && <span className="sa-count">{pendingTasks} 个等你</span>}
+            {pendingTasks > 0 && <span className="sa-count">{pendingTasks} 待处理</span>}
           </button>
         )}
         <button
@@ -140,9 +193,9 @@ export function StageBar({
           <button
             type="button"
             className="sa-icon-button"
+            aria-label={drawerOpen ? "收起右侧工作台面板" : "打开右侧工作台面板"}
             aria-pressed={drawerOpen}
-            title={drawerOpen ? "收起面板" : "打开面板：任务、成员、用量、审计…"}
-            aria-label={drawerOpen ? "收起面板" : "打开面板"}
+            title={drawerOpen ? "收起右侧工作台面板" : "打开右侧工作台面板"}
             onClick={onToggleDrawer}
           >
             <Icon name="panel" />
