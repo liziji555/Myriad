@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { clampPanelWidth, panelWidthAt, PANEL_MAX, PANEL_MIN, PANEL_STEP } from "../api/layout";
 import type { TaskBoard } from "../api/tasks";
 import type { LinkActions, RoutineActions, TaskActions, Team } from "../api/useWorkspace";
-import type { Bot, BotId, Link, Room, Routine, TaskId } from "../api/types";
+import type { Bot, BotId, CheckpointInfo, Link, RewindReport, Room, Routine, TaskId } from "../api/types";
 import type { ExecCard } from "../api/execution";
 import { AuditPanel } from "./AuditPanel";
 import { ExecutionPanel } from "./ExecutionPanel";
@@ -73,6 +73,10 @@ interface Props {
   onJump(card: ExecCard): void;
   /** 只停一个 Bot。 */
   onStopBot(botId: BotId): void;
+  /** 房间内内置 Bot 的轮次级文件检查点。 */
+  checkpoints?: readonly CheckpointInfo[];
+  onRewindCheckpoint?(checkpointId: string, force: boolean): Promise<RewindReport>;
+  onJumpMessage?(messageId: string): void;
 }
 
 export function ContextPanel({
@@ -97,6 +101,9 @@ export function ContextPanel({
   execution,
   onJump,
   onStopBot,
+  checkpoints,
+  onRewindCheckpoint,
+  onJumpMessage,
 }: Props) {
   const [menuOpen, setMenuOpen] = useState(false);
   const pickerRef = useRef<HTMLDivElement>(null);
@@ -265,7 +272,16 @@ export function ContextPanel({
             task={(board.rooms[room.id] ?? []).find((task) => task.id === focusTask) ?? null}
           />
         )}
-        {tab === "files" && <FilesPanel key={room.id} room={room} members={members} />}
+        {tab === "files" && (
+          <FilesPanel
+            key={room.id}
+            room={room}
+            members={members}
+            checkpoints={checkpoints}
+            onRewindCheckpoint={onRewindCheckpoint}
+            onJumpMessage={onJumpMessage}
+          />
+        )}
         {tab === "members" && <MembersPanel key={room.id} room={room} members={members} bots={bots} team={team} />}
         {tab === "activity" && (
           <TaskGraph

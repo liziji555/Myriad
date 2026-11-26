@@ -29,7 +29,8 @@ export type IconName =
   | "graph"
   | "server"
   | "split"
-  | "play";
+  | "play"
+  | "undo";
 
 /** 16×16 的线条图标，颜色跟着文字走。 */
 const PATHS: Record<IconName, ReactNode> = {
@@ -177,6 +178,12 @@ const PATHS: Record<IconName, ReactNode> = {
     </>
   ),
   play: <path d="M5 3.5 12.5 8 5 12.5V3.5Z" fill="currentColor" stroke="none" />,
+  undo: (
+    <>
+      <path d="M4.25 6.25H2.5V4.5" />
+      <path d="M2.75 6.25A5.5 5.5 0 1 1 3.75 11.5" />
+    </>
+  ),
 };
 
 export function Icon({ name, size = 16 }: { name: IconName; size?: number }) {

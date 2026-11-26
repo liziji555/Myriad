@@ -119,6 +119,7 @@ export function ComposerControls({ room, host, busy, onPermission, onTier, onMan
           type="button"
           className="sa-chip"
           data-warn={room.permission === "full"}
+          data-plan={room.permission === "plan"}
           aria-haspopup="menu"
           aria-expanded={open === "permission"}
           title="这个房间里的 Bot 做事前问不问你"

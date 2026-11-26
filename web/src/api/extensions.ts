@@ -1,5 +1,8 @@
 import type { McpServerInfo, SkillInfo } from "./types";
 
+/** 扩展热重载完成后广播，让 App 同步刷新 `/` 技能命令列表。 */
+export const EXTENSIONS_CHANGED = "sa:extensions-changed";
+
 const STATES: Record<McpServerInfo["state"], string> = {
   connecting: "正在连接",
   ready: "已连上",

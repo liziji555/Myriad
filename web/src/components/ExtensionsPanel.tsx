@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../api/client";
-import { mcpDot, mcpStatus, skillAudience } from "../api/extensions";
+import { EXTENSIONS_CHANGED, mcpDot, mcpStatus, skillAudience } from "../api/extensions";
 import type { Extensions } from "../api/types";
 
-/** 右栏的「扩展」页：Bot 有哪些技能，接了哪些外部 MCP 服务。只看不改：两样都是在文件里配的。 */
+/** 右栏的「扩展」页：Bot 有哪些技能，接了哪些外部 MCP 服务。支持热重载 config.toml 中的 MCP 与钩子。 */
 export function ExtensionsPanel() {
   const [found, setFound] = useState<Extensions | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {
@@ -22,9 +23,18 @@ export function ExtensionsPanel() {
 
   const reload = useCallback(async () => {
     setBusy(true);
+    setNotice(null);
     try {
-      setFound(await api.reloadExtensions());
+      const next = await api.reloadExtensions();
+      setFound(next);
       setError(null);
+      const time = new Date().toLocaleTimeString("zh-CN", {
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false,
+      });
+      setNotice(`已热重载配置 · ${time}`);
+      window.dispatchEvent(new Event(EXTENSIONS_CHANGED));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     }
@@ -33,6 +43,9 @@ export function ExtensionsPanel() {
 
   useEffect(() => {
     void load();
+    const onChanged = () => void load();
+    window.addEventListener(EXTENSIONS_CHANGED, onChanged);
+    return () => window.removeEventListener(EXTENSIONS_CHANGED, onChanged);
   }, [load]);
 
   // 有服务正在连的时候，过一会儿自己再看一眼。
@@ -111,9 +124,16 @@ export function ExtensionsPanel() {
           </ul>
         )}
       </section>
-      <button type="button" className="sa-button sa-button-quiet" disabled={busy} onClick={() => void reload()}>
-        {busy ? "正在热重载…" : "刷新 / 热重载"}
-      </button>
+      <div className="sa-ext-actions">
+        <button type="button" className="sa-button sa-button-quiet" disabled={busy} onClick={() => void reload()}>
+          {busy ? "正在热重载…" : "刷新 / 热重载"}
+        </button>
+        {notice && (
+          <span className="sa-row-meta" role="status">
+            {notice}
+          </span>
+        )}
+      </div>
     </div>
   );
 }
