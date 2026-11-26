@@ -64,6 +64,7 @@ describe("contextMeter", () => {
   });
 
   it("说明里写大概的数", () => {
-    expect(contextMeter({ used: 812, compact_at: 95_000, window: 128_000 }).note).toContain("约 812 token，到 95k");
+    expect(contextMeter({ used: 812, compact_at: 95_000, window: 128_000 }).note).toContain("约 812 token");
+    expect(contextMeter({ used: 812, compact_at: 95_000, window: 128_000 }).note).toContain("到 95k");
   });
 });

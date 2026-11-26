@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { api } from "../api/client";
 import {
   KINDS,
+  MODELS_CHANGED,
   TIERS,
   draftOf,
   keepsKey,
@@ -66,6 +67,7 @@ export function ModelsPanel() {
     try {
       setDraft(draftOf(await api.saveModels(saveRequest(draft))));
       setSaved(true);
+      window.dispatchEvent(new Event(MODELS_CHANGED));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     }

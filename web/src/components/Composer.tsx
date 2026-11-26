@@ -98,10 +98,17 @@ export function Composer({
   const send = async (now = false) => {
     if (!canSend) return;
     setSending(true);
+    const sent = text;
     // 发出去之后才清空：失败的话写好的内容还在。
+    // 发的时候人可能已经接着写下一句了（连得慢时）：内容变了就不清，免得把新写的抹掉。
     await run(
-      () => (queueing && !now ? onQueue(text) : onSend(text)),
-      () => setText(""),
+      () => (queueing && !now ? onQueue(sent) : onSend(sent)),
+      () =>
+        setDraft((current) => {
+          if (current !== sent) return current;
+          saveDraft(roomId, "");
+          return "";
+        }),
     );
     setSending(false);
   };
@@ -168,8 +175,11 @@ export function Composer({
   }, [command?.id]);
 
   const runCommand = (picked: SlashCommand) => {
-    // 从 `/` 选的：那几个字是命令，不留。从「+」选的：草稿是人写好的话，留着。
-    const next = draftAfter(picked, adding ? text : "");
+    // 从 `/` 选的：那几个字是命令，不留。从「+」选的：草稿是人写好的话，留着；
+    // 但开头正打着的 `/命令` 不是要发的话，不带进去。
+    const query = slashQuery(text);
+    const draft = !adding ? "" : query === null ? text : text.slice(1 + query.length);
+    const next = draftAfter(picked, draft);
     setText(next);
     setAdding(false);
     setPicked(0);
@@ -264,7 +274,14 @@ export function Composer({
           </ul>
         )}
         {command && (
-          <div ref={commandMenu} className="sa-mention-menu" role="listbox" aria-label="命令">
+          <div
+            ref={commandMenu}
+            className="sa-mention-menu"
+            role="listbox"
+            aria-label="命令"
+            // 点到菜单里的空白、分组标题、拖滚动条时输入框也不能失去焦点：失去焦点会把「+」的菜单关掉。
+            onMouseDown={(event) => event.preventDefault()}
+          >
             {groupCommands(commandOptions).map(({ group, items }) => (
               <div key={group} role="group" aria-label={group}>
                 <p className="sa-menu-group" aria-hidden="true">

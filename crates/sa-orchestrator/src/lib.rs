@@ -123,6 +123,9 @@ pub enum OrchestratorError {
     /// 现在做不了（比如任务的改动带不回工作目录）。文字是给人看的原因。
     #[error("{0}")]
     Conflict(String),
+    /// 服务这边出了错（读不了文件之类）。文字只进服务端日志，不给页面看：里面可能有本机路径。
+    #[error("{0}")]
+    Internal(String),
 }
 
 pub struct Orchestrator {
@@ -160,6 +163,8 @@ pub(crate) struct Shared {
     pub started_at: i64,
     /// 别的电脑用 `sa share` 共享过来的目录。
     pub shares: Arc<shares::Shares>,
+    /// 「上下文用了多少」要用的：会话记录读过的大小，和每个会话上一轮带的系统提示词、工具说明有多大。
+    pub context: desks::ContextCache,
 }
 
 struct RoomHandle {
@@ -260,6 +265,7 @@ impl Orchestrator {
                 routine_rooms: Mutex::default(),
                 started_at: sa_engine::now_ms(),
                 shares: Arc::default(),
+                context: desks::ContextCache::default(),
             }),
             rooms: Mutex::new(HashMap::new()),
         }

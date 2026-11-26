@@ -72,6 +72,7 @@ impl From<OrchestratorError> for AppError {
             OrchestratorError::Conflict(message) => {
                 Self::new(StatusCode::CONFLICT, "conflict", message)
             }
+            OrchestratorError::Internal(message) => Self::internal(message),
         }
     }
 }

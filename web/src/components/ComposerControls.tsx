@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { api } from "../api/client";
-import { contextMeter, TIERS } from "../api/models";
+import { contextMeter, MODELS_CHANGED, TIERS } from "../api/models";
 import type { Bot, ContextUsage, ModelSettings, ModelTier, PermissionMode, Room } from "../api/types";
 import { Icon } from "./Icon";
 
@@ -34,9 +34,18 @@ export function ComposerControls({ room, host, busy, onPermission, onTier, onMan
   const [error, setError] = useState<string | null>(null);
   const root = useRef<HTMLDivElement>(null);
 
-  // 打开菜单时重新读：模型页里刚保存的马上看得到。
+  // 一开始读一次；打开模型菜单、模型页保存之后再读：刚保存的马上看得到。
+  // 只开关权限菜单不用读；菜单关上也不用读。
+  const [modelsAsked, setModelsAsked] = useState(0);
   useEffect(() => {
-    if (open === "permission") return;
+    const again = () => setModelsAsked((n) => n + 1);
+    window.addEventListener(MODELS_CHANGED, again);
+    return () => window.removeEventListener(MODELS_CHANGED, again);
+  }, []);
+  useEffect(() => {
+    if (open === "model") setModelsAsked((n) => n + 1);
+  }, [open]);
+  useEffect(() => {
     let stale = false;
     api
       .models()
@@ -45,9 +54,11 @@ export function ComposerControls({ room, host, busy, onPermission, onTier, onMan
     return () => {
       stale = true;
     };
-  }, [open]);
+  }, [modelsAsked]);
 
   const [context, setContext] = useState<ContextUsage | null>(null);
+  // 跟着设置的版本走，不跟着每次读回来的新对象走：同一份设置读几遍不用重新算。
+  const revision = models?.revision;
   useEffect(() => {
     let stale = false;
     api
@@ -57,7 +68,7 @@ export function ComposerControls({ room, host, busy, onPermission, onTier, onMan
     return () => {
       stale = true;
     };
-  }, [room.id, host?.id, host?.tier, host?.harness, busy, models]);
+  }, [room.id, host?.id, host?.tier, host?.harness, host?.enabled, busy, revision]);
   const meter = context && contextMeter(context);
 
   useEffect(() => {

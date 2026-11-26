@@ -61,18 +61,28 @@ function Shell() {
   const [invokeDesktop] = useState(() => desktopInvoke());
   const [desktop, setDesktop] = useState<DesktopState | null>(null);
   const [connectOpen, setConnectOpen] = useState(false);
-  // 输入框的菜单里列的技能。技能是磁盘上的文件，随时会多会少：换房间、回到窗口时重新读。
+  // 输入框的菜单里列的技能。技能是磁盘上的文件，随时会多会少：连上之后读一次，回到窗口时再读。
+  // 没连上（没登录、还在加载）时不读：读了也是 401。技能不分房间，换房间不用重读。
   const [skills, setSkills] = useState<SkillInfo[]>([]);
+  const ready = workspace.phase === "ready";
   useEffect(() => {
-    const load = () =>
+    if (!ready) return;
+    let stale = false;
+    let asked = 0;
+    const load = () => {
+      const mine = ++asked;
       void api.extensions().then(
-        (found) => setSkills(found.skills),
+        (found) => !stale && mine === asked && setSkills(found.skills),
         () => {},
       );
+    };
     load();
     window.addEventListener("focus", load);
-    return () => window.removeEventListener("focus", load);
-  }, [selected]);
+    return () => {
+      stale = true;
+      window.removeEventListener("focus", load);
+    };
+  }, [ready]);
   useEffect(() => {
     if (!invokeDesktop) return;
     const refresh = () =>

@@ -917,6 +917,11 @@ async fn turn(
                 });
             }
             let provider = crate::budget::guard(shared, model.provider.clone(), None);
+            // 页面上「上下文 N%」要和内核判断压缩时一样，把每次都要带的这部分也算上。
+            shared.context.note_fixed(
+                &session_id,
+                sa_kernel::fixed_context(&config.system_prompt, &tools),
+            );
             let outcome = run_turn(
                 transcript,
                 provider.as_ref(),
