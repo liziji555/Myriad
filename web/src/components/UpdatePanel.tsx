@@ -94,9 +94,17 @@ export function UpdatePanel({
   const updateDesktop = async () => {
     if (!invokeDesktop) return;
     setError(null);
-    setNotice("正在下载并校验桌面安装包，完成后会自动打开安装向导…");
-    const result = (await invokeDesktop("install_desktop_update")) as { version: string; path: string };
-    setNotice(`桌面版 v${result.version} 安装包已校验并启动（${result.path}）。`);
+    setNotice("正在下载并校验桌面更新包，完成后将自动就地更新并重启…");
+    const result = (await invokeDesktop("install_desktop_update")) as {
+      version: string;
+      path: string;
+      silent?: boolean;
+    };
+    setNotice(
+      result.silent
+        ? `桌面版 v${result.version} 已校验完成，正在自动更新并重启 Myriad…`
+        : `桌面版 v${result.version} 安装包已校验并启动（${result.path}）。`,
+    );
   };
 
   const runAction = async (kind: "server" | "desktop" | "both") => {
@@ -110,7 +118,7 @@ export function UpdatePanel({
       } else {
         const res = await updateServer();
         if (desktopUpdate?.can_download) {
-          setNotice(`${res.message} 正在下载桌面版安装包…`);
+          setNotice(`${res.message} 正在下载桌面版更新包…`);
           await updateDesktop();
         }
       }
@@ -124,115 +132,155 @@ export function UpdatePanel({
 
   const remoteServer = desktop?.current.mode === "server" ? desktop.current.server : null;
   const isRemote = remoteServer !== null;
-  const serverLabel = remoteServer ? `远端服务端（${remoteServer}）` : "服务端（sa）";
-  const canSyncBoth = Boolean(serverUpdate?.can_self_update && desktopUpdate?.can_download);
+  const isDesktopLocal = Boolean(invokeDesktop && !isRemote);
+
+  // 本机桌面模式下内置服务随桌面版一起打包，不需要单独更新服务端。
+  const showServerUpdate = !isDesktopLocal && Boolean(serverUpdate?.can_self_update);
+  const showDesktopUpdate = Boolean(invokeDesktop && desktopUpdate?.can_download);
+  const canSyncBoth = showServerUpdate && showDesktopUpdate;
   const releaseUrl = serverUpdate?.release_url ?? desktopUpdate?.release_url ?? null;
+
+  const desktopCurrent = desktopUpdate?.current ?? desktop?.version ?? serverVersion ?? "—";
+  const serverCurrent = serverUpdate?.current ?? serverVersion ?? "—";
 
   return (
     <div
       className="sa-palette-backdrop"
       onMouseDown={(event) => event.target === event.currentTarget && !busy && onClose()}
     >
-      <div className="sa-connect-panel" role="dialog" aria-modal="true" aria-label="检查更新">
+      <div className="sa-connect-panel sa-update-panel" role="dialog" aria-modal="true" aria-label="检查更新">
         <header className="sa-connect-head">
-          <h2>检查更新</h2>
+          <h2>软件更新</h2>
           <button type="button" className="sa-link" disabled={busy !== null} onClick={onClose} aria-label="关闭">
             关闭
           </button>
         </header>
 
-        <section className="sa-form">
-          <div className="sa-field">
-            {serverLabel}
-            <code className="sa-connect-path">
-              当前 v{serverUpdate?.current ?? serverVersion ?? "—"}
-              {serverUpdate?.latest
-                ? serverUpdate.available
-                  ? ` → 最新 v${serverUpdate.latest}`
-                  : `（已是最新 v${serverUpdate.latest}）`
-                : serverUpdate
-                  ? "（GitHub 尚未发布 Release）"
-                  : checking
-                    ? " · 正在检查…"
-                    : ""}
-            </code>
+        <section className="sa-update-body">
+          <div className="sa-update-cards">
+            {!isDesktopLocal && (
+              <div className="sa-update-card">
+                <div className="sa-update-card-head">
+                  <span className="sa-update-card-title">
+                    {remoteServer ? `远端服务端（${remoteServer}）` : "服务端（sa）"}
+                  </span>
+                  <StatusPill
+                    checking={checking}
+                    available={Boolean(serverUpdate?.available)}
+                    hasLatest={Boolean(serverUpdate?.latest)}
+                  />
+                </div>
+                <div className="sa-update-card-ver">
+                  <span>当前 v{serverCurrent}</span>
+                  {serverUpdate?.latest && serverUpdate.available && (
+                    <>
+                      <span className="sa-update-arrow">→</span>
+                      <strong>最新 v{serverUpdate.latest}</strong>
+                    </>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {invokeDesktop && (
+              <div className="sa-update-card">
+                <div className="sa-update-card-head">
+                  <span className="sa-update-card-title">
+                    {isDesktopLocal ? "Myriad 桌面版（含内置本机服务）" : "本机桌面版"}
+                  </span>
+                  <StatusPill
+                    checking={checking}
+                    available={Boolean(desktopUpdate?.available)}
+                    hasLatest={Boolean(desktopUpdate?.latest)}
+                  />
+                </div>
+                <div className="sa-update-card-ver">
+                  <span>当前 v{desktopCurrent}</span>
+                  {desktopUpdate?.latest && desktopUpdate.available && (
+                    <>
+                      <span className="sa-update-arrow">→</span>
+                      <strong>最新 v{desktopUpdate.latest}</strong>
+                    </>
+                  )}
+                </div>
+              </div>
+            )}
           </div>
 
-          {invokeDesktop && (
-            <div className="sa-field">
-              本机桌面版
-              <code className="sa-connect-path">
-                当前 v{desktopUpdate?.current ?? desktop?.version ?? "—"}
-                {desktopUpdate?.latest
-                  ? desktopUpdate.available
-                    ? ` → 最新 v${desktopUpdate.latest}`
-                    : `（已是最新 v${desktopUpdate.latest}）`
-                  : desktopUpdate
-                    ? "（GitHub 尚未发布 Release）"
-                    : checking
-                      ? " · 正在检查…"
-                      : ""}
-              </code>
-            </div>
-          )}
-
           {serverUpdate?.notes && (
-            <div className="sa-field">
-              更新说明
+            <div className="sa-update-notes-wrap">
+              <div className="sa-update-section-label">更新说明</div>
               <pre className="sa-update-notes">{serverUpdate.notes}</pre>
             </div>
           )}
 
-          <div className="sa-connect-actions">
-            {canSyncBoth && (
-              <button
-                type="button"
-                className="sa-button"
-                disabled={busy !== null || checking}
-                onClick={() => void runAction("both")}
-              >
-                {busy === "both" ? "正在同步更新…" : "一键同步更新（服务端 + 桌面版）"}
-              </button>
-            )}
-            {serverUpdate?.can_self_update && (
-              <button
-                type="button"
-                className={canSyncBoth ? "sa-button sa-button-quiet" : "sa-button"}
-                disabled={busy !== null || checking}
-                onClick={() => void runAction("server")}
-              >
-                {busy === "server" ? "正在更新服务端…" : "更新服务端"}
-              </button>
-            )}
-            {invokeDesktop && desktopUpdate?.can_download && (
-              <button
-                type="button"
-                className={canSyncBoth ? "sa-button sa-button-quiet" : "sa-button"}
-                disabled={busy !== null || checking}
-                onClick={() => void runAction("desktop")}
-              >
-                {busy === "desktop" ? "正在下载桌面版…" : "下载并安装桌面新版"}
-              </button>
-            )}
+          {(canSyncBoth || showServerUpdate || showDesktopUpdate) && (
+            <div className="sa-update-primary">
+              {canSyncBoth && (
+                <button
+                  type="button"
+                  className="sa-button sa-update-btn"
+                  disabled={busy !== null || checking}
+                  onClick={() => void runAction("both")}
+                >
+                  {busy === "both" ? "正在同步更新…" : "同步更新服务端与桌面版"}
+                </button>
+              )}
+              {showServerUpdate && (
+                <button
+                  type="button"
+                  className={canSyncBoth ? "sa-button sa-button-quiet sa-update-btn" : "sa-button sa-update-btn"}
+                  disabled={busy !== null || checking}
+                  onClick={() => void runAction("server")}
+                >
+                  {busy === "server"
+                    ? "正在更新服务端…"
+                    : canSyncBoth
+                      ? "仅更新服务端"
+                      : "更新服务端"}
+                </button>
+              )}
+              {showDesktopUpdate && (
+                <button
+                  type="button"
+                  className={canSyncBoth ? "sa-button sa-button-quiet sa-update-btn" : "sa-button sa-update-btn"}
+                  disabled={busy !== null || checking}
+                  onClick={() => void runAction("desktop")}
+                >
+                  {busy === "desktop"
+                    ? "正在下载并更新…"
+                    : canSyncBoth
+                      ? "仅更新桌面版"
+                      : desktopUpdate?.latest
+                        ? `立即更新到 v${desktopUpdate.latest}`
+                        : "立即更新桌面版"}
+                </button>
+              )}
+            </div>
+          )}
+
+          <div className="sa-update-secondary">
             <button
               type="button"
-              className="sa-button sa-button-quiet"
+              className="sa-button sa-button-quiet sa-update-btn"
               disabled={busy !== null || checking}
               onClick={() => void checkAll()}
             >
-              {checking ? "检查中…" : "重新检查"}
+              {checking ? "正在检查…" : "重新检查"}
             </button>
             {releaseUrl && /^https?:\/\//i.test(releaseUrl) && (
-              <a className="sa-link" href={releaseUrl} target="_blank" rel="noreferrer">
-                打开发布页
+              <a className="sa-link sa-update-link" href={releaseUrl} target="_blank" rel="noreferrer">
+                查看 GitHub 发布页 ↗
               </a>
             )}
           </div>
 
           <p className="sa-links-hint">
             {isRemote
-              ? "远程连接时界面由服务器提供：更新服务端并自动重启后，页面重连即可用上新版界面；桌面外壳有更新时可一键下载校验并启动安装向导。"
-              : "更新包均会核对 GitHub Release 的 SHA256SUMS.txt；服务端以 systemd 常驻运行时会自动重启生效。"}
+              ? "当前已连接远端服务器：点击同步更新会自动更新服务器并重启服务，同时就地更新本机桌面端。"
+              : isDesktopLocal
+                ? "当前处于本机模式：桌面版已内置本机服务，直接更新桌面版即可。如需更新远端 VPS，请先点击左下角切换到服务器。"
+                : "更新包均会核对 GitHub Release 的 SHA256SUMS.txt；服务端以 systemd 常驻运行时会自动重启生效。"}
           </p>
         </section>
 
@@ -249,4 +297,25 @@ export function UpdatePanel({
       </div>
     </div>
   );
+}
+
+function StatusPill({
+  checking,
+  available,
+  hasLatest,
+}: {
+  checking: boolean;
+  available: boolean;
+  hasLatest: boolean;
+}) {
+  if (checking) {
+    return <span className="sa-update-pill">检查中…</span>;
+  }
+  if (available) {
+    return <span className="sa-update-pill" data-state="available">可更新</span>;
+  }
+  if (hasLatest) {
+    return <span className="sa-update-pill" data-state="latest">已是最新</span>;
+  }
+  return <span className="sa-update-pill">未发现发布</span>;
 }

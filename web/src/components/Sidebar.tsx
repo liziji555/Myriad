@@ -246,33 +246,43 @@ export function Sidebar({
       </div>
 
       <footer className="sa-sidebar-foot" role="status" title={connected ? "已连接" : "连接中断，正在重连…"}>
-        <span className="sa-dot" data-state={connected ? "idle" : "warn"} aria-hidden="true" />
-        <span className="sa-nav-label">{connected ? "已连接" : "连接中断，正在重连…"}</span>
+        <div className="sa-sidebar-foot-row">
+          <span className="sa-sidebar-status">
+            <span className="sa-dot" data-state={connected ? "idle" : "warn"} aria-hidden="true" />
+            <span className="sa-nav-label">{connected ? "已连接" : "重连中…"}</span>
+          </span>
+          {desktop && (
+            <button
+              type="button"
+              className="sa-connect"
+              disabled={desktop.pinned === "workdir"}
+              data-state={desktop.connecting ? "connecting" : desktop.failed ? "failed" : undefined}
+              title={desktop.pinned === "workdir" ? "启动时用 --workdir 定死了用本机，换不了" : "连接本机或服务器"}
+              aria-label={`连接：${connectionLabel(desktop)}`}
+              onClick={onConnect}
+            >
+              <Icon name={desktop.current.mode === "server" ? "server" : "plug"} />
+              <span className="sa-nav-label sa-connect-label">{connectionLabel(desktop)}</span>
+            </button>
+          )}
+        </div>
         {version && (
-          <button
-            type="button"
-            className="sa-version-btn sa-nav-label"
-            data-update={updateAvailable || undefined}
-            title={updateAvailable ? "发现新版本，点击更新" : "点击检查更新"}
-            onClick={onUpdate}
-          >
-            v{version}
-            {updateAvailable && <span className="sa-update-badge">有更新</span>}
-          </button>
-        )}
-        {desktop && (
-          <button
-            type="button"
-            className="sa-connect"
-            disabled={desktop.pinned === "workdir"}
-            data-state={desktop.connecting ? "connecting" : desktop.failed ? "failed" : undefined}
-            title={desktop.pinned === "workdir" ? "启动时用 --workdir 定死了用本机，换不了" : "连接本机或服务器"}
-            aria-label={`连接：${connectionLabel(desktop)}`}
-            onClick={onConnect}
-          >
-            <Icon name={desktop.current.mode === "server" ? "server" : "plug"} />
-            <span className="sa-nav-label sa-connect-label">{connectionLabel(desktop)}</span>
-          </button>
+          <div className="sa-sidebar-foot-meta sa-nav-label">
+            <button
+              type="button"
+              className="sa-version-btn"
+              data-update={updateAvailable || undefined}
+              title={updateAvailable ? "发现新版本，点击查看并更新" : "点击检查更新"}
+              onClick={onUpdate}
+            >
+              <span className="sa-version-text">v{version}</span>
+              {updateAvailable ? (
+                <span className="sa-update-badge">有新版本</span>
+              ) : (
+                <span className="sa-version-check">检查更新</span>
+              )}
+            </button>
+          </div>
         )}
       </footer>
     </nav>

@@ -818,21 +818,43 @@ async fn check_desktop_update(window: WebviewWindow) -> Result<sa_cli::DesktopUp
     sa_cli::check_desktop_update(env!("CARGO_PKG_VERSION")).await
 }
 
-/// 下载并校验最新的桌面版安装包（.exe / .deb），然后交给系统打开安装向导。
+/// 下载并校验最新的桌面版安装包（.exe / .deb），在 Windows 上以静默/被动模式就地更新并自动重启。
 #[tauri::command]
 async fn install_desktop_update(window: WebviewWindow) -> Result<Value, String> {
     from_main(&window)?;
     let (version, path) = sa_cli::download_desktop_installer(env!("CARGO_PKG_VERSION")).await?;
     let shown = path.to_string_lossy().into_owned();
-    window
-        .app_handle()
-        .opener()
-        .open_path(shown.clone(), None::<&str>)
-        .map_err(|error| format!("已下载到 {shown}，但打开安装程序失败：{error}"))?;
-    Ok(json!({
-        "version": version,
-        "path": shown,
-    }))
+    #[cfg(target_os = "windows")]
+    {
+        // 使用 Tauri NSIS 的被动就地更新参数：/P 仅显示进度条（不弹“安装前卸载/请勿卸载”向导），/R 更新后自动重启。
+        std::process::Command::new(&path)
+            .args(["/P", "/R"])
+            .spawn()
+            .map_err(|error| format!("已下载到 {shown}，但启动更新程序失败：{error}"))?;
+        let handle = window.app_handle().clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(600));
+            handle.exit(0);
+        });
+        Ok(json!({
+            "version": version,
+            "path": shown,
+            "silent": true,
+        }))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        window
+            .app_handle()
+            .opener()
+            .open_path(shown.clone(), None::<&str>)
+            .map_err(|error| format!("已下载到 {shown}，但打开安装程序失败：{error}"))?;
+        Ok(json!({
+            "version": version,
+            "path": shown,
+            "silent": false,
+        }))
+    }
 }
 
 /// 在系统的文件管理器里打开数据目录。只有本机页面能调，避免远程服务器页面打开本机目录。
