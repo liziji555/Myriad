@@ -132,8 +132,8 @@ pub(crate) async fn run(shared: Arc<Shared>, room_id: RoomId, link: Arc<RoomLink
     let mut sessions = Sessions::new();
     // 正在说话的那几个 Bot，每个一条道。
     let mut lanes = Lanes::new();
-    // 正在说话的 Bot 该看到的人类消息（最新一条的 `seq`）：说完时还没看到，就让它再说一轮。
-    let mut owed: HashMap<BotId, i64> = HashMap::new();
+    // 正在说话的 Bot 该看到的人类消息（全部待看 `seq`）：说完时只要有任何一条还没看到（例如被运行中插话跳过的外部消息），就让它再说一轮。
+    let mut owed: HashMap<BotId, BTreeSet<i64>> = HashMap::new();
     loop {
         tokio::select! {
             _ = link.wake.notified() => {}
@@ -196,7 +196,7 @@ async fn finished(
     room_id: &RoomId,
     link: &RoomLink,
     sessions: &Sessions,
-    owed: &mut HashMap<BotId, i64>,
+    owed: &mut HashMap<BotId, BTreeSet<i64>>,
     done: Result<LaneEnd, tokio::task::JoinError>,
 ) {
     let (bot_id, reply, for_lead, result) = match done {
@@ -223,12 +223,16 @@ async fn finished(
             tracing::info!(room = %room_id, "这一轮停下了：{error}");
             // 人点了停止：它说话期间收到、还没看到的话也不再答，重启之后也不答。
             // 停止之后才来的另外排队（见 dispatch）。
-            if let Some(seq) = owed.remove(&bot_id) {
+            if let Some(seqs) = owed.remove(&bot_id) {
                 if let Some(session) = sessions.get(&bot_id) {
                     let mut session = session.lock().await;
-                    if !session.seen(seq) && seq > session.dismissed {
-                        session.dismissed = seq;
-                        session.save_cursor();
+                    if let Some(max_unseen) =
+                        seqs.into_iter().filter(|seq| !session.seen(*seq)).max()
+                    {
+                        if max_unseen > session.dismissed {
+                            session.dismissed = max_unseen;
+                            session.save_cursor();
+                        }
                     }
                 }
             }
@@ -236,14 +240,15 @@ async fn finished(
         }
         Err(error) => tracing::error!(room = %room_id, "这一轮没跑成：{error}"),
     }
-    // 出错了：人在它说话期间发给它的话，它还没看到的，要另外回答。
-    let Some(seq) = owed.remove(&bot_id) else {
+    // 说话期间发给它的话，只要还有任何一条没看到（例如运行中插话跳过了先到的 Telegram 消息，或本轮出错），就要再排一轮。
+    let Some(seqs) = owed.remove(&bot_id) else {
         return;
     };
     let Some(session) = sessions.get(&bot_id) else {
         return;
     };
-    if !session.lock().await.seen(seq) {
+    let session = session.lock().await;
+    if seqs.into_iter().any(|seq| !session.seen(seq)) {
         link.episode().push(Job::new(bot_id, 0));
     }
 }
@@ -267,7 +272,7 @@ async fn work(
     link: &Arc<RoomLink>,
     sessions: &mut Sessions,
     lanes: &mut Lanes,
-    owed: &mut HashMap<BotId, i64>,
+    owed: &mut HashMap<BotId, BTreeSet<i64>>,
 ) -> Result<(), String> {
     if shared.shutdown.is_cancelled() {
         return Ok(());
@@ -542,7 +547,7 @@ async fn dispatch(
     fresh: &[Message],
     link: &Arc<RoomLink>,
     running: &[BotId],
-    owed: &mut HashMap<BotId, i64>,
+    owed: &mut HashMap<BotId, BTreeSet<i64>>,
 ) -> Vec<Job> {
     let is_member = |id: &BotId| members.iter().any(|bot| &bot.id == id);
     // 已经被停下、还没收尾的 Bot 不算在说：给它的新话要另外排队，不能记成它这一轮该看的。
@@ -560,8 +565,7 @@ async fn dispatch(
     };
     let running = running.as_slice();
     let mut owe = |bot_id: &BotId, seq: i64| {
-        let latest = owed.entry(bot_id.clone()).or_default();
-        *latest = (*latest).max(seq);
+        owed.entry(bot_id.clone()).or_default().insert(seq);
     };
     let mut first: Vec<(BotId, MessageId)> = vec![];
     let mut open = None;
