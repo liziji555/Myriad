@@ -283,6 +283,7 @@ export function BotProfilePanel({
               <button
                 type="button"
                 className="sa-button sa-button-quiet"
+                title={signal?.stopLabel ?? "停止当前工作"}
                 onClick={() => onStopTarget(bot.id, stopTarget)}
               >
                 {signal?.stopLabel ?? "停止"}

@@ -159,5 +159,53 @@ describe("mascotShapes", () => {
     expect(mixed.w1?.mascotState).toBe("waiting");
     expect(mixed.w1?.stopTarget).toEqual({ kind: "chat", roomId: "room-2" });
     expect(mixed.w1?.stopLabel).toBe("停止回复");
+
+    // 当一个 Bot 同时有一个待验收任务和另一个运行中任务时，停止按钮明确标出被停止任务的标题。
+    const twoTasks = globalBotSignalsOf(
+      [worker],
+      {},
+      {
+        "room-2": [
+          {
+            id: "task-review",
+            room_id: "room-2",
+            title: "更新文档",
+            scope: "",
+            acceptance: "",
+            owner_bot_id: "w1",
+            state: "review",
+            note: "",
+            created_by: { kind: "user" },
+            workdir: null,
+            branch: null,
+            artifacts: [],
+            rev: 1,
+            created_at: 1,
+            updated_at: 2,
+          },
+          {
+            id: "task-working",
+            room_id: "room-2",
+            title: "重构搜索",
+            scope: "",
+            acceptance: "",
+            owner_bot_id: "w1",
+            state: "working",
+            note: "",
+            created_by: { kind: "user" },
+            workdir: null,
+            branch: null,
+            artifacts: [],
+            rev: 1,
+            created_at: 3,
+            updated_at: 4,
+          },
+        ],
+      },
+      {},
+    );
+    expect(twoTasks.w1?.mascotState).toBe("waiting");
+    expect(twoTasks.w1?.stopTarget).toEqual({ kind: "task", taskId: "task-working" });
+    expect(twoTasks.w1?.stopLabel).toBe("停止任务「重构搜索」");
   });
 });

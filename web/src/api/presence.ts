@@ -212,6 +212,12 @@ export function globalBotSignalsOf(
           msg.kind === "run" && msg.task_id
             ? { kind: "task", taskId: msg.task_id }
             : { kind: "chat", roomId };
+        const stopLabel =
+          stopTarget.kind === "task"
+            ? task?.title
+              ? `停止任务「${task.title}」`
+              : "停止任务"
+            : "停止回复";
         consider({
           botId: bot.id,
           presence: info.state,
@@ -220,6 +226,7 @@ export function globalBotSignalsOf(
           activeTool: info.activeTool,
           roomId,
           stopTarget,
+          stopLabel,
         });
       }
       if (speakersOf(chat.activity).includes(bot.id)) {
@@ -264,6 +271,7 @@ export function globalBotSignalsOf(
             text: `做任务「${task.title}」`,
             roomId,
             stopTarget: { kind: "task", taskId: task.id },
+            stopLabel: `停止任务「${task.title}」`,
           });
         }
       }
