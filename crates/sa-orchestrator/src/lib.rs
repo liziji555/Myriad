@@ -10,6 +10,7 @@
 mod agent;
 mod ask;
 mod budget;
+pub(crate) mod codex_app_server;
 mod deliver;
 mod desks;
 mod episode;
@@ -180,6 +181,8 @@ pub(crate) struct Shared {
     pub bg_shell: Arc<sa_tools::BgShellManager>,
     /// 持久 ACP 会话池（保持同工位 ACP 进程常驻，服务关闭或工位重置时自动回收）。
     pub acp_pool: harness::AcpPool,
+    /// 持久 Codex app-server 会话池（保持同工位 Codex 进程与线程常驻，支持运行中 `turn/steer`）。
+    pub codex_pool: codex_app_server::CodexPool,
     /// 已配置的 MCP 服务规格列表（用于透传注入到外部 CLI Harness / ACP）。
     pub mcp_specs: Mutex<Vec<sa_tools::mcp::McpSpec>>,
     /// 单次输出超限被截断时的自动续写次数上限（生产默认 2，测试默认 0）。
@@ -208,6 +211,8 @@ pub(crate) struct RoomLink {
     pub writing: tokio::sync::Mutex<()>,
     /// 叫醒房间的后台任务（有新的 Bot 要开始说话时）。
     pub wake: Arc<Notify>,
+    /// 房间内有新消息到达时递增，供运行中的持久 harness（如 Codex `app-server`）实时感知并触发 `turn/steer`。
+    pub steer_watch: tokio::sync::watch::Sender<u64>,
     episode: Mutex<Episode>,
     /// 人发的消息已经处理到哪一条（`seq`）。`-1` 表示还没从会话记录里算出来。
     pub handled: AtomicI64,
@@ -229,6 +234,7 @@ impl RoomLink {
             routing: Mutex::default(),
             writing: tokio::sync::Mutex::new(()),
             wake: Arc::new(Notify::new()),
+            steer_watch: tokio::sync::watch::channel(0).0,
             episode: Mutex::new(Episode::default()),
             handled: AtomicI64::new(-1),
             renewed: AtomicI64::new(0),
@@ -291,6 +297,7 @@ impl Orchestrator {
                 hooks: Mutex::default(),
                 bg_shell: sa_tools::BgShellManager::new(),
                 acp_pool: harness::AcpPool::default(),
+                codex_pool: codex_app_server::CodexPool::default(),
                 mcp_specs: Mutex::default(),
                 max_truncated_recoveries: std::sync::atomic::AtomicUsize::new(0),
             }),
@@ -503,6 +510,7 @@ impl Orchestrator {
         }
         work::shutdown(&self.shared).await;
         self.shared.acp_pool.evict_all();
+        self.shared.codex_pool.evict_all();
         self.shared.bg_shell.kill_all();
         extensions::shutdown(&self.shared).await;
     }
@@ -520,6 +528,10 @@ impl Orchestrator {
         });
         // notify_one 会存一个许可：房间正忙时也不会漏掉这次唤醒。
         handle.link.wake.notify_one();
+        handle
+            .link
+            .steer_watch
+            .send_modify(|n| *n = n.wrapping_add(1));
     }
 }
 

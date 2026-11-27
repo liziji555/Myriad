@@ -164,16 +164,16 @@ impl AcpPool {
     }
 }
 
-fn mcp_fingerprint(specs: &[McpSpec]) -> String {
+pub(crate) fn mcp_fingerprint(specs: &[McpSpec]) -> String {
     serde_json::to_string(&acp_mcp_servers(specs)).unwrap_or_default()
 }
 
 /// 出错时最多带上这么多字的标准错误输出。
-const STDERR_TAIL: usize = 2000;
+pub(crate) const STDERR_TAIL: usize = 2000;
 /// harness 退出后，再等它剩下的输出多久。
 const DRAIN: Duration = Duration::from_secs(1);
 /// 长时间没有任何输出时自动中止，防止 CLI 卡死在交互提示上。
-const IDLE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+pub(crate) const IDLE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 /// 探测本机已安装 CLI 版本时的超时时间。
 const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 
@@ -192,7 +192,9 @@ pub(crate) struct Launch<'a> {
     pub mcp_servers: &'a [McpSpec],
     /// 可选的持久 ACP 进程池：传入时复用同工位的常驻 ACP 进程，免去每轮冷启动。
     pub acp_pool: Option<&'a AcpPool>,
-    /// 与 `acp_pool` 配对的作用域键（如 `room:{id}:bot:{id}`）。
+    /// 可选的持久 Codex app-server 进程池：传入时跨轮复用同工位 Codex 进程与线程，并支持运行中 `turn/steer`。
+    pub codex_pool: Option<&'a crate::codex_app_server::CodexPool>,
+    /// 与 `acp_pool` / `codex_pool` 配对的作用域键（如 `room:{id}:bot:{id}`）。
     pub acp_scope: Option<&'a str>,
 }
 
@@ -373,7 +375,7 @@ pub fn find_program(program: &str, dir: &Path) -> Option<PathBuf> {
 }
 
 /// 构造子进程命令：Windows 下 `.cmd`/`.bat` 经 `cmd.exe /d /s /c` 启动，防止 CreateProcess 失败。
-fn build_command(program: &Path, args: &[String]) -> Command {
+pub(crate) fn build_command(program: &Path, args: &[String]) -> Command {
     #[cfg(windows)]
     {
         let is_batch = program
@@ -737,7 +739,7 @@ const MAX_STDERR_BYTES: usize = 32 * 1024;
 /// stdout 单行最多读入的字节数，超出部分丢弃到下一个换行符。
 const MAX_STDOUT_LINE_BYTES: usize = 4 * 1024 * 1024;
 
-async fn read_stderr_tail(mut err: tokio::process::ChildStderr) -> String {
+pub(crate) async fn read_stderr_tail(mut err: tokio::process::ChildStderr) -> String {
     let mut buf = Vec::new();
     let mut chunk = [0u8; 4096];
     while let Ok(n) = err.read(&mut chunk).await {
@@ -757,7 +759,7 @@ async fn read_stderr_tail(mut err: tokio::process::ChildStderr) -> String {
     String::from_utf8_lossy(&buf).into_owned()
 }
 
-async fn read_bounded_line<R: tokio::io::AsyncBufRead + Unpin>(
+pub(crate) async fn read_bounded_line<R: tokio::io::AsyncBufRead + Unpin>(
     reader: &mut R,
 ) -> std::io::Result<Option<String>> {
     let mut out = Vec::new();
@@ -801,8 +803,32 @@ pub(crate) async fn run(
     observer: &dyn Observer,
     cancel: &CancellationToken,
 ) -> Finished {
+    run_interactive(launch, None, observer, cancel).await
+}
+
+/// 跑一次支持运行中插话（`turn/steer`）的 harness（Codex 优先走 `codex app-server --stdio` 双向持久会话，
+/// 不兼容旧版本时自动回退 `codex exec --json`）。
+pub(crate) async fn run_interactive(
+    launch: &Launch<'_>,
+    mut steer_rx: Option<
+        tokio::sync::mpsc::UnboundedReceiver<crate::codex_app_server::SteerRequest>,
+    >,
+    observer: &dyn Observer,
+    cancel: &CancellationToken,
+) -> Finished {
     if launch.harness == Harness::Acp {
         return run_acp(launch, observer, cancel).await;
+    }
+    if launch.harness == Harness::Codex {
+        match crate::codex_app_server::run_codex_app_server(launch, &mut steer_rx, observer, cancel)
+            .await
+        {
+            crate::codex_app_server::CodexAttempt::Finished(done) => return done,
+            crate::codex_app_server::CodexAttempt::FallbackToLegacy => {
+                // 回退单次 `codex exec --json` 时主动关闭 steer 接收端，确保调用方保留未读消息到下一轮。
+                drop(steer_rx);
+            }
+        }
     }
     let mut session = launch.session.map(String::from);
     let failed = |reason: String, session: Option<String>| Finished {
@@ -1855,7 +1881,7 @@ async fn run_acp_turn_on(
     }
 }
 
-fn tail(text: &str, max: usize) -> String {
+pub(crate) fn tail(text: &str, max: usize) -> String {
     let count = text.chars().count();
     if count <= max {
         return text.to_string();
@@ -1864,7 +1890,7 @@ fn tail(text: &str, max: usize) -> String {
     format!("…{rest}")
 }
 
-fn str_of<'a>(value: &'a Value, key: &str) -> &'a str {
+pub(crate) fn str_of<'a>(value: &'a Value, key: &str) -> &'a str {
     value[key].as_str().unwrap_or("")
 }
 
@@ -2049,7 +2075,7 @@ fn parse_claude(value: &Value) -> Vec<Event> {
     events
 }
 
-fn codex_item(item: &Value) -> Option<(String, String)> {
+pub(crate) fn codex_item(item: &Value) -> Option<(String, String)> {
     let kind = str_of(item, "type");
     Some(match kind {
         "command_execution" | "commandExecution" => {
@@ -2416,6 +2442,7 @@ mod tests {
             permission: PermissionMode::Full,
             mcp_servers: &[],
             acp_pool: None,
+            codex_pool: None,
             acp_scope: None,
         };
         let (_, args, stdin, _guard) = plan(&launch).unwrap();
@@ -2448,6 +2475,7 @@ mod tests {
             permission: PermissionMode::Full,
             mcp_servers: &specs,
             acp_pool: None,
+            codex_pool: None,
             acp_scope: None,
         };
         let (_, args, _, guard) = plan(&launch).unwrap();
@@ -2610,6 +2638,7 @@ mod tests {
             permission: PermissionMode::Ask,
             mcp_servers: &[],
             acp_pool: None,
+            codex_pool: None,
             acp_scope: None,
         };
         let done = run(&launch, &Null, &CancellationToken::new()).await;
@@ -2624,6 +2653,7 @@ mod tests {
             permission: PermissionMode::Ask,
             mcp_servers: &[],
             acp_pool: None,
+            codex_pool: None,
             acp_scope: None,
         };
         let done = run(&codex, &Null, &CancellationToken::new()).await;
@@ -2753,6 +2783,7 @@ for raw in sys.stdin:
                 permission: PermissionMode::Ask,
                 mcp_servers: &[],
                 acp_pool: Some(&pool),
+                codex_pool: None,
                 acp_scope: Some("room:r1:bot:b1"),
             },
             &Null,
@@ -2774,6 +2805,7 @@ for raw in sys.stdin:
                 permission: PermissionMode::Plan,
                 mcp_servers: &[],
                 acp_pool: Some(&pool),
+                codex_pool: None,
                 acp_scope: Some("room:r1:bot:b1"),
             },
             &Null,
@@ -2798,6 +2830,7 @@ for raw in sys.stdin:
                 permission: PermissionMode::Ask,
                 mcp_servers: &[],
                 acp_pool: Some(&pool),
+                codex_pool: None,
                 acp_scope: Some("room:r1:bot:b1"),
             },
             &Null,
@@ -2817,6 +2850,7 @@ for raw in sys.stdin:
                 permission: PermissionMode::Ask,
                 mcp_servers: &[],
                 acp_pool: Some(&pool),
+                codex_pool: None,
                 acp_scope: Some("room:r1:bot:b1"),
             },
             &Null,
@@ -2837,6 +2871,7 @@ for raw in sys.stdin:
                 permission: PermissionMode::Ask,
                 mcp_servers: &[],
                 acp_pool: Some(&pool),
+                codex_pool: None,
                 acp_scope: Some("room:r1:bot:b1"),
             },
             &Null,

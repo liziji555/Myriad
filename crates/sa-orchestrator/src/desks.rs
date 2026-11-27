@@ -257,9 +257,9 @@ impl Orchestrator {
             engine.put_desk(&r, &b, &desk)
         })
         .await?;
-        self.shared
-            .acp_pool
-            .evict_scope(&crate::harness::acp_scope(room, bot));
+        let scope = crate::harness::acp_scope(room, bot);
+        self.shared.acp_pool.evict_scope(&scope);
+        self.shared.codex_pool.evict_scope(&scope);
         Ok(())
     }
 
@@ -391,10 +391,10 @@ impl Orchestrator {
                 .await
                 .map_err(OrchestratorError::Conflict)?;
         }
-        // 收掉之后下次重新开目录；先结束常驻 ACP 进程释放目录占用，会话也不再接着用。
-        self.shared
-            .acp_pool
-            .evict_scope(&crate::harness::acp_scope(room, bot));
+        // 收掉之后下次重新开目录；先结束常驻 ACP / Codex 进程释放目录占用，会话也不再接着用。
+        let scope = crate::harness::acp_scope(room, bot);
+        self.shared.acp_pool.evict_scope(&scope);
+        self.shared.codex_pool.evict_scope(&scope);
         let (engine, r, b) = (shared.engine.clone(), room.clone(), bot.clone());
         db(move || engine.put_desk(&r, &b, &Desk::default())).await?;
         workdir::remove(&TaskId::from(format!("desk-{bot}")), &dir).await;

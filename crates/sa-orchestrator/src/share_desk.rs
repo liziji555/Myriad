@@ -289,6 +289,7 @@ impl Desks {
             permission: job.permission,
             mcp_servers: &[],
             acp_pool: None,
+            codex_pool: None,
             acp_scope: None,
         };
         let finished = harness::run(&launch, observer, cancel).await;
