@@ -480,34 +480,9 @@ pub(crate) fn relay(tx: &Transaction<'_>, message: &Message) -> sa_store::Result
         }
         _ => return Ok(()),
     };
-    // 若回复显式标明了答复哪条用户消息（例如运行中插话先处理了更新的本机消息、随后单独补答早先的 Telegram 消息），
-    // 在满足同房间、早于本回复且归属本 Bot 触发条件的前提下，优先以显式 `reply_to` 的用户消息为准。
-    let explicit_trigger = message.reply_to.iter().rev().find_map(|id| {
-        let candidate = messages::get(tx, id).ok().flatten()?;
-        if candidate.room_id != message.room_id
-            || candidate.seq >= message.seq
-            || candidate.sender != Sender::User
-        {
-            return None;
-        }
-        let eligible = match candidate.kind {
-            MessageKind::Chat => {
-                candidate.origin.is_none()
-                    || message.hop > 0
-                    || candidate.mentions.is_empty()
-                    || candidate.mentions.contains(bot_id)
-            }
-            MessageKind::Routine | MessageKind::Event => candidate.mentions.first() == Some(bot_id),
-            _ => false,
-        };
-        eligible.then_some(candidate)
-    });
-    let Some(trigger) = (match explicit_trigger {
-        Some(t) => Some(t),
-        None => {
-            messages::last_trigger_before(tx, &message.room_id, message.seq, bot_id, message.hop)?
-        }
-    }) else {
+    let Some(trigger) =
+        messages::last_trigger_before(tx, &message.room_id, message.seq, bot_id, message.hop)?
+    else {
         return Ok(());
     };
     let linked = external::room_links(tx, &message.room_id, Source::Telegram)?;
