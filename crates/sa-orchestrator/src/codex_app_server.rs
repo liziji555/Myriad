@@ -79,7 +79,7 @@ impl Drop for PooledCodex {
 /// 持久 Codex `app-server` 进程池：同一房间工位的 Codex Bot 跨轮保持常驻进程与线程上下文。
 #[derive(Default)]
 pub(crate) struct CodexPool {
-    entries: std::sync::Mutex<HashMap<CodexKey, PooledCodex>>,
+    entries: std::sync::Arc<std::sync::Mutex<HashMap<CodexKey, PooledCodex>>>,
 }
 
 impl CodexPool {
@@ -119,14 +119,19 @@ impl CodexPool {
         }
     }
 
-    fn put(&self, key: CodexKey, mut conn: PooledCodex) {
-        conn.last_used = Instant::now();
+    fn put(&self, key: CodexKey, conn: PooledCodex) {
+        self.put_with_ttl(key, conn, CODEX_IDLE_TTL);
+    }
+
+    fn put_with_ttl(&self, key: CodexKey, mut conn: PooledCodex, ttl: Duration) {
+        let now = Instant::now();
+        conn.last_used = now;
         let mut evicted = Vec::new();
         {
             let mut map = self.entries.lock().unwrap_or_else(|e| e.into_inner());
             let expired_keys: Vec<CodexKey> = map
                 .iter()
-                .filter(|(_, v)| v.last_used.elapsed() > CODEX_IDLE_TTL)
+                .filter(|(_, v)| v.last_used.elapsed() > ttl)
                 .map(|(k, _)| k.clone())
                 .collect();
             for k in expired_keys {
@@ -147,11 +152,31 @@ impl CodexPool {
                     break;
                 }
             }
-            if let Some(prev) = map.insert(key, conn) {
+            if let Some(prev) = map.insert(key.clone(), conn) {
                 evicted.push(prev);
             }
         }
         drop(evicted);
+
+        // 主动按空闲截止时间安排回收定时器：复核 `last_used == now` 防止旧定时器误杀新连接。
+        let weak = std::sync::Arc::downgrade(&self.entries);
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                tokio::time::sleep(ttl).await;
+                let Some(entries) = weak.upgrade() else {
+                    return;
+                };
+                let expired = {
+                    let mut map = entries.lock().unwrap_or_else(|e| e.into_inner());
+                    if map.get(&key).is_some_and(|v| v.last_used == now) {
+                        map.remove(&key)
+                    } else {
+                        None
+                    }
+                };
+                drop(expired);
+            });
+        }
     }
 
     /// 驱逐指定作用域（重置工位会话、关闭工位）的全部常驻 Codex 进程。
@@ -2052,6 +2077,45 @@ print(json.dumps({"type": "item.completed", "item": {"id": "m1", "type": "agent_
         assert_eq!(fallback.end, TurnEnd::Completed);
         assert_eq!(fallback.session.as_deref(), Some("old-thr"));
         assert_eq!(fallback.text, "fallback:still-works");
+
+        // 7. 主动空闲 TTL 回收：即使后续不再借出连接，超时后也自动回收并杀掉进程。
+        let ttl_pool = CodexPool::default();
+        let ttl_run = run(
+            &Launch {
+                harness: Harness::Codex,
+                command: &cmd,
+                dir: dir.path(),
+                prompt: "ttl-check",
+                session: None,
+                permission: PermissionMode::Ask,
+                mcp_servers: &[],
+                acp_pool: None,
+                codex_pool: Some(&ttl_pool),
+                claude_pool: None,
+                acp_scope: Some("room:r1:bot:ttl"),
+                interactive_approvals: true,
+            },
+            &obs,
+            &CancellationToken::new(),
+        )
+        .await;
+        assert_eq!(ttl_run.end, TurnEnd::Completed);
+        assert_eq!(ttl_pool.len(), 1);
+        let (ttl_key, conn) = ttl_pool
+            .entries
+            .lock()
+            .unwrap()
+            .drain()
+            .next()
+            .expect("pooled codex connection should be present");
+        ttl_pool.put_with_ttl(ttl_key, conn, Duration::from_millis(80));
+        assert_eq!(ttl_pool.len(), 1);
+        tokio::time::sleep(Duration::from_millis(160)).await;
+        assert_eq!(
+            ttl_pool.len(),
+            0,
+            "idle CodexPool entry must be actively evicted after TTL without another checkout"
+        );
 
         pool.evict_all();
         assert_eq!(pool.len(), 0);
