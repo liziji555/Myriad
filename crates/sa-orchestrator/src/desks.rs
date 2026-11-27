@@ -260,6 +260,7 @@ impl Orchestrator {
         let scope = crate::harness::acp_scope(room, bot);
         self.shared.acp_pool.evict_scope(&scope);
         self.shared.codex_pool.evict_scope(&scope);
+        self.shared.claude_pool.evict_scope(&scope);
         Ok(())
     }
 
@@ -371,6 +372,7 @@ impl Orchestrator {
         if let Some(name) = desk.share.clone() {
             return self.close_shared_desk(room, bot, &name, dir, accept).await;
         }
+        let scope = crate::harness::acp_scope(room, bot);
         if accept {
             // 与 accept_task 共用同一把工作目录合并锁，避免并发 git merge / apply 互相破坏。
             let _one_at_a_time = shared.works.accepting.lock().await;
@@ -387,14 +389,23 @@ impl Orchestrator {
                     shared.settings.fence.root_display()
                 )));
             }
+            // 验收前先做只读预检（例如主目录是否存在未完成合并），避免预检就失败时误杀工位后台进程。
+            workdir::preflight_accept(&dir)
+                .await
+                .map_err(OrchestratorError::Conflict)?;
+            // 先静默结束常驻 ACP / Codex / Claude 进程树，确保后台子进程在最终提交和验收合并前不再继续改写文件。
+            self.shared.acp_pool.evict_scope(&scope);
+            self.shared.codex_pool.evict_scope(&scope);
+            self.shared.claude_pool.evict_scope(&scope);
             workdir::bring_back(&dir)
                 .await
                 .map_err(OrchestratorError::Conflict)?;
+        } else {
+            // 丢弃工位前先结束常驻 ACP / Codex / Claude 进程释放目录占用。
+            self.shared.acp_pool.evict_scope(&scope);
+            self.shared.codex_pool.evict_scope(&scope);
+            self.shared.claude_pool.evict_scope(&scope);
         }
-        // 收掉之后下次重新开目录；先结束常驻 ACP / Codex 进程释放目录占用，会话也不再接着用。
-        let scope = crate::harness::acp_scope(room, bot);
-        self.shared.acp_pool.evict_scope(&scope);
-        self.shared.codex_pool.evict_scope(&scope);
         let (engine, r, b) = (shared.engine.clone(), room.clone(), bot.clone());
         db(move || engine.put_desk(&r, &b, &Desk::default())).await?;
         workdir::remove(&TaskId::from(format!("desk-{bot}")), &dir).await;

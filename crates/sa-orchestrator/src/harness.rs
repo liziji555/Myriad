@@ -194,16 +194,32 @@ pub(crate) struct Launch<'a> {
     pub acp_pool: Option<&'a AcpPool>,
     /// 可选的持久 Codex app-server 进程池：传入时跨轮复用同工位 Codex 进程与线程，并支持运行中 `turn/steer`。
     pub codex_pool: Option<&'a crate::codex_app_server::CodexPool>,
-    /// 与 `acp_pool` / `codex_pool` 配对的作用域键（如 `room:{id}:bot:{id}`）。
+    /// 可选的持久 Claude Code 流式进程池：传入时跨轮复用同工位常驻 Claude Code 进程，并支持运行中插话与双向审批。
+    pub claude_pool: Option<&'a crate::claude_stream::ClaudePool>,
+    /// 与 `acp_pool` / `codex_pool` / `claude_pool` 配对的作用域键（如 `room:{id}:bot:{id}`）。
     pub acp_scope: Option<&'a str>,
     /// 调用方观察者是否能弹出并回传交互式审批卡（本地 `RoomObserver` 为 `true`，`sa share` 远程转发暂为 `false`）。
     pub interactive_approvals: bool,
 }
 
+/// 运行中插话请求：由 `room.rs` 在收到新消息时发送，由持久双向 harness（Codex / Claude Code）实时注入活跃轮次。
+/// `ack` 为 `true` 表示已被对方确认接收，`false`（或通道关闭）表示未能注入，调用方保留未读游标留待下轮处理。
+pub(crate) struct SteerRequest {
+    pub text: String,
+    pub ack: tokio::sync::oneshot::Sender<bool>,
+}
+
+/// 可在 `tokio::select!` 中安全取消的行缓冲状态：被其它分支打断时完整保留半行字节与截断标记，绝不丢帧。
+#[derive(Default)]
+pub(crate) struct LineBuffer {
+    buf: Vec<u8>,
+    capped: bool,
+}
+
 static TEMP_MCP_SEQ: AtomicU64 = AtomicU64::new(0);
 
-/// 临时文件守卫：单轮 CLI 执行结束后自动清理临时 `--mcp-config` JSON 文件。
-struct TempFileGuard(Option<PathBuf>);
+/// 临时文件守卫：单轮或常驻 CLI 生命周期结束后自动清理临时 `--mcp-config` JSON 文件。
+pub(crate) struct TempFileGuard(pub(crate) Option<PathBuf>);
 
 impl Drop for TempFileGuard {
     fn drop(&mut self) {
@@ -225,7 +241,7 @@ pub(crate) struct Finished {
 
 /// harness 输出里的一件事。
 #[derive(Debug, Clone, PartialEq)]
-enum Event {
+pub(crate) enum Event {
     Session(String),
     /// 完整的段落文字（不同段落之间用空行分隔）。
     Text(String),
@@ -541,7 +557,7 @@ fn plan(launch: &Launch<'_>) -> Result<(PathBuf, Vec<String>, bool, TempFileGuar
     Ok((resolved, args, stdin, temp_file))
 }
 
-fn write_claude_mcp_config(specs: &[McpSpec]) -> Option<PathBuf> {
+pub(crate) fn write_claude_mcp_config(specs: &[McpSpec]) -> Option<PathBuf> {
     let mut servers = serde_json::Map::new();
     for spec in specs {
         let entry = if let Some(url) = &spec.url {
@@ -761,28 +777,28 @@ pub(crate) async fn read_stderr_tail(mut err: tokio::process::ChildStderr) -> St
     String::from_utf8_lossy(&buf).into_owned()
 }
 
-pub(crate) async fn read_bounded_line<R: tokio::io::AsyncBufRead + Unpin>(
+pub(crate) async fn read_bounded_line_buffered<R: tokio::io::AsyncBufRead + Unpin>(
     reader: &mut R,
+    state: &mut LineBuffer,
 ) -> std::io::Result<Option<String>> {
-    let mut out = Vec::new();
-    let mut capped = false;
     loop {
         let available = reader.fill_buf().await?;
         if available.is_empty() {
-            if out.is_empty() {
+            if state.buf.is_empty() {
+                state.capped = false;
                 return Ok(None);
             }
             break;
         }
         let newline = available.iter().position(|&b| b == b'\n');
         let take = newline.map_or(available.len(), |pos| pos + 1);
-        if !capped {
-            let remaining = MAX_STDOUT_LINE_BYTES.saturating_sub(out.len());
+        if !state.capped {
+            let remaining = MAX_STDOUT_LINE_BYTES.saturating_sub(state.buf.len());
             if take <= remaining {
-                out.extend_from_slice(&available[..take]);
+                state.buf.extend_from_slice(&available[..take]);
             } else {
-                out.extend_from_slice(&available[..remaining]);
-                capped = true;
+                state.buf.extend_from_slice(&available[..remaining]);
+                state.capped = true;
             }
         }
         reader.consume(take);
@@ -790,6 +806,8 @@ pub(crate) async fn read_bounded_line<R: tokio::io::AsyncBufRead + Unpin>(
             break;
         }
     }
+    let mut out = std::mem::take(&mut state.buf);
+    state.capped = false;
     if out.ends_with(b"\n") {
         out.pop();
         if out.ends_with(b"\r") {
@@ -797,6 +815,13 @@ pub(crate) async fn read_bounded_line<R: tokio::io::AsyncBufRead + Unpin>(
         }
     }
     Ok(Some(String::from_utf8_lossy(&out).into_owned()))
+}
+
+async fn read_bounded_line<R: tokio::io::AsyncBufRead + Unpin>(
+    reader: &mut R,
+) -> std::io::Result<Option<String>> {
+    let mut state = LineBuffer::default();
+    read_bounded_line_buffered(reader, &mut state).await
 }
 
 /// 跑一次 harness，直到它结束、出错或者被停下。
@@ -808,13 +833,12 @@ pub(crate) async fn run(
     run_interactive(launch, None, observer, cancel).await
 }
 
-/// 跑一次支持运行中插话（`turn/steer`）的 harness（Codex 优先走 `codex app-server --stdio` 双向持久会话，
-/// 不兼容旧版本时自动回退 `codex exec --json`）。
+/// 跑一次支持运行中插话的 harness：
+/// - `Harness::Codex` 优先走 `codex app-server --listen stdio://` 双向持久会话，不兼容时回退 `codex exec --json`；
+/// - `Harness::ClaudeCode` 优先走 `claude --input-format stream-json` 双向持久会话，不兼容时回退单次 `claude -p`。
 pub(crate) async fn run_interactive(
     launch: &Launch<'_>,
-    mut steer_rx: Option<
-        tokio::sync::mpsc::UnboundedReceiver<crate::codex_app_server::SteerRequest>,
-    >,
+    mut steer_rx: Option<tokio::sync::mpsc::UnboundedReceiver<SteerRequest>>,
     observer: &dyn Observer,
     cancel: &CancellationToken,
 ) -> Finished {
@@ -828,10 +852,19 @@ pub(crate) async fn run_interactive(
             crate::codex_app_server::CodexAttempt::Finished(done) => return done,
             crate::codex_app_server::CodexAttempt::FallbackToLegacy => {
                 // 回退单次 `codex exec --json` 时主动关闭 steer 接收端，确保调用方保留未读消息到下一轮。
-                drop(steer_rx);
+                steer_rx = None;
+            }
+        }
+    } else if launch.harness == Harness::ClaudeCode && launch.interactive_approvals {
+        match crate::claude_stream::run_claude_stream(launch, &mut steer_rx, observer, cancel).await
+        {
+            crate::claude_stream::ClaudeAttempt::Finished(done) => return done,
+            crate::claude_stream::ClaudeAttempt::FallbackToLegacy => {
+                steer_rx = None;
             }
         }
     }
+    drop(steer_rx);
     let mut session = launch.session.map(String::from);
     let failed = |reason: String, session: Option<String>| Finished {
         end: TurnEnd::Failed(reason),
@@ -1951,7 +1984,7 @@ fn content_text(content: &Value) -> String {
     }
 }
 
-fn parse_claude(value: &Value) -> Vec<Event> {
+pub(crate) fn parse_claude(value: &Value) -> Vec<Event> {
     let mut events = vec![];
     if let Some(id) = value["session_id"].as_str().filter(|id| !id.is_empty()) {
         events.push(Event::Session(id.to_string()));
@@ -2445,6 +2478,7 @@ mod tests {
             mcp_servers: &[],
             acp_pool: None,
             codex_pool: None,
+            claude_pool: None,
             acp_scope: None,
             interactive_approvals: true,
         };
@@ -2479,6 +2513,7 @@ mod tests {
             mcp_servers: &specs,
             acp_pool: None,
             codex_pool: None,
+            claude_pool: None,
             acp_scope: None,
             interactive_approvals: true,
         };
@@ -2643,6 +2678,7 @@ mod tests {
             mcp_servers: &[],
             acp_pool: None,
             codex_pool: None,
+            claude_pool: None,
             acp_scope: None,
             interactive_approvals: true,
         };
@@ -2659,6 +2695,7 @@ mod tests {
             mcp_servers: &[],
             acp_pool: None,
             codex_pool: None,
+            claude_pool: None,
             acp_scope: None,
             interactive_approvals: true,
         };
@@ -2790,6 +2827,7 @@ for raw in sys.stdin:
                 mcp_servers: &[],
                 acp_pool: Some(&pool),
                 codex_pool: None,
+                claude_pool: None,
                 acp_scope: Some("room:r1:bot:b1"),
                 interactive_approvals: true,
             },
@@ -2813,6 +2851,7 @@ for raw in sys.stdin:
                 mcp_servers: &[],
                 acp_pool: Some(&pool),
                 codex_pool: None,
+                claude_pool: None,
                 acp_scope: Some("room:r1:bot:b1"),
                 interactive_approvals: true,
             },
@@ -2839,6 +2878,7 @@ for raw in sys.stdin:
                 mcp_servers: &[],
                 acp_pool: Some(&pool),
                 codex_pool: None,
+                claude_pool: None,
                 acp_scope: Some("room:r1:bot:b1"),
                 interactive_approvals: true,
             },
@@ -2860,6 +2900,7 @@ for raw in sys.stdin:
                 mcp_servers: &[],
                 acp_pool: Some(&pool),
                 codex_pool: None,
+                claude_pool: None,
                 acp_scope: Some("room:r1:bot:b1"),
                 interactive_approvals: true,
             },
@@ -2882,6 +2923,7 @@ for raw in sys.stdin:
                 mcp_servers: &[],
                 acp_pool: Some(&pool),
                 codex_pool: None,
+                claude_pool: None,
                 acp_scope: Some("room:r1:bot:b1"),
                 interactive_approvals: true,
             },

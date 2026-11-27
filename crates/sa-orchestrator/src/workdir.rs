@@ -340,6 +340,19 @@ pub async fn diff_file(workdir: &Workdir, rel_path: &str) -> Result<sa_protocol:
     })
 }
 
+/// 验收前只读预检（不修改任何文件，也不驱逐工位进程）：若主工作目录正处于未完成的 Git 合并中，提前拒绝。
+pub async fn preflight_accept(dir: &Workdir) -> Result<(), String> {
+    if dir.kind == KIND_WORKTREE {
+        let workspace = Path::new(&dir.source);
+        if merging(workspace).await {
+            return Err(
+                "工作目录里有一个还没完成的合并。先把它处理完（提交或者放弃），再来验收。".into(),
+            );
+        }
+    }
+    Ok(())
+}
+
 /// 验收：先把独立目录里的改动提交掉，再带回它开出来的工作目录。带不回去时什么都不动。
 pub async fn bring_back(dir: &Workdir) -> Result<(), String> {
     commit_and_diff(dir, "带回前记下改动").await?;

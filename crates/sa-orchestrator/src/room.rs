@@ -19,7 +19,7 @@ use sa_protocol::{
 };
 use sa_tools::{Fence, ToolCtx, ToolRegistry};
 use serde_json::Value;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::task::JoinSet;
@@ -132,8 +132,8 @@ pub(crate) async fn run(shared: Arc<Shared>, room_id: RoomId, link: Arc<RoomLink
     let mut sessions = Sessions::new();
     // 正在说话的那几个 Bot，每个一条道。
     let mut lanes = Lanes::new();
-    // 正在说话的 Bot 该看到的人类消息（最新一条的 `seq`）：说完时还没看到，就让它再说一轮。
-    let mut owed: HashMap<BotId, i64> = HashMap::new();
+    // 正在说话的 Bot 该看到的人类消息（全部待看 `seq -> MessageId`）：说完时只要有任何一条还没看到（例如被运行中插话跳过的外部消息），就带着它的消息 ID 让它再说一轮。
+    let mut owed: HashMap<BotId, BTreeMap<i64, MessageId>> = HashMap::new();
     loop {
         tokio::select! {
             _ = link.wake.notified() => {}
@@ -196,7 +196,7 @@ async fn finished(
     room_id: &RoomId,
     link: &RoomLink,
     sessions: &Sessions,
-    owed: &mut HashMap<BotId, i64>,
+    owed: &mut HashMap<BotId, BTreeMap<i64, MessageId>>,
     done: Result<LaneEnd, tokio::task::JoinError>,
 ) {
     let (bot_id, reply, for_lead, result) = match done {
@@ -223,12 +223,16 @@ async fn finished(
             tracing::info!(room = %room_id, "这一轮停下了：{error}");
             // 人点了停止：它说话期间收到、还没看到的话也不再答，重启之后也不答。
             // 停止之后才来的另外排队（见 dispatch）。
-            if let Some(seq) = owed.remove(&bot_id) {
+            if let Some(seqs) = owed.remove(&bot_id) {
                 if let Some(session) = sessions.get(&bot_id) {
                     let mut session = session.lock().await;
-                    if !session.seen(seq) && seq > session.dismissed {
-                        session.dismissed = seq;
-                        session.save_cursor();
+                    if let Some(max_unseen) =
+                        seqs.into_keys().filter(|seq| !session.seen(*seq)).max()
+                    {
+                        if max_unseen > session.dismissed {
+                            session.dismissed = max_unseen;
+                            session.save_cursor();
+                        }
                     }
                 }
             }
@@ -236,15 +240,21 @@ async fn finished(
         }
         Err(error) => tracing::error!(room = %room_id, "这一轮没跑成：{error}"),
     }
-    // 出错了：人在它说话期间发给它的话，它还没看到的，要另外回答。
-    let Some(seq) = owed.remove(&bot_id) else {
+    // 说话期间发给它的话，只要还有任何一条没看到（例如运行中插话跳过了先到的 Telegram 消息，或本轮出错），就要带着原消息 ID 再排一轮。
+    let Some(seqs) = owed.remove(&bot_id) else {
         return;
     };
     let Some(session) = sessions.get(&bot_id) else {
         return;
     };
-    if !session.lock().await.seen(seq) {
-        link.episode().push(Job::new(bot_id, 0));
+    let session = session.lock().await;
+    let unseen: Vec<MessageId> = seqs
+        .into_iter()
+        .filter(|(seq, _)| !session.seen(*seq))
+        .map(|(_, id)| id)
+        .collect();
+    if !unseen.is_empty() {
+        link.episode().push(Job::new(bot_id, 0).replying(unseen));
     }
 }
 
@@ -267,7 +277,7 @@ async fn work(
     link: &Arc<RoomLink>,
     sessions: &mut Sessions,
     lanes: &mut Lanes,
-    owed: &mut HashMap<BotId, i64>,
+    owed: &mut HashMap<BotId, BTreeMap<i64, MessageId>>,
 ) -> Result<(), String> {
     if shared.shutdown.is_cancelled() {
         return Ok(());
@@ -542,7 +552,7 @@ async fn dispatch(
     fresh: &[Message],
     link: &Arc<RoomLink>,
     running: &[BotId],
-    owed: &mut HashMap<BotId, i64>,
+    owed: &mut HashMap<BotId, BTreeMap<i64, MessageId>>,
 ) -> Vec<Job> {
     let is_member = |id: &BotId| members.iter().any(|bot| &bot.id == id);
     // 已经被停下、还没收尾的 Bot 不算在说：给它的新话要另外排队，不能记成它这一轮该看的。
@@ -559,9 +569,10 @@ async fn dispatch(
             .collect()
     };
     let running = running.as_slice();
-    let mut owe = |bot_id: &BotId, seq: i64| {
-        let latest = owed.entry(bot_id.clone()).or_default();
-        *latest = (*latest).max(seq);
+    let mut owe = |bot_id: &BotId, message: &Message| {
+        owed.entry(bot_id.clone())
+            .or_default()
+            .insert(message.seq, message.id.clone());
     };
     let mut first: Vec<(BotId, MessageId)> = vec![];
     let mut open = None;
@@ -570,13 +581,13 @@ async fn dispatch(
         if named.is_empty() {
             open = Some(message);
             for bot_id in running {
-                owe(bot_id, message.seq);
+                owe(bot_id, message);
             }
             continue;
         }
         for bot_id in named {
             if running.contains(bot_id) {
-                owe(bot_id, message.seq);
+                owe(bot_id, message);
             } else if !first.iter().any(|(id, _)| id == bot_id) {
                 first.push((bot_id.clone(), message.id.clone()));
             }
@@ -1448,13 +1459,14 @@ async fn harness_turn(
                 mcp_servers: &mcp_servers,
                 acp_pool: Some(&shared.acp_pool),
                 codex_pool: Some(&shared.codex_pool),
+                claude_pool: Some(&shared.claude_pool),
                 acp_scope: Some(&acp_scope),
                 interactive_approvals: true,
             };
             if cancel.is_cancelled() {
                 return Ok(TurnEnd::Cancelled);
             }
-            let finished = if bot.harness == Harness::Codex {
+            let finished = if matches!(bot.harness, Harness::Codex | Harness::ClaudeCode) {
                 let (steer_tx, steer_rx) = tokio::sync::mpsc::unbounded_channel();
                 let run_fut =
                     crate::harness::run_interactive(&launch, Some(steer_rx), observer, cancel);
@@ -1477,7 +1489,7 @@ async fn harness_turn(
                                     .join("\n\n");
                                 let (ack_tx, mut ack_rx) = tokio::sync::oneshot::channel();
                                 if steer_tx
-                                    .send(crate::codex_app_server::SteerRequest {
+                                    .send(crate::harness::SteerRequest {
                                         text: steer_text,
                                         ack: ack_tx,
                                     })
@@ -1815,16 +1827,27 @@ struct RoomInbox {
     blind: Option<i64>,
 }
 
+struct RenewEvent {
+    seq: i64,
+    only_me: bool,
+    advance_handled: bool,
+    started: bool,
+}
+
 struct InboxScan {
     next_last_seq: i64,
     next_ahead: BTreeSet<i64>,
     inputs: Vec<UserInput>,
-    renew_events: Vec<(i64, bool, bool)>,
+    renew_events: Vec<RenewEvent>,
 }
 
 impl RoomInbox {
     /// 只读扫描未看消息并计算出游标与续轮更新（不立即提交），供 `drain` 与运行中 `peek_steer` 共用。
-    async fn scan(&self) -> Option<InboxScan> {
+    /// 当 `only_local_chat` 为 `true` 时，仅允许本机用户在房间内发出的普通对话进入插话载荷：
+    /// - 遇到其它 Bot 的已完成回复或任务/交付卡片时置 `waiting = true` 留待下轮，同时不阻塞后续本机用户插话；
+    /// - 遇到外部来源（Telegram / GitHub）或定时任务/外部事件时直接停止本轮插话（返回 `None`），
+    ///   既防止外部消息绕过 harness 启动审批，也避免后续本机插话超车破坏 Telegram 转发归属。
+    async fn scan(&self, only_local_chat: bool) -> Option<InboxScan> {
         let engine = self.shared.engine.clone();
         let (room, after) = (self.room_id.clone(), self.last_seq);
         let messages = match db(move || engine.messages_after(&room, after)).await {
@@ -1839,6 +1862,10 @@ impl RoomInbox {
         let mut inputs = vec![];
         let mut renew_events = vec![];
         let started = !self.first_drain;
+        let handled = self.link.handled.load(Ordering::SeqCst);
+        // 若房间派发游标尚未追上本 Bot 已读位置，或本轮扫描跳过了尚未被房间派发给其它 Bot 的用户消息，
+        // 则不能在 apply_scan 里直接推进房间共享游标 `link.handled`，以免房间 worker 漏派早先消息。
+        let mut skipped_undispatched_user = self.last_seq > handled;
         let see = |seq: i64, waiting: bool, last_seq: &mut i64, ahead: &mut BTreeSet<i64>| {
             if waiting {
                 ahead.insert(seq);
@@ -1850,6 +1877,9 @@ impl RoomInbox {
         let mut waiting = false;
         for message in messages {
             if next_ahead.contains(&message.seq) {
+                if matches!(message.sender, Sender::User) && message.seq > handled {
+                    skipped_undispatched_user = true;
+                }
                 if !waiting {
                     next_ahead.remove(&message.seq);
                     see(message.seq, waiting, &mut next_last_seq, &mut next_ahead);
@@ -1864,6 +1894,9 @@ impl RoomInbox {
                 MessageKind::Routine | MessageKind::Event
                     if message.mentions.first() != Some(&self.bot_id) =>
                 {
+                    if matches!(message.sender, Sender::User) && message.seq > handled {
+                        skipped_undispatched_user = true;
+                    }
                     see(message.seq, waiting, &mut next_last_seq, &mut next_ahead);
                     continue;
                 }
@@ -1872,7 +1905,11 @@ impl RoomInbox {
                     see(message.seq, waiting, &mut next_last_seq, &mut next_ahead);
                     continue;
                 }
-                MessageKind::Routine | MessageKind::Event => {}
+                MessageKind::Routine | MessageKind::Event => {
+                    if only_local_chat {
+                        return None;
+                    }
+                }
                 // 任务的运行过程不进对话：结果会以交付卡的形式出现。它没写完也不挡着后面的消息。
                 MessageKind::Run => continue,
                 // 自己开的任务自己知道（工具结果里有）。别人开的任务、所有的交付结果都要看到：
@@ -1882,6 +1919,13 @@ impl RoomInbox {
                     continue;
                 }
                 MessageKind::Task | MessageKind::Delivery => {
+                    if only_local_chat {
+                        if matches!(message.sender, Sender::User) && message.seq > handled {
+                            skipped_undispatched_user = true;
+                        }
+                        waiting = true;
+                        continue;
+                    }
                     see(message.seq, waiting, &mut next_last_seq, &mut next_ahead);
                     let who = match &message.sender {
                         Sender::User => "用户",
@@ -1930,6 +1974,30 @@ impl RoomInbox {
                 waiting = true;
                 continue;
             }
+            if only_local_chat {
+                if speaker.is_some() {
+                    waiting = true;
+                    continue;
+                }
+                if message.origin.is_some() {
+                    let named: Vec<&BotId> = message
+                        .mentions
+                        .iter()
+                        .filter(|id| self.names.contains_key(*id))
+                        .collect();
+                    let for_me = named.is_empty() || named.contains(&&self.bot_id);
+                    if for_me {
+                        return None;
+                    }
+                    // 显式点名其它 Bot 的外部消息不阻塞本 Bot 接收本机插话，仅保持未读留待下轮，
+                    // 并阻止后续插话把房间共享派发游标越过这条尚未派发给目标 Bot 的外部消息。
+                    if message.seq > handled {
+                        skipped_undispatched_user = true;
+                    }
+                    waiting = true;
+                    continue;
+                }
+            }
             see(message.seq, waiting, &mut next_last_seq, &mut next_ahead);
             // 成员没做成也要交回主 Agent：它要知道这件事失败了，才能决定下一步。
             let mut message = message;
@@ -1950,6 +2018,9 @@ impl RoomInbox {
                 message.content = format!("{}\n[{note}]", message.content);
             }
             if message.content.trim().is_empty() {
+                if speaker.is_none() && message.seq > handled {
+                    skipped_undispatched_user = true;
+                }
                 continue;
             }
             let named: Vec<&BotId> = message
@@ -1958,18 +2029,33 @@ impl RoomInbox {
                 .filter(|id| self.names.contains_key(*id))
                 .collect();
             let for_me = named.is_empty() || named.contains(&&self.bot_id);
-            // 说到一半时人点名找别的 Bot 的插话只给被点到的，不进这个 Bot 的上下文。
-            // 开始之前的照样看：那是这一轮的来龙去脉。
-            if started && speaker.is_none() && message.kind == MessageKind::Chat && !for_me {
-                continue;
-            }
-            if speaker.is_none() && for_me {
-                let only_me = if named.is_empty() {
-                    self.link.running().iter().all(|id| *id == self.bot_id)
+            if speaker.is_none() {
+                if !for_me {
+                    if message.seq > handled {
+                        skipped_undispatched_user = true;
+                    }
+                    // 说到一半时人点名找别的 Bot 的插话只给被点到的，不进这个 Bot 的上下文。
+                    // 开始之前的照样看：那是这一轮的来龙去脉。
+                    if started && message.kind == MessageKind::Chat {
+                        continue;
+                    }
                 } else {
-                    named.iter().all(|id| **id == self.bot_id)
-                };
-                renew_events.push((message.seq, only_me, started));
+                    let only_me = if named.is_empty() {
+                        self.link.running().iter().all(|id| *id == self.bot_id)
+                    } else {
+                        named.iter().all(|id| **id == self.bot_id)
+                    };
+                    let advance_handled = only_me && !skipped_undispatched_user;
+                    if !only_me && message.seq > handled {
+                        skipped_undispatched_user = true;
+                    }
+                    renew_events.push(RenewEvent {
+                        seq: message.seq,
+                        only_me,
+                        advance_handled,
+                        started,
+                    });
+                }
             }
             let to_me = if message.mentions.contains(&self.bot_id) {
                 "（对你说）"
@@ -2010,11 +2096,19 @@ impl RoomInbox {
         self.first_drain = false;
         self.last_seq = scan.next_last_seq;
         self.ahead = scan.next_ahead;
-        for (seq, only_me, started) in scan.renew_events {
+        for event in scan.renew_events {
+            let RenewEvent {
+                seq,
+                only_me,
+                advance_handled,
+                started,
+            } = event;
             // 正在说话的 Bot 看到了这条给它的人类消息：不用再另外挑人来接。
             // 同时点了别的 Bot 的不算处理过：被点到的别人还要靠房间叫起来。
             // 没点名的，别的 Bot 也在说时也不算：它们也该看到，要由房间记下（见 dispatch）。
-            let before = if only_me {
+            // 前面跳过了尚未派发的其它用户消息（或收件箱领先于派发游标）时，也不推进共享游标，
+            // 仅把 `only_me` 留给下面的 episode 续轮判断，避免误清排队的其它 Bot。
+            let before = if advance_handled {
                 self.link.handled.fetch_max(seq, Ordering::SeqCst)
             } else {
                 self.link.handled.load(Ordering::SeqCst)
@@ -2040,7 +2134,7 @@ impl RoomInbox {
     }
 
     async fn peek_steer(&self) -> Option<InboxScan> {
-        self.scan().await.filter(|scan| !scan.inputs.is_empty())
+        self.scan(true).await.filter(|scan| !scan.inputs.is_empty())
     }
 
     fn commit_steer(&mut self, scan: InboxScan) -> Vec<UserInput> {
@@ -2051,7 +2145,7 @@ impl RoomInbox {
 #[async_trait]
 impl Inbox for RoomInbox {
     async fn drain(&mut self) -> Vec<UserInput> {
-        match self.scan().await {
+        match self.scan(false).await {
             Some(scan) => self.apply_scan(scan),
             None => vec![],
         }
@@ -2622,5 +2716,199 @@ mod cursor_tests {
                 dismissed: 4,
             }
         );
+    }
+
+    #[tokio::test]
+    async fn steer_past_other_bots_telegram_message_does_not_skip_room_dispatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        let work = dir.path().join("work");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::create_dir_all(&work).unwrap();
+
+        let engine =
+            Arc::new(Engine::new(sa_store::Store::open(&data.join("state.db")).unwrap()).unwrap());
+        engine.ensure_defaults().unwrap();
+        let mut bots = engine.list_bots().unwrap();
+        let claude = bots.remove(0);
+        let coder = engine
+            .create_bot("Coder", sa_protocol::ModelTier::Mid, "写代码")
+            .unwrap();
+        let room = engine.list_rooms().unwrap().remove(0);
+        engine.add_room_member(&room.id, &coder.id).unwrap();
+        let pairing = engine.create_pairing(&room.id).unwrap();
+        engine
+            .redeem_pairing(&pairing.code, "tg-chat-1", "Ops")
+            .unwrap()
+            .expect("telegram link created");
+        let room = engine.get_room(&room.id).unwrap();
+
+        let provider = Arc::new(sa_llm::MockProvider::scripted(vec![]));
+        let models: Arc<dyn crate::ModelRouter> =
+            Arc::new(crate::SingleModel(crate::ResolvedModel {
+                provider,
+                model: "mock-model".into(),
+                thinking: None,
+                context_window: None,
+            }));
+        let settings = crate::Settings {
+            sessions_dir: data.join("sessions"),
+            fence: Fence::new(&work, std::slice::from_ref(&data)).unwrap(),
+            prompt: None,
+            max_steps: 4,
+            max_parallel_bots: 3,
+            max_parallel_harness: crate::DEFAULT_MAX_PARALLEL_HARNESS,
+            allow_private_network: false,
+            approval_timeout: std::time::Duration::from_secs(10),
+            work_dir: data.join("work"),
+            github: None,
+            budget: Default::default(),
+            watchdog: Default::default(),
+            routines: Default::default(),
+        };
+        let orchestrator = crate::Orchestrator::new(engine.clone(), models, settings);
+        let shared = orchestrator.shared.clone();
+
+        // 1. 初始消息（seq 1）已由房间派发并被 Claude 读取。
+        let first_msg = engine.post_user_message(&room.id, "开始排查").unwrap();
+        let link = Arc::new(RoomLink::new());
+        link.handled.store(first_msg.seq, Ordering::SeqCst);
+        link.lanes
+            .lock()
+            .unwrap()
+            .push((claude.id.clone(), CancellationToken::new()));
+
+        let mut names = HashMap::new();
+        names.insert(claude.id.clone(), claude.name.clone());
+        names.insert(coder.id.clone(), coder.name.clone());
+        let mut inbox = RoomInbox {
+            shared: shared.clone(),
+            link: link.clone(),
+            room_id: room.id.clone(),
+            bot_id: claude.id.clone(),
+            names,
+            solo: false,
+            last_seq: first_msg.seq,
+            ahead: BTreeSet::new(),
+            first_drain: false,
+            hop: Arc::new(AtomicU32::new(0)),
+            blind: None,
+        };
+
+        // 2. 在房间 worker 拉取新消息之前，先后到达：
+        //    seq 2: Telegram 点名 @Coder
+        //    seq 3: 本机插话 @Claude
+        let tg_msg = match engine
+            .receive(sa_engine::Incoming {
+                source: Source::Telegram,
+                key: "tg-41".into(),
+                name: "telegram.message".into(),
+                external: "tg-chat-1".into(),
+                label: "Alice".into(),
+                url: None,
+                kind: sa_engine::IncomingKind::Chat {
+                    text: format!("@{} check the build", coder.name),
+                },
+            })
+            .unwrap()
+        {
+            sa_engine::Receipt::Stored(msg) => *msg,
+            other => panic!("expected stored telegram message, got {other:?}"),
+        };
+        let local_text = format!("@{} focus on the failing test", claude.name);
+        let local_msg = engine.post_user_message(&room.id, &local_text).unwrap();
+
+        // 3. Claude 在 worker 跑 dispatch 之前先完成 steer 扫描与提交。
+        let scan = inbox
+            .peek_steer()
+            .await
+            .expect("local interjection should still be steerable");
+        let committed = inbox.commit_steer(scan);
+        assert_eq!(committed.len(), 1);
+        assert_eq!(committed[0].message_seq, Some(local_msg.seq));
+        assert!(inbox.ahead.contains(&local_msg.seq));
+        assert_eq!(inbox.last_seq, first_msg.seq);
+        assert_eq!(
+            link.handled.load(Ordering::SeqCst),
+            first_msg.seq,
+            "steered local interjection must not advance room dispatch cursor past undispatched Telegram request"
+        );
+
+        // 4. 随后房间 worker 运行：必须仍能拉到 seq 2 并为 Coder 排期，且不重复排期 Claude。
+        let fresh = engine
+            .user_messages_after(&room.id, link.handled.load(Ordering::SeqCst))
+            .unwrap();
+        assert_eq!(
+            fresh.iter().map(|m| m.seq).collect::<Vec<_>>(),
+            vec![tg_msg.seq, local_msg.seq]
+        );
+        link.handled
+            .fetch_max(fresh.last().unwrap().seq, Ordering::SeqCst);
+        let members = vec![claude.clone(), coder.clone()];
+        let running = link.running();
+        let mut owed = HashMap::new();
+        let jobs = dispatch(&shared, &room, &members, &fresh, &link, &running, &mut owed).await;
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].bot_id, coder.id);
+        assert_eq!(jobs[0].reply_to, vec![tg_msg.id.clone()]);
+        assert!(
+            owed.get(&claude.id)
+                .is_some_and(|seqs| seqs.contains_key(&local_msg.seq)),
+            "Claude's steered seq is tracked in owed and filtered out by session.seen on finish"
+        );
+        // 5. 当房间已派发到最新游标（handled == local_msg.seq）且没有跳过未派发消息时，
+        //    新的本机插话仍可正常推进房间共享游标。
+        let local_text2 = format!("@{} second steer", claude.name);
+        let local_msg2 = engine.post_user_message(&room.id, &local_text2).unwrap();
+        let scan2 = inbox
+            .peek_steer()
+            .await
+            .expect("second local interjection should be steerable");
+        let committed2 = inbox.commit_steer(scan2);
+        assert_eq!(committed2.len(), 1);
+        assert_eq!(committed2[0].message_seq, Some(local_msg2.seq));
+        assert_eq!(
+            link.handled.load(Ordering::SeqCst),
+            local_msg2.seq,
+            "once earlier Telegram message is dispatched, later steer may advance shared cursor"
+        );
+
+        // 6. 当 Bot 收件箱游标因读过其它 Bot 回复而领先于房间共享游标 `link.handled` 时，
+        //    只点名当前 Bot 的插话既不能推进 `link.handled`，也不能误清队列里排队的其它 Bot。
+        let bot_reply = engine
+            .post_bot_message(&room.id, &coder.id, "构建已完成", vec![], 0, vec![])
+            .unwrap();
+        // 让 Claude 正常 drain 读完 Coder 的回复：inbox.last_seq 前进到 bot_reply.seq，
+        // 而房间共享游标 link.handled 仍停留在上一条用户消息 local_msg2.seq。
+        let drained = inbox.drain().await;
+        assert!(drained
+            .iter()
+            .any(|item| item.message_seq == Some(bot_reply.seq)));
+        assert!(inbox.last_seq > link.handled.load(Ordering::SeqCst));
+        let handled_before = link.handled.load(Ordering::SeqCst);
+        link.episode().push(Job::new(coder.id.clone(), 0));
+        assert_eq!(link.episode().queued(), vec![coder.id.clone()]);
+
+        let targeted_text = format!("@{} keep going", claude.name);
+        let targeted_msg = engine.post_user_message(&room.id, &targeted_text).unwrap();
+        let scan3 = inbox
+            .peek_steer()
+            .await
+            .expect("targeted interjection should be steerable");
+        let committed3 = inbox.commit_steer(scan3);
+        assert_eq!(committed3.len(), 1);
+        assert_eq!(committed3[0].message_seq, Some(targeted_msg.seq));
+        assert_eq!(
+            link.handled.load(Ordering::SeqCst),
+            handled_before,
+            "shared dispatch cursor must stay behind inbox cursor when inbox was ahead"
+        );
+        assert_eq!(
+            link.episode().queued(),
+            vec![coder.id.clone()],
+            "targeted interjection for running bot must renew without dropping queued turns"
+        );
+
+        orchestrator.shutdown().await;
     }
 }
