@@ -9,7 +9,9 @@ use crate::paths::DataDir;
 use crate::remote::{self, RemoteService, SshTarget, Tunnel, TunnelStop, RETRY_FIRST, RETRY_MAX};
 use anyhow::{bail, Context, Result};
 use reqwest::StatusCode;
-use sa_orchestrator::share_desk::{self, Desks, Forward, Progress};
+use sa_orchestrator::share_desk::{
+    self, ApprovalReply, Desks, Evict, Forward, PendingApprovals, Progress, Steer,
+};
 use sa_orchestrator::shares::{share_name, READ_ONLY_TOOLS, STOP};
 use sa_protocol::{ShareCall, SharePoll, ShareReply};
 use sa_tools::{local_shell, Fence, ToolCtx, ToolRegistry};
@@ -114,15 +116,22 @@ pub fn run(data_dir: &DataDir, args: ShareArgs) -> Result<()> {
         .enable_all()
         .build()?;
     let result = runtime.block_on(async {
-        tokio::select! {
+        let out = tokio::select! {
             result = sharer.serve(&place) => result,
             () = crate::serve::stop_signal() => Ok(()),
-        }
+        };
+        sharer.shutdown();
+        out
     });
     if let Some(tunnel) = tunnel {
         tunnel.close();
     }
     result
+}
+
+struct ActiveDesk {
+    approvals: PendingApprovals,
+    steer_tx: tokio::sync::mpsc::UnboundedSender<Steer>,
 }
 
 struct Sharer {
@@ -135,6 +144,8 @@ struct Sharer {
     tools: ToolRegistry,
     /// 正在做的活，人点了停止时用它叫停。
     running: Mutex<HashMap<u64, CancellationToken>>,
+    /// 正在运行中的远端 harness 工位控制通道（审批回传 + 实时插话）。
+    active_desks: Mutex<HashMap<u64, ActiveDesk>>,
     http: reqwest::Client,
     base: String,
     token: String,
@@ -173,10 +184,21 @@ impl Sharer {
             session: uuid::Uuid::new_v4().simple().to_string(),
             tools,
             running: Mutex::default(),
+            active_desks: Mutex::default(),
             http,
             base: format!("http://{}/api/shares", service.addr),
             token: service.token,
         })
+    }
+
+    fn shutdown(&self) {
+        let tokens: Vec<CancellationToken> =
+            self.running.lock().unwrap().values().cloned().collect();
+        for token in tokens {
+            token.cancel();
+        }
+        self.active_desks.lock().unwrap().clear();
+        self.desks.evict_all();
     }
 
     /// 一直取活、做活、交回，直到出了没法继续的错。
@@ -198,7 +220,7 @@ impl Sharer {
         tokio::spawn(async move {
             while let Some((call, cancel, done)) = queued.recv().await {
                 let id = call.id;
-                worker.handle(call, cancel).await;
+                worker.handle(call, cancel, None).await;
                 worker.running.lock().unwrap().remove(&id);
                 let _ = done.send(());
             }
@@ -217,11 +239,18 @@ impl Sharer {
                         connected = true;
                     }
                     retry = RETRY_FIRST;
-                    // 命令可能跑很久，边跑边接着取活（好收到「停下」）；有命令在跑时文件操作也不等，免得耽误叫停。
+                    // 命令可能跑很久，边跑边接着取活（好收到「停下」、审批回传与实时插话）；有命令在跑时文件操作也不等，免得耽误叫停。
                     // 没命令在跑时文件操作做完再取下一件：旧的服务不看 `running`，边做边取会被它当成丢了。
                     match call {
                         Some(call)
-                            if matches!(call.tool.as_str(), STOP | "shell" | share_desk::RUN) =>
+                            if matches!(
+                                call.tool.as_str(),
+                                STOP | share_desk::APPROVAL
+                                    | share_desk::STEER
+                                    | share_desk::EVICT
+                                    | "shell"
+                                    | share_desk::RUN
+                            ) =>
                         {
                             self.start(call)
                         }
@@ -264,6 +293,7 @@ impl Sharer {
             read_only: self.read_only,
             shell: self.commands.then(|| local_shell().to_string()),
             running: self.running.lock().unwrap().keys().copied().collect(),
+            interactive: self.commands && !self.read_only,
         };
         let response = self
             .http
@@ -290,7 +320,7 @@ impl Sharer {
         }
     }
 
-    /// 开始执行一条命令（不等它跑完，接着去取下一件），或者叫停正在跑的那条。
+    /// 开始执行一条命令 / harness（不等它跑完，接着去取下一件），或立即处理控制消息（停下、审批回传、实时插话）。
     fn start(self: &Arc<Self>, call: ShareCall) {
         if call.tool == STOP {
             if let Some(cancel) = self.running.lock().unwrap().get(&call.id) {
@@ -298,33 +328,124 @@ impl Sharer {
             }
             return;
         }
+        if call.tool == share_desk::APPROVAL {
+            if let Ok(reply) = serde_json::from_value::<ApprovalReply>(call.input) {
+                let tx = self
+                    .active_desks
+                    .lock()
+                    .unwrap()
+                    .get(&call.id)
+                    .and_then(|desk| desk.approvals.lock().unwrap().remove(&reply.req_id));
+                if let Some(tx) = tx {
+                    let _ = tx.send(reply.allowed);
+                }
+            }
+            return;
+        }
+        if call.tool == share_desk::STEER {
+            if let Ok(steer) = serde_json::from_value::<Steer>(call.input) {
+                let sent = self
+                    .active_desks
+                    .lock()
+                    .unwrap()
+                    .get(&call.id)
+                    .is_some_and(|desk| desk.steer_tx.send(steer.clone()).is_ok());
+                if !sent {
+                    // 目标工位已结束或未启用插话：回发 rejected 防止服务端继续等待确认。
+                    let this = Arc::clone(self);
+                    let id = call.id;
+                    tokio::spawn(async move {
+                        let text = serde_json::to_string(&Progress::SteerAck {
+                            steer_id: steer.steer_id,
+                            accepted: false,
+                        })
+                        .expect("只有基本类型");
+                        let _ = this
+                            .send(&this.reply(id, true, text, true), REPLY_TRIES)
+                            .await;
+                    });
+                }
+            }
+            return;
+        }
         let cancel = CancellationToken::new();
         self.running.lock().unwrap().insert(call.id, cancel.clone());
+        // 在 spawn 前同步注册远端控制表，确保紧随其后的 `_approval` / `_steer` 不会竞态扑空。
+        let desk_runtime = if call.tool == share_desk::RUN {
+            let approvals: PendingApprovals = Arc::default();
+            let (steer_tx, steer_rx) = tokio::sync::mpsc::unbounded_channel();
+            self.active_desks.lock().unwrap().insert(
+                call.id,
+                ActiveDesk {
+                    approvals: Arc::clone(&approvals),
+                    steer_tx,
+                },
+            );
+            Some((approvals, steer_rx))
+        } else {
+            None
+        };
         let this = Arc::clone(self);
         tokio::spawn(async move {
             let id = call.id;
-            this.handle(call, cancel).await;
+            this.handle(call, cancel, desk_runtime).await;
+            this.active_desks.lock().unwrap().remove(&id);
             this.running.lock().unwrap().remove(&id);
         });
     }
 
     /// 做一件活，把结果交回去。交不回去就重试几次；还不行就算了，服务那边会当它丢了。
-    async fn handle(&self, call: ShareCall, cancel: CancellationToken) {
+    async fn handle(
+        &self,
+        call: ShareCall,
+        cancel: CancellationToken,
+        desk_runtime: Option<(
+            PendingApprovals,
+            tokio::sync::mpsc::UnboundedReceiver<Steer>,
+        )>,
+    ) {
+        let approvals_ref = desk_runtime.as_ref().map(|(a, _)| Arc::clone(a));
         // harness 做到一半的进展按顺序先交，最后再交结果。
         let (progress, mut steps) = tokio::sync::mpsc::unbounded_channel::<Progress>();
         let forward = async {
             while let Some(step) = steps.recv().await {
-                let text = serde_json::to_string(&step).expect("只有字符串");
-                self.send(&self.reply(call.id, true, text, true), PROGRESS_TRIES)
+                let critical = matches!(
+                    step,
+                    Progress::ApprovalRequest { .. } | Progress::SteerAck { .. }
+                );
+                let pending_req_id = match &step {
+                    Progress::ApprovalRequest { req_id, .. } => Some(req_id.clone()),
+                    _ => None,
+                };
+                let text = serde_json::to_string(&step).expect("可序列化");
+                let tries = if critical {
+                    REPLY_TRIES
+                } else {
+                    PROGRESS_TRIES
+                };
+                let delivered = self
+                    .send(&self.reply(call.id, true, text, true), tries)
                     .await;
+                if !delivered {
+                    // 审批请求未能送达服务端：立刻本地拒绝，避免远端 harness 死等超时。
+                    if let (Some(req_id), Some(approvals)) = (pending_req_id, &approvals_ref) {
+                        if let Some(tx) = approvals.lock().unwrap().remove(&req_id) {
+                            let _ = tx.send(false);
+                        }
+                    }
+                }
             }
         };
-        let (result, ()) = tokio::join!(self.run_tool(&call, cancel, progress), forward);
+        let (result, ()) = tokio::join!(
+            self.run_tool(&call, cancel, progress, desk_runtime),
+            forward
+        );
         let (ok, text) = match result {
             Ok(text) => (true, text),
             Err(text) => (false, text),
         };
-        self.send(&self.reply(call.id, ok, text, false), REPLY_TRIES)
+        let _ = self
+            .send(&self.reply(call.id, ok, text, false), REPLY_TRIES)
             .await;
     }
 
@@ -339,7 +460,7 @@ impl Sharer {
         }
     }
 
-    async fn send(&self, reply: &ShareReply, tries: u32) {
+    async fn send(&self, reply: &ShareReply, tries: u32) -> bool {
         let mut retry = RETRY_FIRST;
         for _ in 0..tries {
             let sent = self
@@ -351,11 +472,11 @@ impl Sharer {
                 .send()
                 .await;
             match sent {
-                Ok(response) if response.status().is_success() => return,
+                Ok(response) if response.status().is_success() => return true,
                 Ok(response) if response.status() == StatusCode::CONFLICT => {
                     // 交晚了（被别的顶替了）：结果没人要了。还能不能接着共享看下一次取活。
                     eprintln!("结果没交上：{}", error_text(response).await);
-                    return;
+                    return false;
                 }
                 Ok(response) => eprintln!("交结果时服务回了 {}，重试……", response.status()),
                 Err(error) => eprintln!("交结果失败（{error}），重试……"),
@@ -363,6 +484,7 @@ impl Sharer {
             tokio::time::sleep(retry).await;
             retry = (retry * 2).min(RETRY_MAX);
         }
+        false
     }
 
     async fn run_tool(
@@ -370,13 +492,17 @@ impl Sharer {
         call: &ShareCall,
         cancel: CancellationToken,
         progress: tokio::sync::mpsc::UnboundedSender<Progress>,
+        desk_runtime: Option<(
+            PendingApprovals,
+            tokio::sync::mpsc::UnboundedReceiver<Steer>,
+        )>,
     ) -> Result<String, String> {
         // 排着队时就被叫停了：不做了。
         if cancel.is_cancelled() {
             return Err("已停止，没有执行。".into());
         }
         if call.tool.starts_with("_desk") || call.tool == share_desk::RUN {
-            return self.desk_work(call, cancel, progress).await;
+            return self.desk_work(call, cancel, progress, desk_runtime).await;
         }
         let Some(tool) = self.tools.get(&call.tool) else {
             return Err(if self.read_only {
@@ -413,12 +539,16 @@ impl Sharer {
 }
 
 impl Sharer {
-    /// harness 的独立目录：开、在里面跑 harness、带回或丢掉。
+    /// harness 的独立目录：开、在里面跑 harness、带回/丢掉或回收常驻会话池。
     async fn desk_work(
         &self,
         call: &ShareCall,
         cancel: CancellationToken,
         progress: tokio::sync::mpsc::UnboundedSender<Progress>,
+        desk_runtime: Option<(
+            PendingApprovals,
+            tokio::sync::mpsc::UnboundedReceiver<Steer>,
+        )>,
     ) -> Result<String, String> {
         if self.read_only {
             return Err("这个共享目录是只读的，harness 不能在这里干活。".into());
@@ -440,7 +570,22 @@ impl Sharer {
             share_desk::RUN => {
                 let job: share_desk::Run = serde_json::from_value(input).map_err(unreadable)?;
                 println!("{} 开始在 {} 里干活", job.harness.label(), job.workdir.path);
-                let ran = self.desks.run(job, &Forward(progress), &cancel).await;
+                let (observer, steer_rx) = match (job.interactive, desk_runtime) {
+                    (true, Some((approvals, steer_rx))) => (
+                        Forward::interactive(
+                            progress.clone(),
+                            approvals,
+                            cancel.clone(),
+                            job.approval_timeout_ms,
+                        ),
+                        Some(steer_rx),
+                    ),
+                    _ => (Forward::new(progress.clone()), None),
+                };
+                let ran = self
+                    .desks
+                    .run_interactive(job, steer_rx, &progress, &observer, &cancel)
+                    .await;
                 Ok(serde_json::to_string(&ran).expect("只有字符串"))
             }
             share_desk::CLOSE => {
@@ -448,6 +593,11 @@ impl Sharer {
                 let what = if close.accept { "带回" } else { "丢掉" };
                 self.desks.close(close).await?;
                 println!("harness 的改动已{what}");
+                Ok(String::new())
+            }
+            share_desk::EVICT => {
+                let evict: Evict = serde_json::from_value(input).map_err(unreadable)?;
+                self.desks.evict_scope(&evict.scope);
                 Ok(String::new())
             }
             other => Err(format!("共享目录这边不能用 {other}。")),

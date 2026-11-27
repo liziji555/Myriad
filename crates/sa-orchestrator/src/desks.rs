@@ -251,16 +251,29 @@ impl Orchestrator {
             ));
         };
         let (engine, r, b) = (self.shared.engine.clone(), room.clone(), bot.clone());
-        db(move || {
+        let share = db(move || {
             let mut desk = engine.desk(&r, &b)?;
+            let share = desk.share.clone();
             desk.session = None;
-            engine.put_desk(&r, &b, &desk)
+            engine.put_desk(&r, &b, &desk)?;
+            Ok(share)
         })
         .await?;
         let scope = crate::harness::acp_scope(room, bot);
         self.shared.acp_pool.evict_scope(&scope);
         self.shared.codex_pool.evict_scope(&scope);
         self.shared.claude_pool.evict_scope(&scope);
+        if let Some(name) = share {
+            let shares = &self.shared.shares;
+            if shares.online(&name) && shares.interactive(&name) {
+                let input = serde_json::to_value(share_desk::Evict { scope }).expect("只有字符串");
+                let cancel = CancellationToken::new();
+                let asked = shares.ask(&name, share_desk::EVICT, input, &cancel, None);
+                if let Err(err) = tokio::time::timeout(SHARED_EVICT_WAIT, asked).await {
+                    tracing::warn!(share = %name, "远端工位会话池回收超时：{err}");
+                }
+            }
+        }
         Ok(())
     }
 
@@ -426,6 +439,7 @@ impl Orchestrator {
             let close = share_desk::Close {
                 workdir: dir,
                 accept,
+                scope: Some(crate::harness::acp_scope(room, bot)),
             };
             let input = serde_json::to_value(close).expect("只有字符串");
             let cancel = CancellationToken::new();
@@ -453,6 +467,8 @@ impl Orchestrator {
 
 /// 在共享目录那台电脑上带回、丢掉改动最多等多久。
 const SHARED_CLOSE_WAIT: std::time::Duration = std::time::Duration::from_secs(120);
+/// 通知共享目录回收远端常驻会话池最多等多久。
+const SHARED_EVICT_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
 fn list_entries_under(root: &Path, rel: &str) -> Result<Vec<WorkspaceEntry>, String> {
     let fence = sa_tools::Fence::new(root, &[]).map_err(|e| format!("工作目录打不开：{e}"))?;

@@ -61,7 +61,7 @@ impl Drop for PooledAcp {
 /// 持久 ACP 进程池：同一房间工位的 ACP Agent 跨轮保持常驻进程与内存会话，免去每轮冷启动。
 #[derive(Default)]
 pub(crate) struct AcpPool {
-    entries: std::sync::Mutex<HashMap<AcpKey, PooledAcp>>,
+    entries: std::sync::Arc<std::sync::Mutex<HashMap<AcpKey, PooledAcp>>>,
 }
 
 impl AcpPool {
@@ -99,14 +99,19 @@ impl AcpPool {
         }
     }
 
-    fn put(&self, key: AcpKey, mut conn: PooledAcp) {
-        conn.last_used = Instant::now();
+    fn put(&self, key: AcpKey, conn: PooledAcp) {
+        self.put_with_ttl(key, conn, ACP_IDLE_TTL);
+    }
+
+    fn put_with_ttl(&self, key: AcpKey, mut conn: PooledAcp, ttl: Duration) {
+        let now = Instant::now();
+        conn.last_used = now;
         let mut evicted = Vec::new();
         {
             let mut map = self.entries.lock().unwrap_or_else(|e| e.into_inner());
             let expired_keys: Vec<AcpKey> = map
                 .iter()
-                .filter(|(_, v)| v.last_used.elapsed() > ACP_IDLE_TTL)
+                .filter(|(_, v)| v.last_used.elapsed() > ttl)
                 .map(|(k, _)| k.clone())
                 .collect();
             for k in expired_keys {
@@ -127,11 +132,35 @@ impl AcpPool {
                     break;
                 }
             }
-            if let Some(prev) = map.insert(key, conn) {
+            if let Some(prev) = map.insert(key.clone(), conn) {
                 evicted.push(prev);
             }
         }
         drop(evicted);
+
+        // 主动按空闲截止时间安排回收定时器：复核 `last_used == now` 防止旧定时器误杀新连接。
+        let weak = std::sync::Arc::downgrade(&self.entries);
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                tokio::time::sleep(ttl).await;
+                let Some(entries) = weak.upgrade() else {
+                    return;
+                };
+                let expired = {
+                    let mut map = entries.lock().unwrap_or_else(|e| e.into_inner());
+                    if map.get(&key).is_some_and(|v| v.last_used == now) {
+                        map.remove(&key).map(|mut conn| {
+                            // 释放锁前立即向进程树发终止信号，避免并发 evict_scope 提前返回。
+                            conn.child.kill();
+                            conn
+                        })
+                    } else {
+                        None
+                    }
+                };
+                drop(expired);
+            });
+        }
     }
 
     /// 驱逐指定作用域（例如重置工位会话、关闭工位）的全部常驻 ACP 进程。
@@ -2934,6 +2963,23 @@ for raw in sys.stdin:
         assert_eq!(fresh.end, TurnEnd::Completed);
         assert_ne!(fresh.session, first.session);
         assert!(fresh.text.contains("turn=1"), "{}", fresh.text);
+
+        // 主动空闲 TTL 回收：不发生新的 checkout 时也自动回收过期 ACP 进程。
+        let (ttl_key, conn) = pool
+            .entries
+            .lock()
+            .unwrap()
+            .drain()
+            .next()
+            .expect("pooled acp connection should be present");
+        pool.put_with_ttl(ttl_key, conn, Duration::from_millis(80));
+        assert_eq!(pool.len(), 1);
+        tokio::time::sleep(Duration::from_millis(160)).await;
+        assert_eq!(
+            pool.len(),
+            0,
+            "idle AcpPool entry must be actively evicted after TTL without another checkout"
+        );
 
         pool.evict_all();
         assert_eq!(pool.len(), 0);

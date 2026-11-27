@@ -1432,7 +1432,19 @@ async fn harness_turn(
     let (finished, changes) = match share {
         Some(name) => {
             match shared_harness(
-                shared, room_id, bot, &mut desk, name, &said, summary, permission, observer, cancel,
+                shared,
+                room_id,
+                bot,
+                &mut desk,
+                name,
+                &said,
+                summary,
+                permission,
+                inbox,
+                transcript,
+                &mut steer_watch,
+                observer,
+                cancel,
             )
             .await
             {
@@ -1655,6 +1667,7 @@ async fn local_desk(
 type Changes = Result<Vec<sa_protocol::DeskChange>, String>;
 
 /// 在共享目录那台电脑上开独立目录、跑 harness：那边每做一步都报回来，放进房间。
+/// 当远端 `sa share` 支持交互模式时，同时透传双向审批卡、运行中实时插话与常驻会话池。
 #[allow(clippy::too_many_arguments)]
 async fn shared_harness(
     shared: &Arc<Shared>,
@@ -1665,10 +1678,15 @@ async fn shared_harness(
     said: &[String],
     summary: String,
     permission: PermissionMode,
+    inbox: &mut RoomInbox,
+    transcript: &mut Transcript,
+    steer_watch: &mut tokio::sync::watch::Receiver<u64>,
     observer: &RoomObserver,
     cancel: &CancellationToken,
 ) -> Result<(crate::harness::Finished, Changes), TurnEnd> {
     use crate::share_desk;
+    use futures_util::stream::{FuturesUnordered, StreamExt};
+
     let fresh = desk.workdir.is_none();
     if fresh {
         observer
@@ -1720,6 +1738,8 @@ async fn shared_harness(
     if cancel.is_cancelled() {
         return Err(TurnEnd::Cancelled);
     }
+    let share_interactive = shared.shares.interactive(name);
+    let scope = crate::harness::acp_scope(room_id, &bot.id);
     let prompt = harness_prompt(bot, said, resume.is_some(), &workdir.path);
     let job = share_desk::Run {
         workdir,
@@ -1729,22 +1749,139 @@ async fn shared_harness(
         session: resume.clone(),
         summary,
         permission,
+        interactive: share_interactive,
+        scope: share_interactive.then_some(scope),
+        approval_timeout_ms: share_interactive
+            .then_some(shared.settings.approval_timeout.as_millis() as u64),
     };
     let input = serde_json::to_value(job).expect("只有字符串");
     let (progress, mut shown) = tokio::sync::mpsc::unbounded_channel::<String>();
-    let ran = shared
+    let run_handle = shared
         .shares
-        .ask(name, share_desk::RUN, input, cancel, Some(progress));
+        .start_ask(name, share_desk::RUN, input, Some(progress));
+    let run_call_id = run_handle.id();
+    let ran = run_handle.wait(cancel);
     tokio::pin!(ran);
+
+    let mut pending_approvals = FuturesUnordered::new();
+    let mut pending_steer: Option<(String, InboxScan)> = None;
+    let mut steer_open =
+        share_interactive && matches!(bot.harness, Harness::Codex | Harness::ClaudeCode);
+    let mut steer_dirty = steer_open && steer_watch.has_changed().unwrap_or(false);
+    if steer_dirty {
+        steer_watch.borrow_and_update();
+    }
+
     let ran = loop {
+        if steer_open && steer_dirty && pending_steer.is_none() {
+            steer_dirty = false;
+            if let Some(scan) = inbox.peek_steer().await {
+                let steer_text = scan
+                    .inputs
+                    .iter()
+                    .map(|i| i.content.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
+                let steer_id = uuid::Uuid::new_v4().simple().to_string();
+                let payload = serde_json::to_value(share_desk::Steer {
+                    steer_id: steer_id.clone(),
+                    text: steer_text,
+                })
+                .expect("只有字符串");
+                if shared
+                    .shares
+                    .send_control(name, run_call_id, share_desk::STEER, payload)
+                {
+                    pending_steer = Some((steer_id, scan));
+                } else {
+                    steer_open = false;
+                }
+            }
+        }
         tokio::select! {
             biased;
-            Some(item) = shown.recv() => share_desk::show(&item, observer).await,
+            Some(item) = shown.recv() => {
+                match share_desk::parse_progress(&item) {
+                    Some(share_desk::Progress::ApprovalRequest {
+                        req_id,
+                        call_id,
+                        tool,
+                        title,
+                        input,
+                        reason,
+                    }) => {
+                        pending_approvals.push(async move {
+                            let allowed = tokio::select! {
+                                allowed = observer.request_approval(ApprovalRequest {
+                                    call_id: &call_id,
+                                    tool: &tool,
+                                    title: &title,
+                                    input: &input,
+                                    reason: &reason,
+                                }) => allowed,
+                                _ = cancel.cancelled() => return,
+                            };
+                            let payload = serde_json::to_value(share_desk::ApprovalReply {
+                                req_id,
+                                allowed,
+                            })
+                            .expect("只有基本类型");
+                            shared.shares.send_control(
+                                name,
+                                run_call_id,
+                                share_desk::APPROVAL,
+                                payload,
+                            );
+                        });
+                    }
+                    Some(share_desk::Progress::SteerAck { steer_id, accepted }) => {
+                        if pending_steer
+                            .as_ref()
+                            .is_some_and(|(id, _)| id == &steer_id)
+                        {
+                            if let Some((_, scan)) = pending_steer.take() {
+                                if accepted {
+                                    let committed = inbox.commit_steer(scan);
+                                    let _ = record_inputs(transcript, committed);
+                                }
+                            }
+                        }
+                    }
+                    Some(other) => share_desk::apply_progress(other, observer).await,
+                    None => {}
+                }
+            }
+            Some(()) = pending_approvals.next(), if !pending_approvals.is_empty() => {}
+            changed = steer_watch.changed(), if steer_open => {
+                if changed.is_err() {
+                    steer_open = false;
+                } else {
+                    steer_dirty = true;
+                }
+            }
             ran = &mut ran => break ran,
         }
     };
+    drop(pending_approvals);
     while let Ok(item) = shown.try_recv() {
-        share_desk::show(&item, observer).await;
+        match share_desk::parse_progress(&item) {
+            Some(share_desk::Progress::SteerAck { steer_id, accepted }) => {
+                if pending_steer
+                    .as_ref()
+                    .is_some_and(|(id, _)| id == &steer_id)
+                {
+                    if let Some((_, scan)) = pending_steer.take() {
+                        if accepted {
+                            let committed = inbox.commit_steer(scan);
+                            let _ = record_inputs(transcript, committed);
+                        }
+                    }
+                }
+            }
+            Some(share_desk::Progress::ApprovalRequest { .. }) => {}
+            Some(other) => share_desk::apply_progress(other, observer).await,
+            None => {}
+        }
     }
     let ran = match ran.map(|text| serde_json::from_str::<share_desk::Ran>(&text).map_err(|_| text))
     {

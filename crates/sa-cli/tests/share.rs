@@ -499,3 +499,259 @@ echo '{"type":"text","text":"假 harness 做完了"}'
     assert_eq!(status, 200, "{body}");
     assert!(!desk_path.exists());
 }
+
+/// 远端共享工位全能力端到端：
+/// 1) Claude Code 在 `sa share` 侧常驻 `ClaudePool` 跨轮复用进程（同 PID）；
+/// 2) 远端 `can_use_tool` 双向审批卡（允许 + 拒绝）经共享隧道透传回房间；
+/// 3) 运行中实时插话（`_steer` + `Progress::SteerAck`）注入远端进程且不触发重复轮次；
+/// 4) 重置会话经 `_desk_evict` 立即回收远端常驻进程（新 PID），带回改动后落盘共享目录。
+#[cfg(unix)]
+#[test]
+fn shared_claude_supports_persistent_pool_approvals_live_steer_and_evict() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("另一台电脑").join("claude-proj");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join("README.md"), "remote repo\n").unwrap();
+
+    let fake_claude = dir.path().join("fake-claude.py");
+    std::fs::write(
+        &fake_claude,
+        r#"#!/usr/bin/env python3
+import json, os, sys
+
+def emit(obj):
+    sys.stdout.write(json.dumps(obj, ensure_ascii=False) + "\n")
+    sys.stdout.flush()
+
+def user_text(msg):
+    content = msg.get("message", {}).get("content", "")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(b.get("text", "") for b in content if isinstance(b, dict))
+    return ""
+
+def read_frame():
+    line = sys.stdin.readline()
+    if not line:
+        return None
+    return json.loads(line)
+
+session_id = f"remote-sess-{os.getpid()}"
+emit({"type": "system", "subtype": "init", "session_id": session_id})
+
+while True:
+    frame = read_frame()
+    if frame is None:
+        break
+    kind = frame.get("type")
+    if kind == "control_request":
+        req_id = frame.get("request_id", "")
+        sub = frame.get("request", {}).get("subtype", "")
+        if sub == "initialize":
+            emit({
+                "type": "control_response",
+                "response": {"subtype": "success", "request_id": req_id, "response": {"commands": []}},
+            })
+        elif sub == "interrupt":
+            emit({
+                "type": "control_response",
+                "response": {"subtype": "success", "request_id": req_id, "response": {}},
+            })
+        continue
+    if kind != "user":
+        continue
+
+    uid = frame.get("uuid")
+    text = user_text(frame)
+    emit({"type": "user", "uuid": uid, "message": frame.get("message", {})})
+
+    if "ALLOW_AND_STEER" in text:
+        req_id = "cr-allow-1"
+        emit({
+            "type": "control_request",
+            "request_id": req_id,
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": "Bash",
+                "tool_use_id": "tu-allow-1",
+                "input": {"command": "echo remote-ok"},
+            },
+        })
+        resp = read_frame()
+        behavior = resp.get("response", {}).get("response", {}).get("behavior")
+        if behavior != "allow":
+            emit({"type": "stream_event", "event": {"type": "content_block_delta", "delta": {"type": "text_delta", "text": f"UNEXPECTED_BEHAVIOR={behavior}"}}})
+            emit({"type": "result", "subtype": "success", "session_id": session_id, "is_error": False})
+            continue
+        with open("remote_approved.txt", "w", encoding="utf-8") as f:
+            f.write(f"pid={os.getpid()}\n")
+        emit({"type": "stream_event", "event": {"type": "content_block_delta", "delta": {"type": "text_delta", "text": f"APPROVED_PID={os.getpid()} WAITING_STEER "}}})
+        steer_frame = read_frame()
+        steer_uid = steer_frame.get("uuid")
+        steer_text = user_text(steer_frame)
+        emit({"type": "user", "uuid": steer_uid, "message": steer_frame.get("message", {})})
+        emit({"type": "stream_event", "event": {"type": "content_block_delta", "delta": {"type": "text_delta", "text": f"GOT_STEER={steer_text}"}}})
+        emit({"type": "result", "subtype": "success", "session_id": session_id, "is_error": False})
+    elif "DENY_TEST" in text:
+        req_id = "cr-deny-1"
+        emit({
+            "type": "control_request",
+            "request_id": req_id,
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": "Bash",
+                "tool_use_id": "tu-deny-1",
+                "input": {"command": "rm -rf /tmp/never"},
+            },
+        })
+        resp = read_frame()
+        behavior = resp.get("response", {}).get("response", {}).get("behavior")
+        emit({"type": "stream_event", "event": {"type": "content_block_delta", "delta": {"type": "text_delta", "text": f"DENY_RESULT={behavior} REUSE_PID={os.getpid()}"}}})
+        emit({"type": "result", "subtype": "success", "session_id": session_id, "is_error": False})
+    elif "AFTER_RESET" in text:
+        emit({"type": "stream_event", "event": {"type": "content_block_delta", "delta": {"type": "text_delta", "text": f"FRESH_PID={os.getpid()}"}}})
+        emit({"type": "result", "subtype": "success", "session_id": session_id, "is_error": False})
+    else:
+        emit({"type": "stream_event", "event": {"type": "content_block_delta", "delta": {"type": "text_delta", "text": f"ECHO_PID={os.getpid()}"}}})
+        emit({"type": "result", "subtype": "success", "session_id": session_id, "is_error": False})
+"#,
+    )
+    .unwrap();
+
+    let server = Server::start(dir.path());
+    let room = server.room();
+    let (status, bot) = server.request(
+        "POST",
+        "/api/bots",
+        Some(json!({
+            "name": "RemoteClaude",
+            "harness": "claude_code",
+            "harness_command": format!("python3 {}", fake_claude.display()),
+        })),
+    );
+    assert_eq!(status, 201, "{bot}");
+    let bot_id = bot["id"].as_str().unwrap().to_string();
+    let (status, body) =
+        server.request("PUT", &format!("/api/rooms/{room}/members/{bot_id}"), None);
+    assert!(status < 300, "{status} {body}");
+    let (status, body) = server.request(
+        "PATCH",
+        &format!("/api/rooms/{room}"),
+        Some(json!({ "share": "我的项目", "host_bot_id": bot_id })),
+    );
+    assert_eq!(status, 200, "{body}");
+
+    let _sharing = Sharing::start(dir.path(), &project, &server, &["--commands"]);
+
+    // 辅助函数：批准或拒绝某张尚未处理的审批卡（按 step.tool 过滤或全部）。
+    let decide_step = |reply: &Value,
+                       tool: &str,
+                       decision: &str,
+                       seen: &mut std::collections::HashSet<String>| {
+        if let Some(steps) = reply["steps"].as_array() {
+            for s in steps {
+                if s["tool"].as_str() == Some(tool) && s["state"] == "waiting" {
+                    if let Some(id) = s["approval"]["id"].as_str() {
+                        if seen.insert(id.to_string()) {
+                            let (st, body) = server.request(
+                                "POST",
+                                &format!("/api/approvals/{id}/decide"),
+                                Some(json!({ "decision": decision })),
+                            );
+                            assert!(st < 300, "{st} {body}");
+                        }
+                    }
+                }
+            }
+        }
+    };
+
+    // 第 1 轮：启动审批 + 远端 claude_approval 允许 + 运行中实时插话（不触发重复第 2 轮）。
+    let mut handled_approvals = std::collections::HashSet::new();
+    let mut steered = false;
+    let reply1 = server.ask(&room, "ALLOW_AND_STEER", |reply| {
+        decide_step(reply, "harness", "once", &mut handled_approvals);
+        decide_step(reply, "claude_approval", "once", &mut handled_approvals);
+        if !steered
+            && reply["content"]
+                .as_str()
+                .is_some_and(|c| c.contains("WAITING_STEER"))
+        {
+            let (st, body) = server.request(
+                "POST",
+                &format!("/api/rooms/{room}/messages"),
+                Some(json!({ "content": "MID_TURN_INTERJECTION" })),
+            );
+            assert!(st == 200 || st == 201, "{st} {body}");
+            steered = true;
+        }
+    });
+    assert!(steered, "没有触发运行中实时插话：{reply1:#}");
+    assert_eq!(reply1["state"], "complete", "{reply1:#}");
+    let content1 = reply1["content"].as_str().unwrap();
+    assert!(content1.contains("APPROVED_PID="), "{content1}");
+    assert!(content1.contains("MID_TURN_INTERJECTION"), "{content1}");
+    let pid1: String = content1
+        .split("APPROVED_PID=")
+        .nth(1)
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .to_string();
+    // 等待片刻确认插话已提交游标，不会额外多出一轮回复。
+    let msgs_after_turn1 = server.messages(&room).len();
+    std::thread::sleep(Duration::from_millis(400));
+    assert_eq!(
+        server.messages(&room).len(),
+        msgs_after_turn1,
+        "已实时插话的消息不应再触发重复轮次"
+    );
+
+    // 第 2 轮：复用远端 ClaudePool 同一进程（同 PID），并测试拒绝 claude_approval。
+    let reply2 = server.ask(&room, "DENY_TEST", |reply| {
+        decide_step(reply, "harness", "once", &mut handled_approvals);
+        decide_step(reply, "claude_approval", "deny", &mut handled_approvals);
+    });
+    assert_eq!(reply2["state"], "complete", "{reply2:#}");
+    let content2 = reply2["content"].as_str().unwrap();
+    assert!(content2.contains("DENY_RESULT=deny"), "{content2}");
+    assert!(
+        content2.contains(&format!("REUSE_PID={pid1}")),
+        "第 2 轮应复用远端常驻进程 {pid1}，实际：{content2}"
+    );
+
+    // 重置会话：经 `_desk_evict` 回收远端常驻进程，第 3 轮应启动新 PID。
+    let (st, body) = server.request(
+        "POST",
+        &format!("/api/rooms/{room}/desks/{bot_id}/reset-session"),
+        None,
+    );
+    assert!(st < 300, "{st} {body}");
+
+    let reply3 = server.ask(&room, "AFTER_RESET", |reply| {
+        decide_step(reply, "harness", "once", &mut handled_approvals);
+    });
+    assert_eq!(reply3["state"], "complete", "{reply3:#}");
+    let content3 = reply3["content"].as_str().unwrap();
+    assert!(content3.contains("FRESH_PID="), "{content3}");
+    let pid3: String = content3
+        .split("FRESH_PID=")
+        .nth(1)
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .to_string();
+    assert_ne!(pid3, pid1, "重置会话后远端会话池应已回收，不能再复用旧 PID");
+
+    // 验收带回：远端先回收进程再把 remote_approved.txt 带回共享目录。
+    let (st, body) = server.request(
+        "POST",
+        &format!("/api/rooms/{room}/desks/{bot_id}/accept"),
+        None,
+    );
+    assert_eq!(st, 200, "{body}");
+    assert!(project.join("remote_approved.txt").exists());
+}
