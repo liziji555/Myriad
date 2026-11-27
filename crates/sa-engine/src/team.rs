@@ -165,6 +165,8 @@ impl Engine {
                     Err(e) => return Ok(Err(e)),
                 }
             }
+            let original_harness = bot.harness;
+            let original_master = bot.is_master;
             let harness = patch.harness.unwrap_or(bot.harness);
             let command = patch
                 .harness_command
@@ -186,10 +188,10 @@ impl Engine {
                 }
                 bot.is_master = is_master;
             }
-            if bot.is_master
-                && bot.harness != Harness::Builtin
-                && (patch.is_master == Some(true) || patch.harness.is_some())
-            {
+            let promoted_to_master = bot.is_master && !original_master;
+            let switched_to_external =
+                bot.is_master && bot.harness != Harness::Builtin && bot.harness != original_harness;
+            if (promoted_to_master && bot.harness != Harness::Builtin) || switched_to_external {
                 return Ok(Err(EngineError::Invalid(
                     "主控中枢 Bot 需要使用内置引擎（builtin），才能调用创建和管理团队工具；请先将另一位内置 Bot 设为主控再切换引擎".into(),
                 )));

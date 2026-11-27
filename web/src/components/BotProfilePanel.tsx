@@ -285,7 +285,7 @@ export function BotProfilePanel({
                 className="sa-button sa-button-quiet"
                 onClick={() => onStopTarget(bot.id, stopTarget)}
               >
-                停止
+                {signal?.stopLabel ?? "停止"}
               </button>
             )}
           </div>

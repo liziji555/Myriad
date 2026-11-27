@@ -113,5 +113,51 @@ describe("mascotShapes", () => {
     expect(signals.w1?.stopTarget).toEqual({ kind: "chat", roomId: "room-1" });
     expect(signals.s1?.mascotState).toBe("sleeping");
     expect(signals.s1?.stopTarget).toBeUndefined();
+
+    // 当一个 Bot 同时有「等你验收」的任务和进行中的回复时，视觉保留 waiting，但仍保留可停止的回复目标。
+    const mixed = globalBotSignalsOf(
+      [worker],
+      {
+        "room-2": {
+          messages: [],
+          hasMore: false,
+          loaded: true,
+          activity: {
+            room_id: "room-2",
+            routing: false,
+            speaking: "w1",
+            speakers: ["w1"],
+            queued: [],
+            handled_seq: 0,
+          },
+          queue: [],
+        },
+      },
+      {
+        "room-2": [
+          {
+            id: "task-1",
+            room_id: "room-2",
+            title: "重构",
+            scope: "",
+            acceptance: "",
+            owner_bot_id: "w1",
+            state: "review",
+            note: "",
+            created_by: { kind: "user" },
+            workdir: null,
+            branch: null,
+            artifacts: [],
+            rev: 1,
+            created_at: 1,
+            updated_at: 2,
+          },
+        ],
+      },
+      {},
+    );
+    expect(mixed.w1?.mascotState).toBe("waiting");
+    expect(mixed.w1?.stopTarget).toEqual({ kind: "chat", roomId: "room-2" });
+    expect(mixed.w1?.stopLabel).toBe("停止回复");
   });
 });

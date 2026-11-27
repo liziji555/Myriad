@@ -142,8 +142,10 @@ export interface GlobalBotSignal {
   activeTool?: string;
   unread?: "done" | "error";
   roomId?: RoomId;
-  /** 仅当该状态对应正在运行、可被中断的回复或任务时提供。 */
+  /** 仅当该 Bot 存在正在运行、可被中断的回复或任务时提供（独立于视觉最高优先级状态）。 */
   stopTarget?: BotStopTarget;
+  /** 当停止动作指向的具体活动（如“停止回复”/“停止任务”）需要明确说明时的按钮文案。 */
+  stopLabel?: string;
 }
 
 const SIGNAL_RANK: Record<MascotState, number> = {
@@ -182,9 +184,18 @@ export function globalBotSignalsOf(
       mascotState: "idle",
       text: "空闲",
     };
+    let bestStop: { rank: number; target: BotStopTarget; label: string } | undefined;
     const consider = (candidate: GlobalBotSignal) => {
-      if (SIGNAL_RANK[candidate.mascotState] < SIGNAL_RANK[best.mascotState]) {
+      const rank = SIGNAL_RANK[candidate.mascotState];
+      if (rank < SIGNAL_RANK[best.mascotState]) {
         best = candidate;
+      }
+      if (candidate.stopTarget) {
+        const label =
+          candidate.stopLabel ?? (candidate.stopTarget.kind === "task" ? "停止任务" : "停止回复");
+        if (!bestStop || rank < bestStop.rank) {
+          bestStop = { rank, target: candidate.stopTarget, label };
+        }
       }
     };
 
@@ -275,6 +286,14 @@ export function globalBotSignalsOf(
         text: "刚回复（未读）",
         unread: "done",
       });
+    }
+
+    if (bestStop) {
+      best = {
+        ...best,
+        stopTarget: bestStop.target,
+        stopLabel: bestStop.label,
+      };
     }
 
     out[bot.id] = best;
