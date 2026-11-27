@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { clampPanelWidth, panelWidthAt, PANEL_MAX, PANEL_MIN, PANEL_STEP } from "../api/layout";
-import type { GlobalBotSignal } from "../api/presence";
+import type { BotStopTarget, GlobalBotSignal } from "../api/presence";
 import type { TaskBoard } from "../api/tasks";
 import type { LinkActions, RoutineActions, TaskActions, Team } from "../api/useWorkspace";
 import type { Bot, BotId, CheckpointInfo, Link, RewindReport, Room, Routine, TaskId } from "../api/types";
 import type { ExecCard } from "../api/execution";
 import { AuditPanel } from "./AuditPanel";
-import { BotProfilePanel } from "./BotProfilePanel";
+import { BotProfilePanel, type BotProfileFocusRequest } from "./BotProfilePanel";
 import { ExecutionPanel } from "./ExecutionPanel";
 import { ExtensionsPanel } from "./ExtensionsPanel";
 import { FilesPanel } from "./FilesPanel";
@@ -75,11 +75,13 @@ interface Props {
   /** 「执行」页：每个 Bot 一张卡片。 */
   execution: readonly ExecCard[];
   globalSignals: Readonly<Record<BotId, GlobalBotSignal>>;
-  focusBotId: BotId | null;
+  focusBotRequest: BotProfileFocusRequest | null;
   onOpenBotChat(bot: Bot): void;
   onJump(card: ExecCard): void;
-  /** 只停一个 Bot。 */
+  /** 停掉当前房间的某个 Bot（供执行页使用）。 */
   onStopBot(botId: BotId): void;
+  /** 停掉任意房间或后台任务的指定目标（供 Bot 档案页使用）。 */
+  onStopTarget(botId: BotId, target: BotStopTarget): void;
   /** 房间内内置 Bot 的轮次级文件检查点。 */
   checkpoints?: readonly CheckpointInfo[];
   onRewindCheckpoint?(checkpointId: string, force: boolean): Promise<RewindReport>;
@@ -110,10 +112,11 @@ export function ContextPanel({
   usageKey,
   execution,
   globalSignals,
-  focusBotId,
+  focusBotRequest,
   onOpenBotChat,
   onJump,
   onStopBot,
+  onStopTarget,
   checkpoints,
   onRewindCheckpoint,
   onJumpMessage,
@@ -245,14 +248,15 @@ export function ContextPanel({
       <div className="sa-panel-body" role="region" aria-label={current.label}>
         {tab === "profile" && (
           <BotProfilePanel
+            roomId={room.id}
             candidates={members.length > 0 ? members : bots}
             allBots={bots}
-            initialBotId={focusBotId ?? members[0]?.id ?? null}
+            focusRequest={focusBotRequest}
             signals={globalSignals}
             team={team}
             onOpenBotChat={onOpenBotChat}
             onOpenMembers={() => onTab("members")}
-            onStopBot={onStopBot}
+            onStopTarget={onStopTarget}
           />
         )}
         {tab === "execution" && (

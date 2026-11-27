@@ -128,6 +128,11 @@ export function presenceSummary(rows: readonly Presence[]): string {
   return busy > 0 ? `${busy} 个 Bot 在忙` : "都空着";
 }
 
+/** 停止一个活跃 Bot 工作所需的精确目标（跨房间对话或后台任务）。 */
+export type BotStopTarget =
+  | { kind: "chat"; roomId: RoomId }
+  | { kind: "task"; taskId: TaskId };
+
 /** 跨全部房间聚合出的单个 Bot 实时生命态（供左侧栏、中枢在岗阵列与智能排序共用）。 */
 export interface GlobalBotSignal {
   botId: BotId;
@@ -137,6 +142,8 @@ export interface GlobalBotSignal {
   activeTool?: string;
   unread?: "done" | "error";
   roomId?: RoomId;
+  /** 仅当该状态对应正在运行、可被中断的回复或任务时提供。 */
+  stopTarget?: BotStopTarget;
 }
 
 const SIGNAL_RANK: Record<MascotState, number> = {
@@ -190,6 +197,10 @@ export function globalBotSignalsOf(
         }
         const task = tasks.find((t) => t.id === msg.task_id);
         const info = fromMessage(msg, msg.kind === "run" ? task : undefined);
+        const stopTarget: BotStopTarget =
+          msg.kind === "run" && msg.task_id
+            ? { kind: "task", taskId: msg.task_id }
+            : { kind: "chat", roomId };
         consider({
           botId: bot.id,
           presence: info.state,
@@ -197,6 +208,7 @@ export function globalBotSignalsOf(
           text: info.text,
           activeTool: info.activeTool,
           roomId,
+          stopTarget,
         });
       }
       if (speakersOf(chat.activity).includes(bot.id)) {
@@ -206,6 +218,7 @@ export function globalBotSignalsOf(
           mascotState: "thinking",
           text: "正在回复",
           roomId,
+          stopTarget: { kind: "chat", roomId },
         });
       }
       if (chat.activity?.queued.includes(bot.id)) {
@@ -215,6 +228,7 @@ export function globalBotSignalsOf(
           mascotState: "thinking",
           text: "排队中",
           roomId,
+          stopTarget: { kind: "chat", roomId },
         });
       }
     }
@@ -238,6 +252,7 @@ export function globalBotSignalsOf(
             mascotState: "working",
             text: `做任务「${task.title}」`,
             roomId,
+            stopTarget: { kind: "task", taskId: task.id },
           });
         }
       }

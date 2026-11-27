@@ -5,12 +5,18 @@ ALTER TABLE bots ADD COLUMN avatar_shape TEXT NOT NULL DEFAULT '';
 ALTER TABLE bots ADD COLUMN avatar_color TEXT NOT NULL DEFAULT '';
 ALTER TABLE bots ADD COLUMN avatar_image TEXT NOT NULL DEFAULT '';
 
--- 兼容旧库升级：将最早创建的已启用 Bot（若无则最早创建的 Bot）设为中枢主控。
+-- 兼容旧库升级：优先将最早创建的已启用内置 Bot（可用团队管理工具）设为中枢主控。
 UPDATE bots
 SET is_master = 1,
     role = CASE WHEN role = '' THEN '主控中枢' ELSE role END,
     avatar_shape = CASE WHEN avatar_shape = '' THEN 'orb' ELSE avatar_shape END,
     avatar_color = CASE WHEN avatar_color = '' THEN 'obsidian' ELSE avatar_color END
 WHERE id = (
-    SELECT id FROM bots ORDER BY enabled DESC, created_at ASC, id ASC LIMIT 1
+    SELECT id FROM bots
+    ORDER BY (enabled = 1 AND harness = 'builtin') DESC,
+             (harness = 'builtin') DESC,
+             enabled DESC,
+             created_at ASC,
+             id ASC
+    LIMIT 1
 );

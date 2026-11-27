@@ -405,12 +405,15 @@ pub struct BotTemplate {
     pub harness: Harness,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub harness_command: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub role: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub avatar_shape: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub avatar_color: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub avatar_shape: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub avatar_color: Option<String>,
 }
 
 fn is_builtin(harness: &Harness) -> bool {

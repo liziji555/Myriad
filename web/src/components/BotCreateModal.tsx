@@ -101,11 +101,11 @@ export function BotCreateModal({ onCreate, onClose }: Props) {
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && !busy) onClose();
+      if (event.key === "Escape" && !busy && !studioOpen) onClose();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [busy, onClose]);
+  }, [busy, studioOpen, onClose]);
 
   const activeProbe = probes.find((p) => p.harness === harness);
 
@@ -145,7 +145,7 @@ export function BotCreateModal({ onCreate, onClose }: Props) {
   return (
     <div
       className="sa-palette-backdrop"
-      onMouseDown={(event) => event.target === event.currentTarget && !busy && onClose()}
+      onMouseDown={(event) => event.target === event.currentTarget && !busy && !studioOpen && onClose()}
     >
       <div className="sa-connect-panel sa-create-modal" role="dialog" aria-modal="true" aria-label="新建 Bot">
         <header className="sa-connect-head">

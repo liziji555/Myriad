@@ -107,8 +107,11 @@ describe("mascotShapes", () => {
     );
 
     expect(signals.m1?.mascotState).toBe("done");
+    expect(signals.m1?.stopTarget).toBeUndefined();
     expect(signals.w1?.mascotState).toBe("searching");
     expect(signals.w1?.activeTool).toBe("grep");
+    expect(signals.w1?.stopTarget).toEqual({ kind: "chat", roomId: "room-1" });
     expect(signals.s1?.mascotState).toBe("sleeping");
+    expect(signals.s1?.stopTarget).toBeUndefined();
   });
 });

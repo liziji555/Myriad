@@ -152,7 +152,7 @@ function Shell() {
       return next;
     });
   const [focusTask, setFocusTask] = useState<TaskId | null>(null);
-  const [focusBotId, setFocusBotId] = useState<BotId | null>(null);
+  const [focusBotRequest, setFocusBotRequest] = useState<{ botId: BotId; seq: number } | null>(null);
   const [unreadMarks, setUnreadMarks] = useState<Record<BotId, "done" | "error">>({});
   const seenStreamingRef = useRef<Record<string, { botId: BotId; roomId: RoomId }>>({});
   const [version, setVersion] = useState("");
@@ -509,7 +509,7 @@ function Shell() {
   };
 
   const openBotProfile = (bot: Bot) => {
-    setFocusBotId(bot.id);
+    setFocusBotRequest((prev) => ({ botId: bot.id, seq: (prev?.seq ?? 0) + 1 }));
     showPanel("profile");
   };
 
@@ -1008,10 +1008,17 @@ function Shell() {
             usageKey={workspace.notices.length}
             execution={execution}
             globalSignals={globalSignals}
-            focusBotId={focusBotId}
+            focusBotRequest={focusBotRequest}
             onOpenBotChat={(bot) => void openBotChat(bot)}
             onJump={jumpTo}
             onStopBot={(botId) => void workspace.stopBot(room.id, botId)}
+            onStopTarget={(botId, target) => {
+              if (target.kind === "task") {
+                void workspace.tasks.stop(target.taskId);
+              } else {
+                void workspace.stopBot(target.roomId, botId);
+              }
+            }}
             checkpoints={checkpoints}
             onRewindCheckpoint={handleRewindCheckpoint}
             onJumpMessage={openMessage}

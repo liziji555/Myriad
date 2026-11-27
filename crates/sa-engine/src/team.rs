@@ -75,6 +75,11 @@ impl Engine {
         profile: BotProfileOptions,
     ) -> Result<Bot> {
         let command = check_harness(harness, command)?;
+        if profile.is_master == Some(true) && harness != Harness::Builtin {
+            return Err(EngineError::Invalid(
+                "主控中枢 Bot 需要使用内置引擎（builtin），才能调用创建和管理团队工具".into(),
+            ));
+        }
         let role = check_role(profile.role.as_deref().unwrap_or(""))?;
         let avatar_shape = check_avatar_token(profile.avatar_shape.as_deref().unwrap_or(""))?;
         let avatar_color = check_avatar_token(profile.avatar_color.as_deref().unwrap_or(""))?;
@@ -87,9 +92,9 @@ impl Engine {
                 (Ok(name), Ok(persona)) => (name, persona),
                 (Err(e), _) | (_, Err(e)) => return Ok(Err(e)),
             };
-            let is_master = profile
-                .is_master
-                .unwrap_or_else(|| existing.iter().all(|b| !b.is_master));
+            let is_master = profile.is_master.unwrap_or_else(|| {
+                harness == Harness::Builtin && existing.iter().all(|b| !b.is_master)
+            });
             let bot = Bot {
                 id: BotId::new(),
                 name,
@@ -160,6 +165,15 @@ impl Engine {
                     Err(e) => return Ok(Err(e)),
                 }
             }
+            let harness = patch.harness.unwrap_or(bot.harness);
+            let command = patch
+                .harness_command
+                .clone()
+                .unwrap_or_else(|| bot.harness_command.clone());
+            match check_harness(harness, &command) {
+                Ok(command) => (bot.harness, bot.harness_command) = (harness, command),
+                Err(e) => return Ok(Err(e)),
+            }
             if let Some(is_master) = patch.is_master {
                 if !is_master
                     && bot.is_master
@@ -172,14 +186,13 @@ impl Engine {
                 }
                 bot.is_master = is_master;
             }
-            let harness = patch.harness.unwrap_or(bot.harness);
-            let command = patch
-                .harness_command
-                .clone()
-                .unwrap_or_else(|| bot.harness_command.clone());
-            match check_harness(harness, &command) {
-                Ok(command) => (bot.harness, bot.harness_command) = (harness, command),
-                Err(e) => return Ok(Err(e)),
+            if bot.is_master
+                && bot.harness != Harness::Builtin
+                && (patch.is_master == Some(true) || patch.harness.is_some())
+            {
+                return Ok(Err(EngineError::Invalid(
+                    "主控中枢 Bot 需要使用内置引擎（builtin），才能调用创建和管理团队工具；请先将另一位内置 Bot 设为主控再切换引擎".into(),
+                )));
             }
             bot.tier = patch.tier.unwrap_or(bot.tier);
             bot.enabled = patch.enabled.unwrap_or(bot.enabled);
@@ -221,7 +234,9 @@ impl Engine {
                 if !remaining.iter().any(|b| b.is_master) {
                     if let Some(mut successor) = remaining
                         .iter()
-                        .find(|b| b.enabled)
+                        .find(|b| b.enabled && b.harness == Harness::Builtin)
+                        .or_else(|| remaining.iter().find(|b| b.harness == Harness::Builtin))
+                        .or_else(|| remaining.iter().find(|b| b.enabled))
                         .or_else(|| remaining.first())
                         .cloned()
                     {
@@ -462,7 +477,7 @@ fn check_persona(persona: &str) -> Result<String> {
     Ok(persona.to_string())
 }
 
-fn check_role(role: &str) -> Result<String> {
+pub(crate) fn check_role(role: &str) -> Result<String> {
     let role = role.trim();
     if role.chars().count() > MAX_BOT_ROLE_CHARS {
         return Err(EngineError::Invalid(format!(
@@ -475,7 +490,7 @@ fn check_role(role: &str) -> Result<String> {
     Ok(role.to_string())
 }
 
-fn check_avatar_token(token: &str) -> Result<String> {
+pub(crate) fn check_avatar_token(token: &str) -> Result<String> {
     let token = token.trim().to_lowercase();
     if token.is_empty() {
         return Ok(String::new());

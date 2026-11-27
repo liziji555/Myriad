@@ -1,8 +1,8 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { api } from "../api/client";
-import type { GlobalBotSignal } from "../api/presence";
+import type { BotStopTarget, GlobalBotSignal } from "../api/presence";
 import type { Team } from "../api/useWorkspace";
-import type { Bot, BotId, Harness, HarnessProbe, ModelTier } from "../api/types";
+import type { Bot, BotId, Harness, HarnessProbe, ModelTier, RoomId } from "../api/types";
 import { AvatarStudioModal } from "./AvatarStudio";
 import { BotMascot } from "./BotMascot";
 
@@ -23,17 +23,23 @@ const TIERS: readonly { id: ModelTier; label: string }[] = [
   { id: "strong", label: "强档" },
 ];
 
+export interface BotProfileFocusRequest {
+  botId: BotId;
+  seq: number;
+}
+
 interface Props {
+  roomId: RoomId;
   /** 当前展示的 Bot 列表（1v1 对话时为该 Bot，群聊房间时为房间成员列表）。 */
   candidates: readonly Bot[];
-  /** 所有 Bot（用于判断是否仅剩最后一位主控）。 */
+  /** 所有 Bot（用于跨房间打开档案及判断是否仅剩最后一位主控）。 */
   allBots: readonly Bot[];
-  initialBotId: BotId | null;
+  focusRequest: BotProfileFocusRequest | null;
   signals: Readonly<Record<BotId, GlobalBotSignal>>;
   team: Team;
   onOpenBotChat(bot: Bot): void;
   onOpenMembers(): void;
-  onStopBot(botId: BotId): void;
+  onStopTarget(botId: BotId, target: BotStopTarget): void;
 }
 
 /**
@@ -42,21 +48,23 @@ interface Props {
  * - 直接编辑名字、职责短标签、执行引擎（Harness）/档位、人设分工、启停与主控身份。
  */
 export function BotProfilePanel({
+  roomId,
   candidates,
   allBots,
-  initialBotId,
+  focusRequest,
   signals,
   team,
   onOpenBotChat,
   onOpenMembers,
-  onStopBot,
+  onStopTarget,
 }: Props) {
   const [selectedId, setSelectedId] = useState<BotId | null>(
-    initialBotId ?? candidates[0]?.id ?? allBots[0]?.id ?? null,
+    focusRequest?.botId ?? candidates[0]?.id ?? allBots[0]?.id ?? null,
   );
+  const prevRoomIdRef = useRef<RoomId>(roomId);
   const bot =
-    candidates.find((b) => b.id === selectedId) ??
     allBots.find((b) => b.id === selectedId) ??
+    candidates.find((b) => b.id === selectedId) ??
     candidates[0] ??
     allBots[0] ??
     null;
@@ -74,11 +82,28 @@ export function BotProfilePanel({
   const [savedTip, setSavedTip] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // 响应显式「打开某位 Bot 档案」请求（支持侧栏点击房间外的任意 Bot）。
   useEffect(() => {
-    if (initialBotId && candidates.some((b) => b.id === initialBotId)) {
-      setSelectedId(initialBotId);
+    if (!focusRequest) return;
+    if (allBots.some((b) => b.id === focusRequest.botId)) {
+      setSelectedId(focusRequest.botId);
     }
-  }, [initialBotId, candidates]);
+  }, [focusRequest?.seq, focusRequest?.botId, allBots]);
+
+  // 切换房间时跟随新房间的默认成员，不因同房间数组重算而覆盖用户手动切换。
+  useEffect(() => {
+    if (prevRoomIdRef.current !== roomId) {
+      prevRoomIdRef.current = roomId;
+      setSelectedId(candidates[0]?.id ?? allBots[0]?.id ?? null);
+    }
+  }, [roomId, candidates, allBots]);
+
+  // 若当前查看的 Bot 被删除，自动回落到有效 Bot。
+  useEffect(() => {
+    if (selectedId && !allBots.some((b) => b.id === selectedId)) {
+      setSelectedId(candidates[0]?.id ?? allBots[0]?.id ?? null);
+    }
+  }, [selectedId, allBots, candidates]);
 
   useEffect(() => {
     if (!bot) return;
@@ -109,15 +134,13 @@ export function BotProfilePanel({
   }
 
   const signal = signals[bot.id];
+  const stopTarget = signal?.stopTarget;
   const masterCount = allBots.filter((b) => b.is_master).length;
   const soleMaster = bot.is_master && masterCount <= 1 && allBots.length > 1;
-  const isBusy =
-    signal &&
-    (signal.mascotState === "working" ||
-      signal.mascotState === "searching" ||
-      signal.mascotState === "thinking" ||
-      signal.mascotState === "sending" ||
-      signal.mascotState === "waiting");
+  const canPromoteMaster = bot.is_master || (bot.harness === "builtin" && harness === "builtin");
+  const switcherBots = candidates.some((item) => item.id === bot.id)
+    ? candidates
+    : [bot, ...candidates];
 
   const saveProfile = async (event: FormEvent) => {
     event.preventDefault();
@@ -190,9 +213,9 @@ export function BotProfilePanel({
         />
       )}
 
-      {candidates.length > 1 && (
+      {switcherBots.length > 1 && (
         <div className="sa-profile-switcher" role="tablist" aria-label="切换查看的 Bot">
-          {candidates.map((item) => (
+          {switcherBots.map((item) => (
             <button
               key={item.id}
               type="button"
@@ -256,11 +279,11 @@ export function BotProfilePanel({
             >
               1v1 对话
             </button>
-            {isBusy && (
+            {stopTarget && (
               <button
                 type="button"
                 className="sa-button sa-button-quiet"
-                onClick={() => onStopBot(bot.id)}
+                onClick={() => onStopTarget(bot.id, stopTarget)}
               >
                 停止
               </button>
@@ -360,8 +383,14 @@ export function BotProfilePanel({
           <button
             type="button"
             className="sa-button sa-button-quiet"
-            disabled={busy || soleMaster}
-            title={soleMaster ? "团队至少需保留一位中枢主控" : undefined}
+            disabled={busy || soleMaster || !canPromoteMaster}
+            title={
+              soleMaster
+                ? "团队至少需保留一位中枢主控"
+                : !canPromoteMaster
+                  ? "仅内置模型引擎（builtin）的 Bot 可设为主控中枢"
+                  : undefined
+            }
             onClick={() => void toggleMaster()}
           >
             {bot.is_master ? "取消主控" : "设为主控"}
