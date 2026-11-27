@@ -1827,11 +1827,18 @@ struct RoomInbox {
     blind: Option<i64>,
 }
 
+struct RenewEvent {
+    seq: i64,
+    only_me: bool,
+    advance_handled: bool,
+    started: bool,
+}
+
 struct InboxScan {
     next_last_seq: i64,
     next_ahead: BTreeSet<i64>,
     inputs: Vec<UserInput>,
-    renew_events: Vec<(i64, bool, bool)>,
+    renew_events: Vec<RenewEvent>,
 }
 
 impl RoomInbox {
@@ -2042,7 +2049,12 @@ impl RoomInbox {
                     if !only_me && message.seq > handled {
                         skipped_undispatched_user = true;
                     }
-                    renew_events.push((message.seq, advance_handled, started));
+                    renew_events.push(RenewEvent {
+                        seq: message.seq,
+                        only_me,
+                        advance_handled,
+                        started,
+                    });
                 }
             }
             let to_me = if message.mentions.contains(&self.bot_id) {
@@ -2084,11 +2096,19 @@ impl RoomInbox {
         self.first_drain = false;
         self.last_seq = scan.next_last_seq;
         self.ahead = scan.next_ahead;
-        for (seq, only_me, started) in scan.renew_events {
+        for event in scan.renew_events {
+            let RenewEvent {
+                seq,
+                only_me,
+                advance_handled,
+                started,
+            } = event;
             // 正在说话的 Bot 看到了这条给它的人类消息：不用再另外挑人来接。
             // 同时点了别的 Bot 的不算处理过：被点到的别人还要靠房间叫起来。
             // 没点名的，别的 Bot 也在说时也不算：它们也该看到，要由房间记下（见 dispatch）。
-            let before = if only_me {
+            // 前面跳过了尚未派发的其它用户消息（或收件箱领先于派发游标）时，也不推进共享游标，
+            // 仅把 `only_me` 留给下面的 episode 续轮判断，避免误清排队的其它 Bot。
+            let before = if advance_handled {
                 self.link.handled.fetch_max(seq, Ordering::SeqCst)
             } else {
                 self.link.handled.load(Ordering::SeqCst)
@@ -2851,6 +2871,42 @@ mod cursor_tests {
             link.handled.load(Ordering::SeqCst),
             local_msg2.seq,
             "once earlier Telegram message is dispatched, later steer may advance shared cursor"
+        );
+
+        // 6. 当 Bot 收件箱游标因读过其它 Bot 回复而领先于房间共享游标 `link.handled` 时，
+        //    只点名当前 Bot 的插话既不能推进 `link.handled`，也不能误清队列里排队的其它 Bot。
+        let bot_reply = engine
+            .post_bot_message(&room.id, &coder.id, "构建已完成", vec![], 0, vec![])
+            .unwrap();
+        // 让 Claude 正常 drain 读完 Coder 的回复：inbox.last_seq 前进到 bot_reply.seq，
+        // 而房间共享游标 link.handled 仍停留在上一条用户消息 local_msg2.seq。
+        let drained = inbox.drain().await;
+        assert!(drained
+            .iter()
+            .any(|item| item.message_seq == Some(bot_reply.seq)));
+        assert!(inbox.last_seq > link.handled.load(Ordering::SeqCst));
+        let handled_before = link.handled.load(Ordering::SeqCst);
+        link.episode().push(Job::new(coder.id.clone(), 0));
+        assert_eq!(link.episode().queued(), vec![coder.id.clone()]);
+
+        let targeted_text = format!("@{} keep going", claude.name);
+        let targeted_msg = engine.post_user_message(&room.id, &targeted_text).unwrap();
+        let scan3 = inbox
+            .peek_steer()
+            .await
+            .expect("targeted interjection should be steerable");
+        let committed3 = inbox.commit_steer(scan3);
+        assert_eq!(committed3.len(), 1);
+        assert_eq!(committed3[0].message_seq, Some(targeted_msg.seq));
+        assert_eq!(
+            link.handled.load(Ordering::SeqCst),
+            handled_before,
+            "shared dispatch cursor must stay behind inbox cursor when inbox was ahead"
+        );
+        assert_eq!(
+            link.episode().queued(),
+            vec![coder.id.clone()],
+            "targeted interjection for running bot must renew without dropping queued turns"
         );
 
         orchestrator.shutdown().await;
