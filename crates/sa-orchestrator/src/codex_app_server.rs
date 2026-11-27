@@ -263,29 +263,35 @@ fn wants_legacy_exec(extra: &[String]) -> bool {
 
 /// 从用户自定义的 Codex 额外参数中剥离 `app-server` 子命令不支持的模型参数（`-m` / `--model`），
 /// 改为通过 `thread/start` 与 `thread/resume` 的 `model` 字段传入。
-fn split_codex_model_flag(extra: &[String]) -> (Option<String>, Vec<String>) {
+/// 若 `-m` / `--model` 缺少值或值为空，返回配置错误而非静默回退到默认模型。
+fn split_codex_model_flag(extra: &[String]) -> Result<(Option<String>, Vec<String>), String> {
     let mut model = None;
     let mut passthrough = Vec::with_capacity(extra.len());
     let mut iter = extra.iter();
     while let Some(arg) = iter.next() {
         if arg == "-m" || arg == "--model" {
-            if let Some(val) = iter.next() {
-                if !val.trim().is_empty() {
-                    model = Some(val.clone());
-                }
+            let Some(val) = iter.next() else {
+                return Err(format!("Codex 命令里的 `{arg}` 缺少模型名称"));
+            };
+            let trimmed = val.trim();
+            if trimmed.is_empty() || trimmed.starts_with('-') {
+                return Err(format!("Codex 命令里的 `{arg}` 缺少有效的模型名称"));
             }
+            model = Some(trimmed.to_string());
         } else if let Some(val) = arg
             .strip_prefix("--model=")
             .or_else(|| arg.strip_prefix("-m="))
         {
-            if !val.trim().is_empty() {
-                model = Some(val.to_string());
+            let trimmed = val.trim();
+            if trimmed.is_empty() {
+                return Err(format!("Codex 命令里的 `{arg}` 缺少模型名称"));
             }
+            model = Some(trimmed.to_string());
         } else {
             passthrough.push(arg.clone());
         }
     }
-    (model, passthrough)
+    Ok((model, passthrough))
 }
 
 /// 根据权限档位映射 Codex `app-server` 的 `approvalPolicy` 与 `sandbox` 策略。
@@ -524,7 +530,10 @@ async fn spawn_codex_session(
 ) -> SpawnOutcome {
     let session = launch.session.map(String::from);
     let (mcp_config, mcp_env) = build_codex_mcp_config(launch.mcp_servers);
-    let (model_override, server_extra) = split_codex_model_flag(extra);
+    let (model_override, server_extra) = match split_codex_model_flag(extra) {
+        Ok(parsed) => parsed,
+        Err(reason) => return SpawnOutcome::Aborted(TurnEnd::Failed(reason), session),
+    };
     let mut args = Vec::with_capacity(server_extra.len() + 3);
     args.push("app-server".to_string());
     // `--listen stdio://` 同时兼容 Codex 0.130.0 与 0.169.0+（旧版不认 `--stdio` 简写）。
@@ -841,6 +850,8 @@ fn parse_usage_fields(obj: &Value) -> Option<TokenTotals> {
 }
 
 fn format_approval_summary(method: &str, params: &Value) -> (&'static str, String, String) {
+    // 使用独立的 `codex_*` 工具名而非内置 `shell`/`edit`，防止 `RoomObserver::rule_key` 把不同工作目录或
+    // 独立工位里的审批记成房间级「总是允许」从而跨目录误放行。
     match method {
         "item/commandExecution/requestApproval" => {
             let cmd = str_of(params, "command").trim();
@@ -857,7 +868,7 @@ fn format_approval_summary(method: &str, params: &Value) -> (&'static str, Strin
             } else {
                 reason.to_string()
             };
-            ("shell", title, reason)
+            ("codex_shell", title, reason)
         }
         "item/fileChange/requestApproval" => {
             let root = str_of(params, "grantRoot").trim();
@@ -872,7 +883,7 @@ fn format_approval_summary(method: &str, params: &Value) -> (&'static str, Strin
             } else {
                 reason.to_string()
             };
-            ("edit", title, reason)
+            ("codex_edit", title, reason)
         }
         "item/permissions/requestApproval" => {
             let reason = str_of(params, "reason").trim();
@@ -882,7 +893,7 @@ fn format_approval_summary(method: &str, params: &Value) -> (&'static str, Strin
                 format!("Codex 请求权限：{reason}")
             };
             (
-                "permission",
+                "codex_permission",
                 title,
                 "Codex app-server 请求授予额外的沙箱或网络权限。".to_string(),
             )
@@ -896,12 +907,16 @@ fn format_approval_summary(method: &str, params: &Value) -> (&'static str, Strin
                 format!("MCP ({server}) 请求批准操作")
             };
             (
-                "mcp",
+                "codex_mcp",
                 title,
                 "外部 MCP 工具通过 Codex 请求人工批准。".to_string(),
             )
         }
-        _ => ("harness", "Codex 请求批准".to_string(), String::new()),
+        _ => (
+            "codex_approval",
+            "Codex 请求批准".to_string(),
+            String::new(),
+        ),
     }
 }
 
@@ -1599,15 +1614,38 @@ mod tests {
     }
 
     #[test]
-    fn model_flag_extraction_strips_m_and_preserves_other_flags() {
+    fn model_flag_extraction_strips_m_preserves_other_flags_and_rejects_missing_value() {
         let (model, rest) =
-            split_codex_model_flag(&["-m".into(), "o3".into(), "-c".into(), "foo=bar".into()]);
+            split_codex_model_flag(&["-m".into(), "o3".into(), "-c".into(), "foo=bar".into()])
+                .unwrap();
         assert_eq!(model.as_deref(), Some("o3"));
         assert_eq!(rest, vec!["-c", "foo=bar"]);
 
-        let (model2, rest2) = split_codex_model_flag(&["--model=gpt-5".into()]);
+        let (model2, rest2) = split_codex_model_flag(&["--model=gpt-5".into()]).unwrap();
         assert_eq!(model2.as_deref(), Some("gpt-5"));
         assert!(rest2.is_empty());
+
+        // 缺少或空白模型名必须报错，不得静默回退默认模型。
+        assert!(split_codex_model_flag(&["-m".into()]).is_err());
+        assert!(split_codex_model_flag(&["--model".into()]).is_err());
+        assert!(split_codex_model_flag(&["-m".into(), "   ".into()]).is_err());
+        assert!(split_codex_model_flag(&["--model=".into()]).is_err());
+        assert!(split_codex_model_flag(&["-m=".into()]).is_err());
+        assert!(split_codex_model_flag(&["-m".into(), "-c".into(), "k=v".into()]).is_err());
+    }
+
+    #[test]
+    fn approval_summary_uses_isolated_codex_tool_names() {
+        let (tool, _, _) = format_approval_summary(
+            "item/commandExecution/requestApproval",
+            &json!({"command": "ls", "cwd": "/tmp"}),
+        );
+        assert_eq!(tool, "codex_shell");
+        let (tool2, _, _) = format_approval_summary(
+            "item/fileChange/requestApproval",
+            &json!({"grantRoot": "/tmp"}),
+        );
+        assert_eq!(tool2, "codex_edit");
     }
 
     #[test]
