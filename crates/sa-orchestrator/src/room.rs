@@ -180,7 +180,10 @@ pub(crate) async fn run(shared: Arc<Shared>, room_id: RoomId, link: Arc<RoomLink
             // 都说完了：待发队列里排在最前面的一句现在发出去，下一圈像人刚说的话一样处理。
             let (engine, id) = (shared.engine.clone(), room_id.clone());
             match db(move || engine.dispatch_queued(&id)).await {
-                Ok(Some(_)) => link.wake.notify_one(),
+                Ok(Some(_)) => {
+                    link.wake.notify_one();
+                    link.steer_watch.send_modify(|n| *n = n.wrapping_add(1));
+                }
                 Ok(None) => {}
                 Err(error) => tracing::warn!(room = %room_id, "排着的话没发出去：{error}"),
             }
@@ -836,9 +839,11 @@ async fn turn(
             harness_turn(
                 shared,
                 room_id,
+                link,
                 bot,
                 transcript,
                 inputs,
+                &mut inbox.rest,
                 &observer,
                 &cancel,
                 share.as_deref(),
@@ -1270,13 +1275,17 @@ fn share_rules(shared: &Shared, share: Option<&str>) -> String {
 async fn harness_turn(
     shared: &Arc<Shared>,
     room_id: &RoomId,
+    link: &Arc<RoomLink>,
     bot: &Bot,
     transcript: &mut Transcript,
     inputs: Vec<UserInput>,
+    inbox: &mut RoomInbox,
     observer: &RoomObserver,
     cancel: &CancellationToken,
     share: Option<&str>,
 ) -> Result<TurnEnd, String> {
+    let mut steer_watch = link.steer_watch.subscribe();
+    steer_watch.borrow_and_update();
     let said: Vec<String> = inputs.iter().map(|input| input.content.clone()).collect();
     record_inputs(transcript, inputs)?;
     let label = bot.harness.label();
@@ -1438,12 +1447,67 @@ async fn harness_turn(
                 permission,
                 mcp_servers: &mcp_servers,
                 acp_pool: Some(&shared.acp_pool),
+                codex_pool: Some(&shared.codex_pool),
                 acp_scope: Some(&acp_scope),
+                interactive_approvals: true,
             };
             if cancel.is_cancelled() {
                 return Ok(TurnEnd::Cancelled);
             }
-            let finished = crate::harness::run(&launch, observer, cancel).await;
+            let finished = if bot.harness == Harness::Codex {
+                let (steer_tx, steer_rx) = tokio::sync::mpsc::unbounded_channel();
+                let run_fut =
+                    crate::harness::run_interactive(&launch, Some(steer_rx), observer, cancel);
+                tokio::pin!(run_fut);
+                let mut steer_open = true;
+                loop {
+                    tokio::select! {
+                        finished = &mut run_fut => break finished,
+                        changed = steer_watch.changed(), if steer_open => {
+                            if changed.is_err() {
+                                steer_open = false;
+                                continue;
+                            }
+                            if let Some(scan) = inbox.peek_steer().await {
+                                let steer_text = scan
+                                    .inputs
+                                    .iter()
+                                    .map(|i| i.content.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join("\n\n");
+                                let (ack_tx, mut ack_rx) = tokio::sync::oneshot::channel();
+                                if steer_tx
+                                    .send(crate::codex_app_server::SteerRequest {
+                                        text: steer_text,
+                                        ack: ack_tx,
+                                    })
+                                    .is_err()
+                                {
+                                    steer_open = false;
+                                    continue;
+                                }
+                                let accepted = tokio::select! {
+                                    finished = &mut run_fut => {
+                                        // 防止同一次 poll 中 `turn/steer` 已回复成功且紧随 `turn/completed` 时漏提交游标导致重复投递。
+                                        if ack_rx.try_recv() == Ok(true) {
+                                            let committed = inbox.commit_steer(scan);
+                                            let _ = record_inputs(transcript, committed);
+                                        }
+                                        break finished;
+                                    }
+                                    res = &mut ack_rx => res.unwrap_or(false),
+                                };
+                                if accepted {
+                                    let committed = inbox.commit_steer(scan);
+                                    let _ = record_inputs(transcript, committed);
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                crate::harness::run(&launch, observer, cancel).await
+            };
             // 不管怎么结束的，目录里的改动都记下来，交回主 Agent 的话里带上改了什么。
             let changes = crate::workdir::commit_and_diff(&workdir, &summary)
                 .await
@@ -1751,39 +1815,44 @@ struct RoomInbox {
     blind: Option<i64>,
 }
 
-impl RoomInbox {
-    /// 记下这条看过了。`waiting`：前面有别的 Bot 还没写完的回复，`last_seq` 不能越过它。
-    fn see(&mut self, seq: i64, waiting: bool) {
-        if waiting {
-            self.ahead.insert(seq);
-        } else {
-            self.last_seq = seq;
-        }
-    }
+struct InboxScan {
+    next_last_seq: i64,
+    next_ahead: BTreeSet<i64>,
+    inputs: Vec<UserInput>,
+    renew_events: Vec<(i64, bool, bool)>,
 }
 
-#[async_trait]
-impl Inbox for RoomInbox {
-    async fn drain(&mut self) -> Vec<UserInput> {
+impl RoomInbox {
+    /// 只读扫描未看消息并计算出游标与续轮更新（不立即提交），供 `drain` 与运行中 `peek_steer` 共用。
+    async fn scan(&self) -> Option<InboxScan> {
         let engine = self.shared.engine.clone();
         let (room, after) = (self.room_id.clone(), self.last_seq);
         let messages = match db(move || engine.messages_after(&room, after)).await {
             Ok(messages) => messages,
             Err(error) => {
                 tracing::error!(room = %self.room_id, "取不到新消息：{error}");
-                return vec![];
+                return None;
             }
         };
+        let mut next_last_seq = self.last_seq;
+        let mut next_ahead = self.ahead.clone();
         let mut inputs = vec![];
+        let mut renew_events = vec![];
         let started = !self.first_drain;
-        self.first_drain = false;
+        let see = |seq: i64, waiting: bool, last_seq: &mut i64, ahead: &mut BTreeSet<i64>| {
+            if waiting {
+                ahead.insert(seq);
+            } else {
+                *last_seq = seq;
+            }
+        };
         // 前面碰到了别的 Bot 还没写完的回复：`last_seq` 停在它前面，看过的记进 `ahead`。
         let mut waiting = false;
         for message in messages {
-            if self.ahead.contains(&message.seq) {
+            if next_ahead.contains(&message.seq) {
                 if !waiting {
-                    self.ahead.remove(&message.seq);
-                    self.see(message.seq, waiting);
+                    next_ahead.remove(&message.seq);
+                    see(message.seq, waiting, &mut next_last_seq, &mut next_ahead);
                 }
                 continue;
             }
@@ -1795,12 +1864,12 @@ impl Inbox for RoomInbox {
                 MessageKind::Routine | MessageKind::Event
                     if message.mentions.first() != Some(&self.bot_id) =>
                 {
-                    self.see(message.seq, waiting);
+                    see(message.seq, waiting, &mut next_last_seq, &mut next_ahead);
                     continue;
                 }
                 // 上次没做完的定时任务：调度器在租约过期后会重做这一次，这里看了就做了两遍。
                 MessageKind::Routine if message.created_at < self.shared.started_at => {
-                    self.see(message.seq, waiting);
+                    see(message.seq, waiting, &mut next_last_seq, &mut next_ahead);
                     continue;
                 }
                 MessageKind::Routine | MessageKind::Event => {}
@@ -1809,11 +1878,11 @@ impl Inbox for RoomInbox {
                 // 自己开的任务自己知道（工具结果里有）。别人开的任务、所有的交付结果都要看到：
                 // 交付是在任务的工作会话里写的，负责人自己的对话里也没有。
                 MessageKind::Task if mine => {
-                    self.see(message.seq, waiting);
+                    see(message.seq, waiting, &mut next_last_seq, &mut next_ahead);
                     continue;
                 }
                 MessageKind::Task | MessageKind::Delivery => {
-                    self.see(message.seq, waiting);
+                    see(message.seq, waiting, &mut next_last_seq, &mut next_ahead);
                     let who = match &message.sender {
                         Sender::User => "用户",
                         Sender::Bot { .. } if mine => "你",
@@ -1841,7 +1910,7 @@ impl Inbox for RoomInbox {
                     if message.state == MessageState::Streaming {
                         continue;
                     }
-                    self.see(message.seq, waiting);
+                    see(message.seq, waiting, &mut next_last_seq, &mut next_ahead);
                     continue;
                 }
                 Sender::Bot { bot_id } => Some(
@@ -1861,7 +1930,7 @@ impl Inbox for RoomInbox {
                 waiting = true;
                 continue;
             }
-            self.see(message.seq, waiting);
+            see(message.seq, waiting, &mut next_last_seq, &mut next_ahead);
             // 成员没做成也要交回主 Agent：它要知道这件事失败了，才能决定下一步。
             let mut message = message;
             let leading = self.link.episode().lead() == Some(&self.bot_id);
@@ -1894,36 +1963,13 @@ impl Inbox for RoomInbox {
             if started && speaker.is_none() && message.kind == MessageKind::Chat && !for_me {
                 continue;
             }
-            // 正在说话的 Bot 看到了这条给它的人类消息：不用再另外挑人来接。
-            // 同时点了别的 Bot 的不算处理过：被点到的别人还要靠房间叫起来。
-            // 没点名的，别的 Bot 也在说时也不算：它们也该看到，要由房间记下（见 dispatch）。
             if speaker.is_none() && for_me {
                 let only_me = if named.is_empty() {
                     self.link.running().iter().all(|id| *id == self.bot_id)
                 } else {
                     named.iter().all(|id| **id == self.bot_id)
                 };
-                let before = if only_me {
-                    self.link.handled.fetch_max(message.seq, Ordering::SeqCst)
-                } else {
-                    self.link.handled.load(Ordering::SeqCst)
-                };
-                // 人中途说了新的话，由正在说话的 Bot 接着答：和新开一轮一样，上限重新算。
-                // 共用的次数只按这句话重新算一次（房间或者先读到的 Bot 算过就不再算），
-                // 转手次数是这一条道自己的，每个读到的 Bot 都从头算。
-                if started || message.seq > before {
-                    if self.link.renewed.fetch_max(message.seq, Ordering::SeqCst) < message.seq {
-                        let running = self.link.running().len();
-                        if only_me {
-                            self.link.episode().renew(running);
-                        } else {
-                            // 房间之后还要为这句话叫别的 Bot（见 work）：先像房间那样重新开始一轮，
-                            // 之前排着的不算了；这个 Bot 读到之后再找的人留着。
-                            self.link.episode().restart(vec![], running);
-                        }
-                    }
-                    self.hop.store(0, Ordering::SeqCst);
-                }
+                renew_events.push((message.seq, only_me, started));
             }
             let to_me = if message.mentions.contains(&self.bot_id) {
                 "（对你说）"
@@ -1952,7 +1998,63 @@ impl Inbox for RoomInbox {
                 message_seq: Some(message.seq),
             });
         }
-        inputs
+        Some(InboxScan {
+            next_last_seq,
+            next_ahead,
+            inputs,
+            renew_events,
+        })
+    }
+
+    fn apply_scan(&mut self, scan: InboxScan) -> Vec<UserInput> {
+        self.first_drain = false;
+        self.last_seq = scan.next_last_seq;
+        self.ahead = scan.next_ahead;
+        for (seq, only_me, started) in scan.renew_events {
+            // 正在说话的 Bot 看到了这条给它的人类消息：不用再另外挑人来接。
+            // 同时点了别的 Bot 的不算处理过：被点到的别人还要靠房间叫起来。
+            // 没点名的，别的 Bot 也在说时也不算：它们也该看到，要由房间记下（见 dispatch）。
+            let before = if only_me {
+                self.link.handled.fetch_max(seq, Ordering::SeqCst)
+            } else {
+                self.link.handled.load(Ordering::SeqCst)
+            };
+            // 人中途说了新的话，由正在说话的 Bot 接着答：和新开一轮一样，上限重新算。
+            // 共用的次数只按这句话重新算一次（房间或者先读到的 Bot 算过就不再算），
+            // 转手次数是这一条道自己的，每个读到的 Bot 都从头算。
+            if started || seq > before {
+                if self.link.renewed.fetch_max(seq, Ordering::SeqCst) < seq {
+                    let running = self.link.running().len();
+                    if only_me {
+                        self.link.episode().renew(running);
+                    } else {
+                        // 房间之后还要为这句话叫别的 Bot（见 work）：先像房间那样重新开始一轮，
+                        // 之前排着的不算了；这个 Bot 读到之后再找的人留着。
+                        self.link.episode().restart(vec![], running);
+                    }
+                }
+                self.hop.store(0, Ordering::SeqCst);
+            }
+        }
+        scan.inputs
+    }
+
+    async fn peek_steer(&self) -> Option<InboxScan> {
+        self.scan().await.filter(|scan| !scan.inputs.is_empty())
+    }
+
+    fn commit_steer(&mut self, scan: InboxScan) -> Vec<UserInput> {
+        self.apply_scan(scan)
+    }
+}
+
+#[async_trait]
+impl Inbox for RoomInbox {
+    async fn drain(&mut self) -> Vec<UserInput> {
+        match self.scan().await {
+            Some(scan) => self.apply_scan(scan),
+            None => vec![],
+        }
     }
 }
 
