@@ -53,10 +53,14 @@ struct Entry {
     read_only: bool,
     /// 那边允许执行命令时用的命令行。
     shell: Option<String>,
+    /// 该 `sa share` 客户端是否支持远端工位双向审批、实时插话与常驻会话池回收。
+    interactive: bool,
     /// 已经交出去、人又点了停止的活，等着告诉那边停下。
     stops: VecDeque<u64>,
     /// 已经叫过停、那边还说在跑的活：上次叫停是什么时候。
     stopping: HashMap<u64, Instant>,
+    /// 发给正在运行中的远端工位的实时控制指令（审批答复、运行中插话）。
+    controls: VecDeque<ShareCall>,
     /// 正挂着等活的请求有几个。
     polling: usize,
     last_seen: Option<Instant>,
@@ -70,6 +74,7 @@ struct Entry {
 impl Entry {
     /// 叫那边停下一件交出去了的活。
     fn stop(&mut self, id: u64) {
+        self.controls.retain(|c| c.id != id);
         if !self.stops.contains(&id) {
             self.stops.push_back(id);
         }
@@ -105,6 +110,7 @@ impl Entry {
         for id in lost.into_iter().rev() {
             let call = self.calls.get_mut(&id).expect("刚找到的");
             if call.writes {
+                self.controls.retain(|c| c.id != id);
                 let call = self.calls.remove(&id).expect("刚找到的");
                 let _ = call.reply.send(Err(if call.tool == "shell" {
                     "和共享目录那台电脑的连接断了，不知道这条命令跑完没有。请先看一下结果再决定要不要重跑。"
@@ -184,6 +190,40 @@ impl Shares {
         state.shares.get(name).is_some_and(Entry::online)
     }
 
+    /// 那台电脑上的 `sa share` 是否支持双向审批、实时插话与远端常驻会话池。
+    pub(crate) fn interactive(&self, name: &str) -> bool {
+        let state = self.state.lock().unwrap();
+        state
+            .shares
+            .get(name)
+            .is_some_and(|entry| entry.interactive && entry.shell.is_some() && !entry.read_only)
+    }
+
+    /// 向正在运行中的远端工位调用发送一条即时控制消息（如 `_approval` / `_steer`）。
+    /// 当目标调用已结束或共享端不支持交互控制时返回 `false`。
+    pub(crate) fn send_control(&self, name: &str, call_id: u64, tool: &str, input: Value) -> bool {
+        let queued = {
+            let mut state = self.state.lock().unwrap();
+            let Some(entry) = state.shares.get_mut(name) else {
+                return false;
+            };
+            if entry.session.is_empty() || !entry.interactive || !entry.calls.contains_key(&call_id)
+            {
+                return false;
+            }
+            entry.controls.push_back(ShareCall {
+                id: call_id,
+                tool: tool.to_string(),
+                input,
+            });
+            true
+        };
+        if queued {
+            self.wake.notify_waiters();
+        }
+        queued
+    }
+
     /// `sa share` 来取活：有就马上给，没有就最多等 `wait`，还没有就给 `None`。
     pub async fn poll(
         &self,
@@ -211,6 +251,7 @@ impl Shares {
                 entry.polling = 0;
                 entry.stops.clear();
                 entry.stopping.clear();
+                entry.controls.clear();
                 if !entry.root.is_empty() && entry.root != hello.root {
                     // 同一个名字换成了另一个目录：之前要做的（尤其批准过的改动）是冲着原来那个目录的。
                     entry.queue.clear();
@@ -226,6 +267,7 @@ impl Shares {
             entry.root = hello.root;
             entry.read_only = hello.read_only;
             entry.shell = hello.shell.filter(|_| !hello.read_only);
+            entry.interactive = hello.interactive && !hello.read_only && entry.shell.is_some();
             entry.last_seen = Some(Instant::now());
             entry.requeue_lost(&hello.running);
             entry.resend_stops(&hello.running);
@@ -284,6 +326,20 @@ impl Shares {
                         input: Value::Null,
                     }));
                 }
+                let mut deferred = VecDeque::new();
+                while let Some(control) = entry.controls.pop_front() {
+                    match entry.calls.get(&control.id) {
+                        Some(call) if call.sent => {
+                            while let Some(prev) = deferred.pop_back() {
+                                entry.controls.push_front(prev);
+                            }
+                            return Ok(Some(control));
+                        }
+                        Some(_) => deferred.push_back(control),
+                        None => {}
+                    }
+                }
+                entry.controls = deferred;
                 while let Some(id) = entry.queue.pop_front() {
                     if let Some(call) = entry.calls.get_mut(&id) {
                         call.sent = true;
@@ -320,6 +376,7 @@ impl Shares {
             return Ok(());
         }
         if let Some(call) = entry.calls.remove(&reply.id) {
+            entry.controls.retain(|c| c.id != reply.id);
             let result = if reply.ok {
                 Ok(reply.text)
             } else {
@@ -339,7 +396,8 @@ impl Shares {
         writes: bool,
         cancel: &CancellationToken,
     ) -> ToolResult {
-        self.call_with(name, tool, input, writes, cancel, None)
+        self.start_call(name, tool, input, writes, None)
+            .wait(cancel)
             .await
     }
 
@@ -352,20 +410,30 @@ impl Shares {
         cancel: &CancellationToken,
         progress: Option<UnboundedSender<String>>,
     ) -> Result<String, String> {
-        self.call_with(name, tool, input, true, cancel, progress)
+        self.start_ask(name, tool, input, progress)
+            .wait(cancel)
             .await
-            .map_err(|error| error.0)
     }
 
-    async fn call_with(
-        &self,
-        name: &str,
+    /// 启动一次远端工位调用并立刻返回带 `call_id` 的句柄，供运行期间双向发送 `_approval` / `_steer` 控制消息。
+    pub(crate) fn start_ask<'a>(
+        &'a self,
+        name: &'a str,
+        tool: &str,
+        input: Value,
+        progress: Option<UnboundedSender<String>>,
+    ) -> AskHandle<'a> {
+        AskHandle(self.start_call(name, tool, input, true, progress))
+    }
+
+    fn start_call<'a>(
+        &'a self,
+        name: &'a str,
         tool: &str,
         input: Value,
         writes: bool,
-        cancel: &CancellationToken,
         progress: Option<UnboundedSender<String>>,
-    ) -> ToolResult {
+    ) -> CallHandle<'a> {
         let (reply, answer) = oneshot::channel();
         let id = {
             let mut state = self.state.lock().unwrap();
@@ -390,12 +458,46 @@ impl Shares {
             id
         };
         self.wake.notify_waiters();
-        // 停止时调用方可能直接丢下这次调用：不管怎么结束，没交出去的都撤回。
-        let pending = Pending {
-            shares: self,
-            name,
+        CallHandle {
             id,
-        };
+            writes,
+            answer,
+            pending: Pending {
+                shares: self,
+                name,
+                id,
+            },
+        }
+    }
+}
+
+pub(crate) struct AskHandle<'a>(CallHandle<'a>);
+
+impl AskHandle<'_> {
+    pub(crate) fn id(&self) -> u64 {
+        self.0.id
+    }
+
+    pub(crate) async fn wait(self, cancel: &CancellationToken) -> Result<String, String> {
+        self.0.wait(cancel).await.map_err(|error| error.0)
+    }
+}
+
+struct CallHandle<'a> {
+    id: u64,
+    writes: bool,
+    answer: oneshot::Receiver<Result<String, String>>,
+    pending: Pending<'a>,
+}
+
+impl CallHandle<'_> {
+    async fn wait(self, cancel: &CancellationToken) -> ToolResult {
+        let CallHandle {
+            writes,
+            answer,
+            pending,
+            ..
+        } = self;
         tokio::pin!(answer);
         let answer = tokio::select! {
             answer = &mut answer => answer,
@@ -479,6 +581,7 @@ impl Drop for Pending<'_> {
         let mut state = self.shares.state.lock().unwrap();
         if let Some(entry) = state.shares.get_mut(self.name) {
             entry.queue.retain(|queued| *queued != self.id);
+            entry.controls.retain(|c| c.id != self.id);
             if entry.calls.remove(&self.id).is_some_and(|call| call.sent) {
                 entry.stop(self.id);
             }
@@ -632,6 +735,7 @@ mod tests {
             read_only,
             shell: None,
             running: Vec::new(),
+            interactive: false,
         }
     }
 
@@ -920,5 +1024,98 @@ mod tests {
             progress: false,
         };
         assert!(shares.reply(late).is_ok());
+    }
+
+    #[tokio::test]
+    async fn interactive_controls_wait_for_sent_prioritize_over_queue_and_clean_up() {
+        let shares = Arc::new(Shares::default());
+        // 旧客户端（未声明 interactive）或未开 --commands：不支持交互控制。
+        assert_eq!(shares.poll(hello("s1", false), NOW).await.unwrap(), None);
+        assert!(!shares.interactive("项目"));
+
+        let mut interactive = hello("s2", false);
+        interactive.shell = Some("bash".into());
+        interactive.interactive = true;
+        assert_eq!(shares.poll(interactive.clone(), NOW).await.unwrap(), None);
+        assert!(shares.interactive("项目"));
+
+        // 入队一次远端工位调用，但在它被 poll 拿走之前就写入一条 _steer 控制消息：
+        // 必须先派发主调用本身，再在下一次 poll 派发控制消息，避免竞态扑空。
+        let cancel = CancellationToken::new();
+        let handle = shares.start_ask("项目", crate::share_desk::RUN, json!({}), None);
+        let run_id = handle.id();
+        assert!(shares.send_control(
+            "项目",
+            run_id,
+            crate::share_desk::STEER,
+            json!({"steer_id": "st1", "text": "先看测试"}),
+        ));
+        let first = shares
+            .poll(interactive.clone(), NOW)
+            .await
+            .unwrap()
+            .expect("主调用必须先于控制消息派发");
+        assert_eq!(
+            (first.id, first.tool.as_str()),
+            (run_id, crate::share_desk::RUN)
+        );
+
+        // 此时再排一个普通调用，控制消息（_steer）必须优先于普通队列派发。
+        let cancel2 = CancellationToken::new();
+        let second_task = {
+            let shares = shares.clone();
+            let cancel2 = cancel2.clone();
+            tokio::spawn(async move {
+                shares
+                    .call("项目", "read", json!({"path": "a"}), false, &cancel2)
+                    .await
+            })
+        };
+        tokio::time::sleep(NOW).await;
+        interactive.running = vec![run_id];
+        let ctrl = shares
+            .poll(interactive.clone(), NOW)
+            .await
+            .unwrap()
+            .expect("控制消息应优先于普通队列");
+        assert_eq!(
+            (ctrl.id, ctrl.tool.as_str()),
+            (run_id, crate::share_desk::STEER)
+        );
+
+        // 再塞一条控制消息后直接结束主调用：残留控制消息应随调用结束被自动清除。
+        assert!(shares.send_control(
+            "项目",
+            run_id,
+            crate::share_desk::APPROVAL,
+            json!({"req_id": "r1", "allowed": true}),
+        ));
+        shares
+            .reply(ShareReply {
+                name: "项目".into(),
+                session: "s2".into(),
+                id: run_id,
+                ok: true,
+                text: "done".into(),
+                progress: false,
+            })
+            .unwrap();
+        assert_eq!(handle.wait(&cancel).await.unwrap(), "done");
+        assert!(!shares.send_control(
+            "项目",
+            run_id,
+            crate::share_desk::APPROVAL,
+            json!({"req_id": "r2", "allowed": true}),
+        ));
+
+        interactive.running.clear();
+        let queued = shares
+            .poll(interactive, NOW)
+            .await
+            .unwrap()
+            .expect("应轮到普通 read 调用而非已清理的旧控制消息");
+        assert_eq!(queued.tool, "read");
+        cancel2.cancel();
+        let _ = second_task.await;
     }
 }

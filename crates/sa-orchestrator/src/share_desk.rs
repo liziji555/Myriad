@@ -3,15 +3,20 @@
 //! 服务交给 `sa share` 三件事：开独立目录、在里面跑 harness、带回或丢掉改动。
 //! `sa share` 在自己这边做（独立目录放在它的数据目录里），harness 的每一步边做边报回房间。
 
-use crate::{harness, workdir};
+use crate::{claude_stream, codex_app_server, harness, workdir};
 use async_trait::async_trait;
 use sa_engine::Workdir;
-use sa_kernel::{Observer, StepEnd, TurnEnd};
+use sa_kernel::{ApprovalRequest, Observer, StepEnd, TurnEnd};
 use sa_llm::Usage;
 use sa_protocol::{DeskChange, Harness, PermissionMode, TaskId};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use tokio::sync::mpsc::UnboundedSender;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 /// 开（或者接着用）独立目录。
@@ -20,10 +25,16 @@ pub const OPEN: &str = "_desk_open";
 pub const RUN: &str = "_harness";
 /// 带回或丢掉独立目录里的改动，收掉目录。
 pub const CLOSE: &str = "_desk_close";
+/// 回收远端工位里常驻的 ACP / Codex / Claude 会话进程（例如用户点「重置会话」时）。
+pub const EVICT: &str = "_desk_evict";
+/// 服务向运行中的远端工位回传用户审批结果（控制消息，无需回包）。
+pub const APPROVAL: &str = "_approval";
+/// 服务向运行中的远端工位注入实时用户插话（控制消息，通过 `Progress::SteerAck` 回传确认）。
+pub const STEER: &str = "_steer";
 
 /// 这几件只有加了 `--commands` 的共享才做：harness 自己会执行命令，带回时 git 也会跑仓库里的钩子。
 pub fn needs_commands(tool: &str) -> bool {
-    matches!(tool, "shell" | OPEN | RUN | CLOSE)
+    matches!(tool, "shell" | OPEN | RUN | CLOSE | EVICT)
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -45,6 +56,15 @@ pub struct Run {
     /// 房间的权限档位。
     #[serde(default)]
     pub permission: PermissionMode,
+    /// 是否启用远端双向审批、运行中插话与常驻会话池（仅当服务端与 `sa share` 均支持时开启）。
+    #[serde(default)]
+    pub interactive: bool,
+    /// 常驻会话池的隔离作用域（`room_id:bot_id`）。
+    #[serde(default)]
+    pub scope: Option<String>,
+    /// 服务端配置的审批超时（毫秒），供远端审批等待设置安全兜底超时。
+    #[serde(default)]
+    pub approval_timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -92,10 +112,33 @@ pub struct Ran {
 pub struct Close {
     pub workdir: Workdir,
     pub accept: bool,
+    /// 对应工位的常驻会话池作用域，关闭前先回收进程树。
+    #[serde(default)]
+    pub scope: Option<String>,
 }
 
-/// harness 做到一半报回来的一件事。
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Evict {
+    pub scope: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApprovalReply {
+    pub req_id: String,
+    pub allowed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Steer {
+    pub steer_id: String,
+    pub text: String,
+}
+
+/// 远端审批挂起表：`req_id -> oneshot(allowed)`。
+pub type PendingApprovals = Arc<Mutex<HashMap<String, oneshot::Sender<bool>>>>;
+
+/// harness 做到一半报回来的一件事。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Progress {
     Text {
@@ -119,19 +162,84 @@ pub enum Progress {
         #[serde(default)]
         cache_write_tokens: u64,
     },
+    /// 远端 harness 发起工具审批请求，等待服务端房间内用户答复后经 `_approval` 回传。
+    ApprovalRequest {
+        req_id: String,
+        call_id: String,
+        tool: String,
+        title: String,
+        input: Value,
+        reason: String,
+    },
+    /// 远端 harness 对服务端 `_steer` 插话请求的确认结果。
+    SteerAck {
+        steer_id: String,
+        accepted: bool,
+    },
 }
 
-/// 把 harness 的进展交给 `sa share`，由它转给服务。
-pub struct Forward(pub UnboundedSender<Progress>);
+/// 默认远端审批安全兜底超时（当服务端未显式传入 `approval_timeout_ms` 时使用）。
+const DEFAULT_REMOTE_APPROVAL_TIMEOUT: Duration = Duration::from_secs(615);
+/// 比服务端审批超时多出的缓冲，确保服务端超时与审计优先触发，同时避免服务重启导致远端死等。
+const REMOTE_APPROVAL_GRACE: Duration = Duration::from_secs(15);
+
+/// 把 harness 的进展与双向审批请求交给 `sa share`，由它转给服务。
+pub struct Forward {
+    progress: UnboundedSender<Progress>,
+    approvals: Option<PendingApprovals>,
+    cancel: CancellationToken,
+    approval_timeout: Duration,
+}
+
+impl Forward {
+    /// 只转发单向进展（兼容旧服务端 / 非交互模式）。
+    pub fn new(progress: UnboundedSender<Progress>) -> Self {
+        Self {
+            progress,
+            approvals: None,
+            cancel: CancellationToken::new(),
+            approval_timeout: DEFAULT_REMOTE_APPROVAL_TIMEOUT,
+        }
+    }
+
+    /// 启用双向审批透传：审批请求通过 `progress` 上报服务端，并等待对应 `req_id` 的 `_approval` 回传。
+    pub fn interactive(
+        progress: UnboundedSender<Progress>,
+        approvals: PendingApprovals,
+        cancel: CancellationToken,
+        approval_timeout_ms: Option<u64>,
+    ) -> Self {
+        let approval_timeout = approval_timeout_ms
+            .map(|ms| Duration::from_millis(ms).saturating_add(REMOTE_APPROVAL_GRACE))
+            .unwrap_or(DEFAULT_REMOTE_APPROVAL_TIMEOUT);
+        Self {
+            progress,
+            approvals: Some(approvals),
+            cancel,
+            approval_timeout,
+        }
+    }
+}
+
+struct ApprovalCleanup {
+    approvals: PendingApprovals,
+    req_id: String,
+}
+
+impl Drop for ApprovalCleanup {
+    fn drop(&mut self) {
+        self.approvals.lock().unwrap().remove(&self.req_id);
+    }
+}
 
 #[async_trait]
 impl Observer for Forward {
     async fn text_delta(&self, text: &str) {
-        let _ = self.0.send(Progress::Text { text: text.into() });
+        let _ = self.progress.send(Progress::Text { text: text.into() });
     }
 
     async fn tool_started(&self, call_id: &str, tool: &str, title: &str, _arguments: &str) {
-        let _ = self.0.send(Progress::Started {
+        let _ = self.progress.send(Progress::Started {
             id: call_id.into(),
             tool: tool.into(),
             title: title.into(),
@@ -139,15 +247,50 @@ impl Observer for Forward {
     }
 
     async fn tool_finished(&self, call_id: &str, end: StepEnd, output: &str) {
-        let _ = self.0.send(Progress::Finished {
+        let _ = self.progress.send(Progress::Finished {
             id: call_id.into(),
             ok: end == StepEnd::Ok,
             output: output.into(),
         });
     }
 
+    async fn request_approval(&self, request: ApprovalRequest<'_>) -> bool {
+        let Some(approvals) = &self.approvals else {
+            return false;
+        };
+        if self.cancel.is_cancelled() {
+            return false;
+        }
+        let req_id = uuid::Uuid::new_v4().simple().to_string();
+        let (tx, rx) = oneshot::channel();
+        approvals.lock().unwrap().insert(req_id.clone(), tx);
+        let _cleanup = ApprovalCleanup {
+            approvals: Arc::clone(approvals),
+            req_id: req_id.clone(),
+        };
+        if self
+            .progress
+            .send(Progress::ApprovalRequest {
+                req_id,
+                call_id: request.call_id.into(),
+                tool: request.tool.into(),
+                title: request.title.into(),
+                input: request.input.clone(),
+                reason: request.reason.into(),
+            })
+            .is_err()
+        {
+            return false;
+        }
+        tokio::select! {
+            answer = rx => answer.unwrap_or(false),
+            _ = self.cancel.cancelled() => false,
+            _ = tokio::time::sleep(self.approval_timeout) => false,
+        }
+    }
+
     async fn usage(&self, model: &str, usage: Usage) {
-        let _ = self.0.send(Progress::Usage {
+        let _ = self.progress.send(Progress::Usage {
             model: model.into(),
             input_tokens: usage.input_tokens,
             output_tokens: usage.output_tokens,
@@ -157,11 +300,13 @@ impl Observer for Forward {
     }
 }
 
-/// 服务这边：把那台电脑报回来的进展放进房间。
-pub(crate) async fn show(progress: &str, observer: &dyn Observer) {
-    let Ok(progress) = serde_json::from_str::<Progress>(progress) else {
-        return;
-    };
+/// 反序列化一条来自远端 `sa share` 的进展消息。
+pub(crate) fn parse_progress(progress: &str) -> Option<Progress> {
+    serde_json::from_str::<Progress>(progress).ok()
+}
+
+/// 服务这边：把单向进展（文本、步骤、用量）放进房间观察者。
+pub(crate) async fn apply_progress(progress: Progress, observer: &dyn Observer) {
     match progress {
         Progress::Text { text } => observer.text_delta(&text).await,
         Progress::Started { id, tool, title } => {
@@ -190,13 +335,17 @@ pub(crate) async fn show(progress: &str, observer: &dyn Observer) {
                 )
                 .await
         }
+        Progress::ApprovalRequest { .. } | Progress::SteerAck { .. } => {}
     }
 }
 
-/// `sa share` 这边：共享目录开出来的独立目录都放在 `dir` 里。
+/// `sa share` 这边：共享目录开出来的独立目录都放在 `dir` 里，同时维护远端常驻会话池。
 pub struct Desks {
     root: PathBuf,
     dir: PathBuf,
+    acp_pool: harness::AcpPool,
+    codex_pool: codex_app_server::CodexPool,
+    claude_pool: claude_stream::ClaudePool,
 }
 
 impl Desks {
@@ -206,7 +355,24 @@ impl Desks {
         Ok(Self {
             root: root.to_path_buf(),
             dir: dir.canonicalize()?,
+            acp_pool: harness::AcpPool::default(),
+            codex_pool: codex_app_server::CodexPool::default(),
+            claude_pool: claude_stream::ClaudePool::default(),
         })
+    }
+
+    /// 回收指定工位作用域下的常驻 ACP / Codex / Claude 进程。
+    pub fn evict_scope(&self, scope: &str) {
+        self.acp_pool.evict_scope(scope);
+        self.codex_pool.evict_scope(scope);
+        self.claude_pool.evict_scope(scope);
+    }
+
+    /// 回收所有远端常驻会话进程（例如 `sa share` 退出时）。
+    pub fn evict_all(&self) {
+        self.acp_pool.evict_all();
+        self.codex_pool.evict_all();
+        self.claude_pool.evict_all();
     }
 
     fn inside(&self, path: &str) -> bool {
@@ -270,9 +436,24 @@ impl Desks {
         workdir::provision(&self.root, &self.dir, &TaskId::from(name)).await
     }
 
-    /// 在独立目录里跑一次 harness，跑完把改动提交掉、列出来。
-    pub async fn run(&self, job: Run, observer: &dyn Observer, cancel: &CancellationToken) -> Ran {
+    /// 在独立目录里跑一次 harness（支持远端常驻会话池、双向审批与运行中插话），跑完把改动提交掉、列出来。
+    pub async fn run_interactive(
+        &self,
+        job: Run,
+        mut steer_rx: Option<UnboundedReceiver<Steer>>,
+        progress: &UnboundedSender<Progress>,
+        observer: &dyn Observer,
+        cancel: &CancellationToken,
+    ) -> Ran {
         if let Err(reason) = self.check(&job.workdir) {
+            if let Some(rx) = steer_rx.as_mut() {
+                while let Ok(steer) = rx.try_recv() {
+                    let _ = progress.send(Progress::SteerAck {
+                        steer_id: steer.steer_id,
+                        accepted: false,
+                    });
+                }
+            }
             return Ran {
                 ended: Ended::Failed { reason },
                 session: job.session,
@@ -280,6 +461,7 @@ impl Desks {
                 changes: Ok(vec![]),
             };
         }
+        let interactive = job.interactive;
         let launch = harness::Launch {
             harness: job.harness,
             command: &job.command,
@@ -288,14 +470,80 @@ impl Desks {
             session: job.session.as_deref(),
             permission: job.permission,
             mcp_servers: &[],
-            acp_pool: None,
-            codex_pool: None,
-            claude_pool: None,
-            acp_scope: None,
-            // 共享目录远端执行器目前只转发进度，尚未透传双向审批卡；Codex / Claude Code 暂走 legacy 驱动避免 Ask 档静默拒绝。
-            interactive_approvals: false,
+            acp_pool: interactive.then_some(&self.acp_pool),
+            codex_pool: interactive.then_some(&self.codex_pool),
+            claude_pool: interactive.then_some(&self.claude_pool),
+            acp_scope: interactive.then_some(job.scope.as_deref()).flatten(),
+            interactive_approvals: interactive,
         };
-        let finished = harness::run(&launch, observer, cancel).await;
+        let finished = if interactive
+            && matches!(job.harness, Harness::Codex | Harness::ClaudeCode)
+            && steer_rx.is_some()
+        {
+            let mut remote_rx = steer_rx.take().expect("checked is_some");
+            let (local_tx, local_rx) = tokio::sync::mpsc::unbounded_channel();
+            let run_fut = harness::run_interactive(&launch, Some(local_rx), observer, cancel);
+            tokio::pin!(run_fut);
+            let mut remote_open = true;
+            let finished = loop {
+                tokio::select! {
+                    finished = &mut run_fut => break finished,
+                    steer = remote_rx.recv(), if remote_open => {
+                        let Some(steer) = steer else {
+                            remote_open = false;
+                            continue;
+                        };
+                        let (ack_tx, mut ack_rx) = oneshot::channel();
+                        if local_tx
+                            .send(harness::SteerRequest {
+                                text: steer.text,
+                                ack: ack_tx,
+                            })
+                            .is_err()
+                        {
+                            let _ = progress.send(Progress::SteerAck {
+                                steer_id: steer.steer_id,
+                                accepted: false,
+                            });
+                            continue;
+                        }
+                        let accepted = tokio::select! {
+                            finished = &mut run_fut => {
+                                let accepted = ack_rx.try_recv() == Ok(true);
+                                let _ = progress.send(Progress::SteerAck {
+                                    steer_id: steer.steer_id,
+                                    accepted,
+                                });
+                                break finished;
+                            }
+                            res = &mut ack_rx => res.unwrap_or(false),
+                        };
+                        let _ = progress.send(Progress::SteerAck {
+                            steer_id: steer.steer_id,
+                            accepted,
+                        });
+                    }
+                }
+            };
+            while let Ok(steer) = remote_rx.try_recv() {
+                let _ = progress.send(Progress::SteerAck {
+                    steer_id: steer.steer_id,
+                    accepted: false,
+                });
+            }
+            finished
+        } else {
+            let finished = harness::run_interactive(&launch, None, observer, cancel).await;
+            if let Some(rx) = steer_rx.as_mut() {
+                while let Ok(steer) = rx.try_recv() {
+                    let _ = progress.send(Progress::SteerAck {
+                        steer_id: steer.steer_id,
+                        accepted: false,
+                    });
+                }
+            }
+            finished
+        };
         let changes = workdir::commit_and_diff(&job.workdir, &job.summary)
             .await
             .map(|files| {
@@ -320,10 +568,22 @@ impl Desks {
                 return Err("它的独立目录已经不在了，没有改动可以带回".into());
             }
             self.check(dir)?;
+            // 验收前先做只读预检，避免主目录有未完成合并时误杀常驻进程。
+            workdir::preflight_accept(dir).await?;
+            if let Some(scope) = close.scope.as_deref() {
+                self.evict_scope(scope);
+            } else {
+                self.evict_all();
+            }
             workdir::bring_back(dir).await?;
         } else {
             // 丢掉不管它是从哪个目录开的：共享换了目录之后，旧的也要能丢。
             self.own(dir)?;
+            if let Some(scope) = close.scope.as_deref() {
+                self.evict_scope(scope);
+            } else {
+                self.evict_all();
+            }
         }
         workdir::remove(&TaskId::from("desk".to_string()), dir).await;
         Ok(())

@@ -457,6 +457,9 @@ pub struct SharePoll {
     /// 交出去了、这边还在做的活。不在这里面又没交回的，就是丢了。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub running: Vec<u64>,
+    /// 该 `sa share` 客户端是否支持远端工位双向审批、运行中实时插话与常驻会话池回收。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub interactive: bool,
 }
 
 /// 交给 `sa share` 去做的一件事：在共享目录里调用一个工具，或者停下还在做的那件。
