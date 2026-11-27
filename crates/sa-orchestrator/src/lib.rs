@@ -10,6 +10,7 @@
 mod agent;
 mod ask;
 mod budget;
+pub(crate) mod claude_stream;
 pub(crate) mod codex_app_server;
 mod deliver;
 mod desks;
@@ -183,6 +184,8 @@ pub(crate) struct Shared {
     pub acp_pool: harness::AcpPool,
     /// 持久 Codex app-server 会话池（保持同工位 Codex 进程与线程常驻，支持运行中 `turn/steer`）。
     pub codex_pool: codex_app_server::CodexPool,
+    /// 持久 Claude Code 流式会话池（保持同工位常驻 Claude Code 进程，支持运行中插话与双向审批）。
+    pub claude_pool: claude_stream::ClaudePool,
     /// 已配置的 MCP 服务规格列表（用于透传注入到外部 CLI Harness / ACP）。
     pub mcp_specs: Mutex<Vec<sa_tools::mcp::McpSpec>>,
     /// 单次输出超限被截断时的自动续写次数上限（生产默认 2，测试默认 0）。
@@ -298,6 +301,7 @@ impl Orchestrator {
                 bg_shell: sa_tools::BgShellManager::new(),
                 acp_pool: harness::AcpPool::default(),
                 codex_pool: codex_app_server::CodexPool::default(),
+                claude_pool: claude_stream::ClaudePool::default(),
                 mcp_specs: Mutex::default(),
                 max_truncated_recoveries: std::sync::atomic::AtomicUsize::new(0),
             }),
@@ -511,6 +515,7 @@ impl Orchestrator {
         work::shutdown(&self.shared).await;
         self.shared.acp_pool.evict_all();
         self.shared.codex_pool.evict_all();
+        self.shared.claude_pool.evict_all();
         self.shared.bg_shell.kill_all();
         extensions::shutdown(&self.shared).await;
     }

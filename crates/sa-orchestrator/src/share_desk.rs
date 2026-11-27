@@ -290,8 +290,9 @@ impl Desks {
             mcp_servers: &[],
             acp_pool: None,
             codex_pool: None,
+            claude_pool: None,
             acp_scope: None,
-            // 共享目录远端执行器目前只转发进度，尚未透传双向审批卡；Codex 暂走 legacy `exec` 驱动避免 Ask 档静默拒绝。
+            // 共享目录远端执行器目前只转发进度，尚未透传双向审批卡；Codex / Claude Code 暂走 legacy 驱动避免 Ask 档静默拒绝。
             interactive_approvals: false,
         };
         let finished = harness::run(&launch, observer, cancel).await;

@@ -256,9 +256,10 @@ impl Orchestrator {
         for server in previous {
             server.retire().await;
         }
-        // MCP 变更后驱逐常驻 ACP / Codex 进程，让下轮重新带上最新 mcpServers。
+        // MCP 变更后驱逐常驻 ACP / Codex / Claude 进程，让下轮重新带上最新 mcpServers。
         self.shared.acp_pool.evict_all();
         self.shared.codex_pool.evict_all();
+        self.shared.claude_pool.evict_all();
         self.set_mcp_specs(specs.clone());
 
         let futs = specs.into_iter().map(|spec| {

@@ -9,8 +9,9 @@
 //! - 优雅中断（`turn/interrupt`）与低版本 Codex 自动回退（握手阶段失败时无感回退到 `codex exec --json`）。
 
 use crate::harness::{
-    build_command, codex_item, find_program, mcp_fingerprint, read_stderr_tail, split_command,
-    str_of, tail, Finished, Launch, IDLE_TIMEOUT, MAX_STDOUT_LINE_BYTES, STDERR_TAIL,
+    build_command, codex_item, find_program, mcp_fingerprint, read_bounded_line_buffered,
+    read_stderr_tail, split_command, str_of, tail, Finished, Launch, LineBuffer, SteerRequest,
+    IDLE_TIMEOUT, STDERR_TAIL,
 };
 use sa_kernel::{ApprovalRequest, Observer, StepEnd, TurnEnd};
 use sa_llm::Usage;
@@ -22,7 +23,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
@@ -34,13 +35,6 @@ const CODEX_IDLE_TTL: Duration = Duration::from_secs(15 * 60);
 const INIT_TIMEOUT: Duration = Duration::from_secs(15);
 /// 停止时等待 `turn/interrupt` 收尾的最长时间。
 const INTERRUPT_GRACE: Duration = Duration::from_millis(800);
-
-/// 运行中插话请求：由 `room.rs` 在收到新消息时发送，由 `codex app-server` 通过 `turn/steer` 注入。
-/// `ack` 为 `true` 表示 `turn/steer` 已被 Codex 接收，`false`（或通道关闭）表示未能注入，调用方保留未读游标留待下轮处理。
-pub(crate) struct SteerRequest {
-    pub text: String,
-    pub ack: oneshot::Sender<bool>,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct CodexKey {
@@ -54,53 +48,6 @@ struct TokenTotals {
     input_tokens: u64,
     output_tokens: u64,
     cached_tokens: u64,
-}
-
-#[derive(Default)]
-struct LineBuffer {
-    buf: Vec<u8>,
-    capped: bool,
-}
-
-/// 可在 `tokio::select!` 中安全取消的有界按行读取：被其它分支打断时完整保留半行字节与截断标记，绝不丢帧。
-async fn read_bounded_line_buffered<R: AsyncBufRead + Unpin>(
-    reader: &mut R,
-    state: &mut LineBuffer,
-) -> std::io::Result<Option<String>> {
-    loop {
-        let available = reader.fill_buf().await?;
-        if available.is_empty() {
-            if state.buf.is_empty() {
-                state.capped = false;
-                return Ok(None);
-            }
-            break;
-        }
-        let newline = available.iter().position(|&b| b == b'\n');
-        let take = newline.map_or(available.len(), |pos| pos + 1);
-        if !state.capped {
-            let remaining = MAX_STDOUT_LINE_BYTES.saturating_sub(state.buf.len());
-            if take <= remaining {
-                state.buf.extend_from_slice(&available[..take]);
-            } else {
-                state.buf.extend_from_slice(&available[..remaining]);
-                state.capped = true;
-            }
-        }
-        reader.consume(take);
-        if newline.is_some() {
-            break;
-        }
-    }
-    let mut out = std::mem::take(&mut state.buf);
-    state.capped = false;
-    if out.ends_with(b"\n") {
-        out.pop();
-        if out.ends_with(b"\r") {
-            out.pop();
-        }
-    }
-    Ok(Some(String::from_utf8_lossy(&out).into_owned()))
 }
 
 struct PooledCodex {
@@ -1889,6 +1836,7 @@ for raw in sys.stdin:
                 mcp_servers: &[],
                 acp_pool: None,
                 codex_pool: Some(&pool),
+                claude_pool: None,
                 acp_scope: Some("room:r1:bot:codex"),
                 interactive_approvals: true,
             },
@@ -1917,6 +1865,7 @@ for raw in sys.stdin:
                 mcp_servers: &[],
                 acp_pool: None,
                 codex_pool: Some(&pool),
+                claude_pool: None,
                 acp_scope: Some("room:r1:bot:codex"),
                 interactive_approvals: true,
             },
@@ -1961,6 +1910,7 @@ for raw in sys.stdin:
                 mcp_servers: &[],
                 acp_pool: None,
                 codex_pool: Some(&pool),
+                claude_pool: None,
                 acp_scope: Some("room:r1:bot:codex"),
                 interactive_approvals: true,
             },
@@ -1999,6 +1949,7 @@ for raw in sys.stdin:
                 mcp_servers: &[],
                 acp_pool: None,
                 codex_pool: Some(&pool),
+                claude_pool: None,
                 acp_scope: Some("room:r1:bot:codex"),
                 interactive_approvals: true,
             },
@@ -2029,6 +1980,7 @@ for raw in sys.stdin:
                 mcp_servers: &[],
                 acp_pool: None,
                 codex_pool: Some(&pool),
+                claude_pool: None,
                 acp_scope: Some("room:r1:bot:codex"),
                 interactive_approvals: true,
             },
@@ -2051,6 +2003,7 @@ for raw in sys.stdin:
                 mcp_servers: &[],
                 acp_pool: None,
                 codex_pool: None,
+                claude_pool: None,
                 acp_scope: None,
                 interactive_approvals: false,
             },
@@ -2088,6 +2041,7 @@ print(json.dumps({"type": "item.completed", "item": {"id": "m1", "type": "agent_
                 mcp_servers: &[],
                 acp_pool: None,
                 codex_pool: Some(&pool),
+                claude_pool: None,
                 acp_scope: Some("room:r1:bot:legacy"),
                 interactive_approvals: true,
             },

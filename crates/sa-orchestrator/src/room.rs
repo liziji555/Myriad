@@ -1448,13 +1448,14 @@ async fn harness_turn(
                 mcp_servers: &mcp_servers,
                 acp_pool: Some(&shared.acp_pool),
                 codex_pool: Some(&shared.codex_pool),
+                claude_pool: Some(&shared.claude_pool),
                 acp_scope: Some(&acp_scope),
                 interactive_approvals: true,
             };
             if cancel.is_cancelled() {
                 return Ok(TurnEnd::Cancelled);
             }
-            let finished = if bot.harness == Harness::Codex {
+            let finished = if matches!(bot.harness, Harness::Codex | Harness::ClaudeCode) {
                 let (steer_tx, steer_rx) = tokio::sync::mpsc::unbounded_channel();
                 let run_fut =
                     crate::harness::run_interactive(&launch, Some(steer_rx), observer, cancel);
@@ -1477,7 +1478,7 @@ async fn harness_turn(
                                     .join("\n\n");
                                 let (ack_tx, mut ack_rx) = tokio::sync::oneshot::channel();
                                 if steer_tx
-                                    .send(crate::codex_app_server::SteerRequest {
+                                    .send(crate::harness::SteerRequest {
                                         text: steer_text,
                                         ack: ack_tx,
                                     })
