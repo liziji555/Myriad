@@ -19,7 +19,7 @@ use sa_protocol::{
 };
 use sa_tools::{Fence, ToolCtx, ToolRegistry};
 use serde_json::Value;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::task::JoinSet;
@@ -132,8 +132,8 @@ pub(crate) async fn run(shared: Arc<Shared>, room_id: RoomId, link: Arc<RoomLink
     let mut sessions = Sessions::new();
     // 正在说话的那几个 Bot，每个一条道。
     let mut lanes = Lanes::new();
-    // 正在说话的 Bot 该看到的人类消息（全部待看 `seq`）：说完时只要有任何一条还没看到（例如被运行中插话跳过的外部消息），就让它再说一轮。
-    let mut owed: HashMap<BotId, BTreeSet<i64>> = HashMap::new();
+    // 正在说话的 Bot 该看到的人类消息（全部待看 `seq -> MessageId`）：说完时只要有任何一条还没看到（例如被运行中插话跳过的外部消息），就带着它的消息 ID 让它再说一轮。
+    let mut owed: HashMap<BotId, BTreeMap<i64, MessageId>> = HashMap::new();
     loop {
         tokio::select! {
             _ = link.wake.notified() => {}
@@ -196,7 +196,7 @@ async fn finished(
     room_id: &RoomId,
     link: &RoomLink,
     sessions: &Sessions,
-    owed: &mut HashMap<BotId, BTreeSet<i64>>,
+    owed: &mut HashMap<BotId, BTreeMap<i64, MessageId>>,
     done: Result<LaneEnd, tokio::task::JoinError>,
 ) {
     let (bot_id, reply, for_lead, result) = match done {
@@ -227,7 +227,7 @@ async fn finished(
                 if let Some(session) = sessions.get(&bot_id) {
                     let mut session = session.lock().await;
                     if let Some(max_unseen) =
-                        seqs.into_iter().filter(|seq| !session.seen(*seq)).max()
+                        seqs.into_keys().filter(|seq| !session.seen(*seq)).max()
                     {
                         if max_unseen > session.dismissed {
                             session.dismissed = max_unseen;
@@ -240,7 +240,7 @@ async fn finished(
         }
         Err(error) => tracing::error!(room = %room_id, "这一轮没跑成：{error}"),
     }
-    // 说话期间发给它的话，只要还有任何一条没看到（例如运行中插话跳过了先到的 Telegram 消息，或本轮出错），就要再排一轮。
+    // 说话期间发给它的话，只要还有任何一条没看到（例如运行中插话跳过了先到的 Telegram 消息，或本轮出错），就要带着原消息 ID 再排一轮。
     let Some(seqs) = owed.remove(&bot_id) else {
         return;
     };
@@ -248,8 +248,13 @@ async fn finished(
         return;
     };
     let session = session.lock().await;
-    if seqs.into_iter().any(|seq| !session.seen(seq)) {
-        link.episode().push(Job::new(bot_id, 0));
+    let unseen: Vec<MessageId> = seqs
+        .into_iter()
+        .filter(|(seq, _)| !session.seen(*seq))
+        .map(|(_, id)| id)
+        .collect();
+    if !unseen.is_empty() {
+        link.episode().push(Job::new(bot_id, 0).replying(unseen));
     }
 }
 
@@ -272,7 +277,7 @@ async fn work(
     link: &Arc<RoomLink>,
     sessions: &mut Sessions,
     lanes: &mut Lanes,
-    owed: &mut HashMap<BotId, BTreeSet<i64>>,
+    owed: &mut HashMap<BotId, BTreeMap<i64, MessageId>>,
 ) -> Result<(), String> {
     if shared.shutdown.is_cancelled() {
         return Ok(());
@@ -547,7 +552,7 @@ async fn dispatch(
     fresh: &[Message],
     link: &Arc<RoomLink>,
     running: &[BotId],
-    owed: &mut HashMap<BotId, BTreeSet<i64>>,
+    owed: &mut HashMap<BotId, BTreeMap<i64, MessageId>>,
 ) -> Vec<Job> {
     let is_member = |id: &BotId| members.iter().any(|bot| &bot.id == id);
     // 已经被停下、还没收尾的 Bot 不算在说：给它的新话要另外排队，不能记成它这一轮该看的。
@@ -564,8 +569,10 @@ async fn dispatch(
             .collect()
     };
     let running = running.as_slice();
-    let mut owe = |bot_id: &BotId, seq: i64| {
-        owed.entry(bot_id.clone()).or_default().insert(seq);
+    let mut owe = |bot_id: &BotId, message: &Message| {
+        owed.entry(bot_id.clone())
+            .or_default()
+            .insert(message.seq, message.id.clone());
     };
     let mut first: Vec<(BotId, MessageId)> = vec![];
     let mut open = None;
@@ -574,13 +581,13 @@ async fn dispatch(
         if named.is_empty() {
             open = Some(message);
             for bot_id in running {
-                owe(bot_id, message.seq);
+                owe(bot_id, message);
             }
             continue;
         }
         for bot_id in named {
             if running.contains(bot_id) {
-                owe(bot_id, message.seq);
+                owe(bot_id, message);
             } else if !first.iter().any(|(id, _)| id == bot_id) {
                 first.push((bot_id.clone(), message.id.clone()));
             }
