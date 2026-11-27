@@ -149,7 +149,11 @@ impl AcpPool {
                 let expired = {
                     let mut map = entries.lock().unwrap_or_else(|e| e.into_inner());
                     if map.get(&key).is_some_and(|v| v.last_used == now) {
-                        map.remove(&key)
+                        map.remove(&key).map(|mut conn| {
+                            // 释放锁前立即向进程树发终止信号，避免并发 evict_scope 提前返回。
+                            conn.child.kill();
+                            conn
+                        })
                     } else {
                         None
                     }
