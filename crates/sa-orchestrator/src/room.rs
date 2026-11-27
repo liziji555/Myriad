@@ -1955,10 +1955,21 @@ impl RoomInbox {
                 continue;
             }
             if only_local_chat {
-                if message.origin.is_some() {
-                    return None;
-                }
                 if speaker.is_some() {
+                    waiting = true;
+                    continue;
+                }
+                if message.origin.is_some() {
+                    let named: Vec<&BotId> = message
+                        .mentions
+                        .iter()
+                        .filter(|id| self.names.contains_key(*id))
+                        .collect();
+                    let for_me = named.is_empty() || named.contains(&&self.bot_id);
+                    if for_me {
+                        return None;
+                    }
+                    // 显式点名其它 Bot 的外部消息不阻塞本 Bot 接收本机插话，仅保持未读留待下轮。
                     waiting = true;
                     continue;
                 }
