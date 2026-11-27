@@ -22,7 +22,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot};
@@ -37,11 +37,9 @@ const INIT_TIMEOUT: Duration = Duration::from_secs(15);
 /// 点「停止」时等待 `interrupt` 收尾的最长时间。
 const INTERRUPT_GRACE: Duration = Duration::from_millis(800);
 
-static MSG_UUID_SEQ: AtomicU64 = AtomicU64::new(1);
-
-fn next_uuid(prefix: &str) -> String {
-    let seq = MSG_UUID_SEQ.fetch_add(1, Ordering::Relaxed);
-    format!("myriad-{prefix}-{}-{seq}", std::process::id())
+fn next_uuid() -> String {
+    // 每次生成随机 UUIDv4，避免服务重启后 PID/计数器归零撞上 `--resume` 会话历史里的旧消息 UUID。
+    uuid::Uuid::new_v4().to_string()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -80,7 +78,7 @@ impl Drop for PooledClaude {
 /// 持久 Claude Code 流式进程池：同一房间工位的 Claude Code Bot 跨轮保持常驻进程与会话。
 #[derive(Default)]
 pub(crate) struct ClaudePool {
-    entries: std::sync::Mutex<HashMap<ClaudeKey, PooledClaude>>,
+    entries: Arc<Mutex<HashMap<ClaudeKey, PooledClaude>>>,
 }
 
 impl ClaudePool {
@@ -121,14 +119,19 @@ impl ClaudePool {
         }
     }
 
-    fn put(&self, key: ClaudeKey, mut conn: PooledClaude) {
-        conn.last_used = Instant::now();
+    fn put(&self, key: ClaudeKey, conn: PooledClaude) {
+        self.put_with_ttl(key, conn, CLAUDE_IDLE_TTL);
+    }
+
+    fn put_with_ttl(&self, key: ClaudeKey, mut conn: PooledClaude, ttl: Duration) {
+        let now = Instant::now();
+        conn.last_used = now;
         let mut evicted = Vec::new();
         {
             let mut map = self.entries.lock().unwrap_or_else(|e| e.into_inner());
             let expired_keys: Vec<ClaudeKey> = map
                 .iter()
-                .filter(|(_, v)| v.last_used.elapsed() > CLAUDE_IDLE_TTL)
+                .filter(|(_, v)| v.last_used.elapsed() > ttl)
                 .map(|(k, _)| k.clone())
                 .collect();
             for k in expired_keys {
@@ -149,11 +152,31 @@ impl ClaudePool {
                     break;
                 }
             }
-            if let Some(prev) = map.insert(key, conn) {
+            if let Some(prev) = map.insert(key.clone(), conn) {
                 evicted.push(prev);
             }
         }
         drop(evicted);
+
+        // 主动按空闲截止时间安排回收定时器：复核 `last_used == now` 防止旧定时器误杀新连接。
+        let weak = Arc::downgrade(&self.entries);
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                tokio::time::sleep(ttl).await;
+                let Some(entries) = weak.upgrade() else {
+                    return;
+                };
+                let expired = {
+                    let mut map = entries.lock().unwrap_or_else(|e| e.into_inner());
+                    if map.get(&key).is_some_and(|v| v.last_used == now) {
+                        map.remove(&key)
+                    } else {
+                        None
+                    }
+                };
+                drop(expired);
+            });
+        }
     }
 
     /// 驱逐指定作用域（重置工位会话、关闭工位）的全部常驻 Claude Code 进程。
@@ -583,10 +606,46 @@ async fn handle_claude_control_request(
 
     let tool_name = str_of(req, "tool_name");
     let input = req.get("input").cloned().unwrap_or_else(|| json!({}));
-    let (title, reason) = claude_approval_summary(tool_name, &input);
     let call_id = format!("claude-approve-{request_id}");
     // 使用独立的 `claude_approval` 工具名，避免触发 `RoomObserver::rule_key` 的跨目录「总是允许」。
     let approval_tool = "claude_approval";
+
+    // `AskUserQuestion` 需要宿主收集表单答案并回填 `updatedInput.answers`，不能只用批准/拒绝代替；
+    // 明确拒绝并提示 Claude 直接在聊天回复里向用户提问，避免把空答案当成已批准回传。
+    if tool_name == "AskUserQuestion" {
+        observer
+            .tool_started(
+                &call_id,
+                approval_tool,
+                "Claude Code 尝试发起交互式问答（已转为对话提问）",
+                &input.to_string(),
+            )
+            .await;
+        observer
+            .tool_finished(
+                &call_id,
+                StepEnd::Stopped,
+                "当前宿主暂不支持结构化多选表单，请直接在聊天回复中提问",
+            )
+            .await;
+        return write_json_line(
+            &mut conn.stdin,
+            &json!({
+                "type": "control_response",
+                "response": {
+                    "subtype": "success",
+                    "request_id": request_id,
+                    "response": {
+                        "behavior": "deny",
+                        "message": "Interactive AskUserQuestion form is not supported in this host; please ask the user directly in your chat message instead.",
+                    }
+                }
+            }),
+        )
+        .await;
+    }
+
+    let (title, reason) = claude_approval_summary(tool_name, &input);
 
     let allowed = match permission {
         PermissionMode::Full => true,
@@ -678,7 +737,7 @@ async fn run_claude_turn_on(
     cancel: &CancellationToken,
     reused: bool,
 ) -> ClaudeTurnOutcome {
-    let initial_uuid = next_uuid("turn");
+    let initial_uuid = next_uuid();
     let user_msg = json!({
         "type": "user",
         "uuid": initial_uuid,
@@ -704,6 +763,9 @@ async fn run_claude_turn_on(
         };
     }
 
+    // 复用已知支持 `--replay-user-messages` 的常驻进程时，必须先等到本轮 `initial_uuid` 回显才开始采纳输出与 `result`，
+    // 避免两轮之间后台任务完成产生的滞留 `result` 误把新一轮回复提前关闭。
+    let mut prompt_started = !(reused && conn.replay_supported);
     let mut text = String::new();
     let mut reasoning = String::new();
     let mut streamed_block = false;
@@ -718,7 +780,7 @@ async fn run_claude_turn_on(
     let mut clean_for_pool = false;
 
     let end = loop {
-        let can_steer = conn.replay_supported && steer_rx.is_some();
+        let can_steer = prompt_started && conn.replay_supported && steer_rx.is_some();
         tokio::select! {
             _ = cancel.cancelled() => {
                 let req_id = format!("myriad-int-{}", conn.next_req_id);
@@ -758,7 +820,7 @@ async fn run_claude_turn_on(
                 match maybe_steer {
                     Some(req) => {
                         steer_seq += 1;
-                        let steer_uuid = next_uuid("steer");
+                        let steer_uuid = next_uuid();
                         let step_id = format!("claude-steer-{steer_seq}");
                         let preview: String = req.text.chars().take(64).collect();
                         observer
@@ -850,11 +912,16 @@ async fn run_claude_turn_on(
                     continue;
                 }
 
-                // `--replay-user-messages` 回显：用于确认本进程支持回显以及精确确认运行中插话已入队消费。
+                // `--replay-user-messages` 回显：用于确认本进程支持回显、标记本轮已正式开始以及精确确认运行中插话已消费。
                 if msg_type == "user" {
                     let echoed_uuid = str_of(&value, "uuid");
-                    if echoed_uuid == initial_uuid || value["isReplay"].as_bool().unwrap_or(false) {
+                    if echoed_uuid == initial_uuid {
                         conn.replay_supported = true;
+                        prompt_started = true;
+                        continue;
+                    }
+                    if !prompt_started {
+                        continue;
                     }
                     if !echoed_uuid.is_empty() {
                         if let Some(pending) = pending_steers.remove(echoed_uuid) {
@@ -868,6 +935,11 @@ async fn run_claude_turn_on(
                             let _ = pending.ack.send(true);
                         }
                     }
+                }
+
+                // 尚未收到本轮 `initial_uuid` 回显前，丢弃空闲期间后台任务产生的滞留输出与 `result`。
+                if !prompt_started {
+                    continue;
                 }
 
                 let is_stream_event = msg_type == "stream_event";
@@ -1008,7 +1080,9 @@ async fn run_claude_turn_on(
     let session_out = conn.session_id.clone();
     let reasoning_out = (!reasoning.trim().is_empty()).then_some(reasoning);
 
+    // 仅当连接支持 `--replay-user-messages`（从而能在下轮精确按 `uuid` 屏蔽空闲期间后台滞留 `result`）时才入池复用。
     let keep = if clean_for_pool
+        && conn.replay_supported
         && conn.session_id.is_some()
         && launch.claude_pool.is_some()
         && launch.acp_scope.is_some()
@@ -1194,6 +1268,27 @@ for raw in sys.stdin:
                 send({"type": "result", "subtype": "interrupted", "is_error": True, "session_id": sid})
                 break
         continue
+    elif "bg-after" in prompt:
+        # 模拟 Turn 1 结束后，后台任务在空闲期间产生滞留输出与 result（早于下一轮 user 回显到达）。
+        send({"type": "assistant", "session_id": sid, "message": {"content": [{"type": "text", "text": f"pid={pid},turn={turn_n},bg-started"}]}})
+        send({"type": "result", "subtype": "success", "is_error": False, "session_id": sid})
+        send({"type": "assistant", "session_id": sid, "message": {"content": [{"type": "text", "text": "stale-bg-output"}]}})
+        send({"type": "result", "subtype": "success", "is_error": False, "session_id": sid})
+        continue
+    elif "ask-question" in prompt:
+        send({
+            "type": "control_request",
+            "request_id": f"q-{turn_n}",
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": "AskUserQuestion",
+                "tool_use_id": "tu-q1",
+                "input": {"questions": [{"question": "SQLite or Postgres?"}]}
+            }
+        })
+        resp = json.loads(sys.stdin.readline())
+        behavior = resp["response"]["response"]["behavior"]
+        send({"type": "assistant", "session_id": sid, "message": {"content": [{"type": "text", "text": f"question_behavior={behavior}"}]}})
     elif "ask-bash" in prompt:
         send({
             "type": "control_request",
@@ -1291,6 +1386,84 @@ for raw in sys.stdin:
         assert_eq!(usages.len(), 2);
         assert_eq!(usages[0].input_tokens, 170);
         assert_eq!(usages[0].cache_write_tokens, 20);
+
+        // 1b. `AskUserQuestion` 必须显式拒绝而不弹批准卡（避免回传空 answers）。
+        let q_obs = RecordingObserver {
+            approve_response: true,
+            ..Default::default()
+        };
+        let asked_q = run(
+            &Launch {
+                harness: Harness::ClaudeCode,
+                command: &cmd,
+                dir: dir.path(),
+                prompt: "ask-question",
+                session: second.session.as_deref(),
+                permission: PermissionMode::Ask,
+                mcp_servers: &[],
+                acp_pool: None,
+                codex_pool: None,
+                claude_pool: Some(&pool),
+                acp_scope: Some("room:r1:bot:cc"),
+                interactive_approvals: true,
+            },
+            &q_obs,
+            &CancellationToken::new(),
+        )
+        .await;
+        assert_eq!(asked_q.end, TurnEnd::Completed);
+        assert_eq!(asked_q.text, "question_behavior=deny");
+        assert!(q_obs.approvals.lock().unwrap().is_empty());
+
+        // 1c. 两轮之间后台任务向 stdout 写入滞留 `result` 时，下一轮必须跳过滞留输出直到收到本轮 `uuid` 回显。
+        let bg_turn = run(
+            &Launch {
+                harness: Harness::ClaudeCode,
+                command: &cmd,
+                dir: dir.path(),
+                prompt: "bg-after",
+                session: asked_q.session.as_deref(),
+                permission: PermissionMode::Ask,
+                mcp_servers: &[],
+                acp_pool: None,
+                codex_pool: None,
+                claude_pool: Some(&pool),
+                acp_scope: Some("room:r1:bot:cc"),
+                interactive_approvals: true,
+            },
+            &obs,
+            &CancellationToken::new(),
+        )
+        .await;
+        assert_eq!(bg_turn.end, TurnEnd::Completed);
+        assert!(bg_turn.text.contains("bg-started"), "{}", bg_turn.text);
+
+        let after_bg = run(
+            &Launch {
+                harness: Harness::ClaudeCode,
+                command: &cmd,
+                dir: dir.path(),
+                prompt: "real-next-question",
+                session: bg_turn.session.as_deref(),
+                permission: PermissionMode::Ask,
+                mcp_servers: &[],
+                acp_pool: None,
+                codex_pool: None,
+                claude_pool: Some(&pool),
+                acp_scope: Some("room:r1:bot:cc"),
+                interactive_approvals: true,
+            },
+            &obs,
+            &CancellationToken::new(),
+        )
+        .await;
+        assert_eq!(after_bg.end, TurnEnd::Completed);
+        assert!(
+            !after_bg.text.contains("stale-bg-output"),
+            "leaked stale bg output: {}",
+            after_bg.text
+        );
+        assert!(after_bg.text.contains("turn=5"), "{}", after_bg.text);
 
         // 2. 切到 Plan 模式时自动淘汰旧 Ask 进程并自动拒绝 can_use_tool 请求。
         let plan_obs = RecordingObserver {
@@ -1482,6 +1655,48 @@ print(json.dumps({"type": "assistant", "session_id": "old-cc", "message": {"cont
         assert_eq!(fallback.end, TurnEnd::Completed);
         assert_eq!(fallback.session.as_deref(), Some("old-cc"));
         assert_eq!(fallback.text, "fallback:still-works");
+
+        // 7. 空闲定时器在 TTL 到期后主动淘汰并回收常驻进程（即使不再调用 take/put）。
+        let expiring_pool = ClaudePool::default();
+        let key = ClaudeKey {
+            scope: "room:r1:bot:ttl".into(),
+            command: cmd.clone(),
+            dir: dir.path().to_path_buf(),
+        };
+        let spawned = spawn_claude_session(
+            Path::new(&cmd),
+            &[],
+            &Launch {
+                harness: Harness::ClaudeCode,
+                command: &cmd,
+                dir: dir.path(),
+                prompt: "ttl",
+                session: None,
+                permission: PermissionMode::Ask,
+                mcp_servers: &[],
+                acp_pool: None,
+                codex_pool: None,
+                claude_pool: None,
+                acp_scope: None,
+                interactive_approvals: true,
+            },
+            &mcp_fingerprint(&[]),
+            &CancellationToken::new(),
+        )
+        .await;
+        let SpawnOutcome::Ready(conn) = spawned else {
+            panic!("expected ready claude session");
+        };
+        expiring_pool.put_with_ttl(key, *conn, Duration::from_millis(60));
+        assert_eq!(expiring_pool.len(), 1);
+        tokio::time::sleep(Duration::from_millis(140)).await;
+        assert_eq!(expiring_pool.len(), 0);
+
+        // 校验随机 UUIDv4 格式与唯一性（重启不撞历史会话 ID）。
+        let u1 = next_uuid();
+        let u2 = next_uuid();
+        assert!(uuid::Uuid::parse_str(&u1).is_ok());
+        assert_ne!(u1, u2);
 
         pool.evict_all();
         assert_eq!(pool.len(), 0);

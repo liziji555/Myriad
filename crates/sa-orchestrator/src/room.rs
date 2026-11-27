@@ -1825,7 +1825,9 @@ struct InboxScan {
 
 impl RoomInbox {
     /// 只读扫描未看消息并计算出游标与续轮更新（不立即提交），供 `drain` 与运行中 `peek_steer` 共用。
-    async fn scan(&self) -> Option<InboxScan> {
+    /// 当 `only_local_chat` 为 `true` 时，仅允许本机用户在房间内发出的普通对话插话；遇到外部来源（Telegram / GitHub）
+    /// 或非普通聊天消息直接返回 `None`，避免外部消息绕过 harness 启动审批。
+    async fn scan(&self, only_local_chat: bool) -> Option<InboxScan> {
         let engine = self.shared.engine.clone();
         let (room, after) = (self.room_id.clone(), self.last_seq);
         let messages = match db(move || engine.messages_after(&room, after)).await {
@@ -1873,7 +1875,11 @@ impl RoomInbox {
                     see(message.seq, waiting, &mut next_last_seq, &mut next_ahead);
                     continue;
                 }
-                MessageKind::Routine | MessageKind::Event => {}
+                MessageKind::Routine | MessageKind::Event => {
+                    if only_local_chat {
+                        return None;
+                    }
+                }
                 // 任务的运行过程不进对话：结果会以交付卡的形式出现。它没写完也不挡着后面的消息。
                 MessageKind::Run => continue,
                 // 自己开的任务自己知道（工具结果里有）。别人开的任务、所有的交付结果都要看到：
@@ -1883,6 +1889,9 @@ impl RoomInbox {
                     continue;
                 }
                 MessageKind::Task | MessageKind::Delivery => {
+                    if only_local_chat {
+                        return None;
+                    }
                     see(message.seq, waiting, &mut next_last_seq, &mut next_ahead);
                     let who = match &message.sender {
                         Sender::User => "用户",
@@ -1930,6 +1939,9 @@ impl RoomInbox {
             if message.state == MessageState::Streaming || hidden {
                 waiting = true;
                 continue;
+            }
+            if only_local_chat && (speaker.is_some() || message.origin.is_some()) {
+                return None;
             }
             see(message.seq, waiting, &mut next_last_seq, &mut next_ahead);
             // 成员没做成也要交回主 Agent：它要知道这件事失败了，才能决定下一步。
@@ -2041,7 +2053,7 @@ impl RoomInbox {
     }
 
     async fn peek_steer(&self) -> Option<InboxScan> {
-        self.scan().await.filter(|scan| !scan.inputs.is_empty())
+        self.scan(true).await.filter(|scan| !scan.inputs.is_empty())
     }
 
     fn commit_steer(&mut self, scan: InboxScan) -> Vec<UserInput> {
@@ -2052,7 +2064,7 @@ impl RoomInbox {
 #[async_trait]
 impl Inbox for RoomInbox {
     async fn drain(&mut self) -> Vec<UserInput> {
-        match self.scan().await {
+        match self.scan(false).await {
             Some(scan) => self.apply_scan(scan),
             None => vec![],
         }
