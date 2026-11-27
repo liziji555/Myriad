@@ -416,6 +416,7 @@ async fn run_task(shared: &Arc<Shared>, task: Task, cancel: &CancellationToken) 
                             acp_pool: None,
                             codex_pool: None,
                             acp_scope: None,
+                            interactive_approvals: true,
                         };
                         let finished = crate::harness::run(&launch, &observer, cancel).await;
                         if !finished.text.is_empty() {

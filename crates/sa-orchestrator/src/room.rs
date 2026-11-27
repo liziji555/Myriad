@@ -1449,6 +1449,7 @@ async fn harness_turn(
                 acp_pool: Some(&shared.acp_pool),
                 codex_pool: Some(&shared.codex_pool),
                 acp_scope: Some(&acp_scope),
+                interactive_approvals: true,
             };
             if cancel.is_cancelled() {
                 return Ok(TurnEnd::Cancelled);
@@ -1474,7 +1475,7 @@ async fn harness_turn(
                                     .map(|i| i.content.as_str())
                                     .collect::<Vec<_>>()
                                     .join("\n\n");
-                                let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+                                let (ack_tx, mut ack_rx) = tokio::sync::oneshot::channel();
                                 if steer_tx
                                     .send(crate::codex_app_server::SteerRequest {
                                         text: steer_text,
@@ -1486,8 +1487,15 @@ async fn harness_turn(
                                     continue;
                                 }
                                 let accepted = tokio::select! {
-                                    finished = &mut run_fut => break finished,
-                                    res = ack_rx => res.unwrap_or(false),
+                                    finished = &mut run_fut => {
+                                        // 防止同一次 poll 中 `turn/steer` 已回复成功且紧随 `turn/completed` 时漏提交游标导致重复投递。
+                                        if ack_rx.try_recv() == Ok(true) {
+                                            let committed = inbox.commit_steer(scan);
+                                            let _ = record_inputs(transcript, committed);
+                                        }
+                                        break finished;
+                                    }
+                                    res = &mut ack_rx => res.unwrap_or(false),
                                 };
                                 if accepted {
                                     let committed = inbox.commit_steer(scan);

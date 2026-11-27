@@ -9,8 +9,8 @@
 //! - 优雅中断（`turn/interrupt`）与低版本 Codex 自动回退（握手阶段失败时无感回退到 `codex exec --json`）。
 
 use crate::harness::{
-    build_command, codex_item, find_program, mcp_fingerprint, read_bounded_line, read_stderr_tail,
-    split_command, str_of, tail, Finished, Launch, IDLE_TIMEOUT, STDERR_TAIL,
+    build_command, codex_item, find_program, mcp_fingerprint, read_stderr_tail, split_command,
+    str_of, tail, Finished, Launch, IDLE_TIMEOUT, MAX_STDOUT_LINE_BYTES, STDERR_TAIL,
 };
 use sa_kernel::{ApprovalRequest, Observer, StepEnd, TurnEnd};
 use sa_llm::Usage;
@@ -22,7 +22,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
@@ -56,10 +56,58 @@ struct TokenTotals {
     cached_tokens: u64,
 }
 
+#[derive(Default)]
+struct LineBuffer {
+    buf: Vec<u8>,
+    capped: bool,
+}
+
+/// 可在 `tokio::select!` 中安全取消的有界按行读取：被其它分支打断时完整保留半行字节与截断标记，绝不丢帧。
+async fn read_bounded_line_buffered<R: AsyncBufRead + Unpin>(
+    reader: &mut R,
+    state: &mut LineBuffer,
+) -> std::io::Result<Option<String>> {
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            if state.buf.is_empty() {
+                state.capped = false;
+                return Ok(None);
+            }
+            break;
+        }
+        let newline = available.iter().position(|&b| b == b'\n');
+        let take = newline.map_or(available.len(), |pos| pos + 1);
+        if !state.capped {
+            let remaining = MAX_STDOUT_LINE_BYTES.saturating_sub(state.buf.len());
+            if take <= remaining {
+                state.buf.extend_from_slice(&available[..take]);
+            } else {
+                state.buf.extend_from_slice(&available[..remaining]);
+                state.capped = true;
+            }
+        }
+        reader.consume(take);
+        if newline.is_some() {
+            break;
+        }
+    }
+    let mut out = std::mem::take(&mut state.buf);
+    state.capped = false;
+    if out.ends_with(b"\n") {
+        out.pop();
+        if out.ends_with(b"\r") {
+            out.pop();
+        }
+    }
+    Ok(Some(String::from_utf8_lossy(&out).into_owned()))
+}
+
 struct PooledCodex {
     child: Tree,
     stdin: tokio::process::ChildStdin,
     reader: BufReader<tokio::process::ChildStdout>,
+    line_buf: LineBuffer,
     stderr: Option<tokio::task::JoinHandle<String>>,
     thread_id: String,
     next_id: u64,
@@ -213,6 +261,33 @@ fn wants_legacy_exec(extra: &[String]) -> bool {
     })
 }
 
+/// 从用户自定义的 Codex 额外参数中剥离 `app-server` 子命令不支持的模型参数（`-m` / `--model`），
+/// 改为通过 `thread/start` 与 `thread/resume` 的 `model` 字段传入。
+fn split_codex_model_flag(extra: &[String]) -> (Option<String>, Vec<String>) {
+    let mut model = None;
+    let mut passthrough = Vec::with_capacity(extra.len());
+    let mut iter = extra.iter();
+    while let Some(arg) = iter.next() {
+        if arg == "-m" || arg == "--model" {
+            if let Some(val) = iter.next() {
+                if !val.trim().is_empty() {
+                    model = Some(val.clone());
+                }
+            }
+        } else if let Some(val) = arg
+            .strip_prefix("--model=")
+            .or_else(|| arg.strip_prefix("-m="))
+        {
+            if !val.trim().is_empty() {
+                model = Some(val.to_string());
+            }
+        } else {
+            passthrough.push(arg.clone());
+        }
+    }
+    (model, passthrough)
+}
+
 /// 根据权限档位映射 Codex `app-server` 的 `approvalPolicy` 与 `sandbox` 策略。
 fn codex_permission_params(permission: PermissionMode) -> (&'static str, &'static str) {
     match permission {
@@ -229,6 +304,7 @@ fn build_codex_mcp_config(
     let mut config = serde_json::Map::new();
     let mut env_vars = Vec::new();
     let mut seen_keys = HashSet::new();
+    let mut bearer_idx = 0usize;
     for spec in specs {
         if spec.name.is_empty()
             || !spec
@@ -252,10 +328,9 @@ fn build_codex_mcp_config(
                         .unwrap_or(hval.as_str())
                         .trim();
                     if !token.is_empty() {
-                        let env_name = format!(
-                            "MYRIAD_MCP_BEARER_{}",
-                            key.to_ascii_uppercase().replace('-', "_")
-                        );
+                        // 使用单调序号命名环境变量，杜绝 `my-api` 与 `my_api` 等不同 MCP 服务名归一化冲突导致凭证串发。
+                        let env_name = format!("MYRIAD_MCP_BEARER_{bearer_idx}");
+                        bearer_idx += 1;
                         env_vars.push((env_name.clone(), token.to_string()));
                         config.insert(
                             format!("mcp_servers.{key}.bearer_token_env_var"),
@@ -395,6 +470,7 @@ enum CodexTurnOutcome {
 /// 读取直到收到指定 `id` 的 JSON-RPC 响应（握手阶段使用）。
 async fn wait_rpc_response(
     reader: &mut BufReader<tokio::process::ChildStdout>,
+    line_buf: &mut LineBuffer,
     target_id: u64,
     timeout: Duration,
     cancel: &CancellationToken,
@@ -408,7 +484,7 @@ async fn wait_rpc_response(
         let remain = deadline - now;
         let line = tokio::select! {
             _ = cancel.cancelled() => return Err("cancelled"),
-            res = tokio::time::timeout(remain, read_bounded_line(reader)) => match res {
+            res = tokio::time::timeout(remain, read_bounded_line_buffered(reader, line_buf)) => match res {
                 Ok(Ok(Some(line))) => line,
                 Ok(Ok(None)) => return Err("eof"),
                 Ok(Err(_)) => return Err("io"),
@@ -438,7 +514,7 @@ async fn wait_rpc_response(
     }
 }
 
-/// 启动 `codex app-server --stdio` 并完成 `initialize` -> `initialized` -> `thread/resume` 或 `thread/start`。
+/// 启动 `codex app-server --listen stdio://` 并完成 `initialize` -> `initialized` -> `thread/resume` 或 `thread/start`。
 async fn spawn_codex_session(
     program: &std::path::Path,
     extra: &[String],
@@ -448,10 +524,12 @@ async fn spawn_codex_session(
 ) -> SpawnOutcome {
     let session = launch.session.map(String::from);
     let (mcp_config, mcp_env) = build_codex_mcp_config(launch.mcp_servers);
-    let mut args = Vec::with_capacity(extra.len() + 2);
+    let (model_override, server_extra) = split_codex_model_flag(extra);
+    let mut args = Vec::with_capacity(server_extra.len() + 3);
     args.push("app-server".to_string());
-    args.push("--stdio".to_string());
-    args.extend(extra.iter().cloned());
+    // `--listen stdio://` 同时兼容 Codex 0.130.0 与 0.169.0+（旧版不认 `--stdio` 简写）。
+    args.extend(["--listen".to_string(), "stdio://".to_string()]);
+    args.extend(server_extra);
 
     let mut command = build_command(program, &args);
     command
@@ -485,6 +563,7 @@ async fn spawn_codex_session(
         .stderr()
         .map(|err| tokio::spawn(read_stderr_tail(err)));
     let mut reader = BufReader::new(child.stdout().expect("stdout piped"));
+    let mut line_buf = LineBuffer::default();
 
     // 1. initialize 握手：若不支持 app-server（进程立刻退出、EOF、-32601 或超时），安全回退到 legacy codex exec。
     let mut next_id = 1u64;
@@ -513,7 +592,7 @@ async fn spawn_codex_session(
         return SpawnOutcome::FallbackToLegacy;
     }
 
-    match wait_rpc_response(&mut reader, init_id, INIT_TIMEOUT, cancel).await {
+    match wait_rpc_response(&mut reader, &mut line_buf, init_id, INIT_TIMEOUT, cancel).await {
         Ok(Ok(_)) => {}
         Err("cancelled") => {
             child.kill();
@@ -560,6 +639,9 @@ async fn spawn_codex_session(
         );
         params.insert("sandbox".into(), Value::String(sandbox.to_string()));
         params.insert("excludeTurns".into(), Value::Bool(true));
+        if let Some(model) = &model_override {
+            params.insert("model".into(), Value::String(model.clone()));
+        }
         if !mcp_config.is_empty() {
             params.insert("config".into(), Value::Object(mcp_config.clone()));
         }
@@ -570,7 +652,9 @@ async fn spawn_codex_session(
             "params": Value::Object(params),
         });
         if write_json_line(&mut stdin, &req).await.is_ok() {
-            match wait_rpc_response(&mut reader, resume_id, INIT_TIMEOUT, cancel).await {
+            match wait_rpc_response(&mut reader, &mut line_buf, resume_id, INIT_TIMEOUT, cancel)
+                .await
+            {
                 Ok(Ok(res)) => {
                     let id = res["thread"]["id"]
                         .as_str()
@@ -603,6 +687,9 @@ async fn spawn_codex_session(
             Value::String(approval_policy.to_string()),
         );
         params.insert("sandbox".into(), Value::String(sandbox.to_string()));
+        if let Some(model) = &model_override {
+            params.insert("model".into(), Value::String(model.clone()));
+        }
         if !mcp_config.is_empty() {
             params.insert("config".into(), Value::Object(mcp_config));
         }
@@ -622,7 +709,7 @@ async fn spawn_codex_session(
                 session,
             );
         }
-        match wait_rpc_response(&mut reader, start_id, INIT_TIMEOUT, cancel).await {
+        match wait_rpc_response(&mut reader, &mut line_buf, start_id, INIT_TIMEOUT, cancel).await {
             Ok(Ok(res)) => {
                 if let Some(id) = res["thread"]["id"]
                     .as_str()
@@ -681,6 +768,7 @@ async fn spawn_codex_session(
         child,
         stdin,
         reader,
+        line_buf,
         stderr,
         thread_id: thread_id.expect("checked above"),
         next_id,
@@ -744,13 +832,10 @@ fn parse_usage_fields(obj: &Value) -> Option<TokenTotals> {
         .as_u64()
         .or_else(|| obj["output_tokens"].as_u64())
         .unwrap_or(0);
-    let reasoning_output = obj["reasoningOutputTokens"]
-        .as_u64()
-        .or_else(|| obj["reasoning_output_tokens"].as_u64())
-        .unwrap_or(0);
+    // Responses API / Codex 的 `outputTokens` 已包含 `reasoningOutputTokens`（后者是细分子项），不可再次累加。
     Some(TokenTotals {
         input_tokens,
-        output_tokens: output_tokens.saturating_add(reasoning_output),
+        output_tokens,
         cached_tokens,
     })
 }
@@ -858,6 +943,11 @@ async fn handle_server_request(
                     false
                 }
                 PermissionMode::Ask => {
+                    // `RoomObserver::request_approval` 将审批卡挂在已有步骤上，必须先以相同 `call_id` 建步再收口。
+                    let args_json = params.to_string();
+                    observer
+                        .tool_started(&call_id, tool, &title, &args_json)
+                        .await;
                     let asked = observer.request_approval(ApprovalRequest {
                         call_id: &call_id,
                         tool,
@@ -865,10 +955,19 @@ async fn handle_server_request(
                         reason: &reason,
                         input: params,
                     });
-                    tokio::select! {
+                    let decision = tokio::select! {
                         decision = asked => decision,
                         _ = cancel.cancelled() => false,
-                    }
+                    };
+                    let (end, note) = if decision {
+                        (StepEnd::Ok, "已批准")
+                    } else if cancel.is_cancelled() {
+                        (StepEnd::Stopped, "已取消")
+                    } else {
+                        (StepEnd::Stopped, "已拒绝")
+                    };
+                    observer.tool_finished(&call_id, end, note).await;
+                    decision
                 }
             };
             let result = match method {
@@ -1019,7 +1118,7 @@ async fn run_codex_turn_on(
                     let deadline = tokio::time::Instant::now() + INTERRUPT_GRACE;
                     while tokio::time::Instant::now() < deadline {
                         let remain = deadline - tokio::time::Instant::now();
-                        match tokio::time::timeout(remain, read_bounded_line(&mut conn.reader)).await {
+                        match tokio::time::timeout(remain, read_bounded_line_buffered(&mut conn.reader, &mut conn.line_buf)).await {
                             Ok(Ok(Some(line))) => {
                                 if let Ok(v) = serde_json::from_str::<Value>(line.trim()) {
                                     if str_of(&v, "method") == "turn/completed" {
@@ -1077,7 +1176,7 @@ async fn run_codex_turn_on(
                     }
                 }
             }
-            line_res = tokio::time::timeout(IDLE_TIMEOUT, read_bounded_line(&mut conn.reader)) => {
+            line_res = tokio::time::timeout(IDLE_TIMEOUT, read_bounded_line_buffered(&mut conn.reader, &mut conn.line_buf)) => {
                 let line = match line_res {
                     Ok(Ok(Some(line))) => line,
                     Ok(Ok(None)) => {
@@ -1500,12 +1599,44 @@ mod tests {
     }
 
     #[test]
-    fn mcp_config_builds_dotted_keys_and_bearer_env() {
+    fn model_flag_extraction_strips_m_and_preserves_other_flags() {
+        let (model, rest) =
+            split_codex_model_flag(&["-m".into(), "o3".into(), "-c".into(), "foo=bar".into()]);
+        assert_eq!(model.as_deref(), Some("o3"));
+        assert_eq!(rest, vec!["-c", "foo=bar"]);
+
+        let (model2, rest2) = split_codex_model_flag(&["--model=gpt-5".into()]);
+        assert_eq!(model2.as_deref(), Some("gpt-5"));
+        assert!(rest2.is_empty());
+    }
+
+    #[test]
+    fn usage_parser_does_not_double_count_reasoning_output_tokens() {
+        let parsed = parse_usage_fields(&json!({
+            "inputTokens": 500,
+            "cachedInputTokens": 200,
+            "outputTokens": 1000,
+            "reasoningOutputTokens": 600
+        }))
+        .unwrap();
+        assert_eq!(parsed.input_tokens, 500);
+        assert_eq!(parsed.cached_tokens, 200);
+        assert_eq!(parsed.output_tokens, 1000);
+    }
+
+    #[test]
+    fn mcp_config_builds_dotted_keys_and_isolates_colliding_bearer_names() {
         let specs = vec![
             McpSpec {
-                name: "wiki".into(),
-                url: Some("https://wiki.example/mcp".into()),
-                headers: vec![("Authorization".into(), "Bearer secret-tok".into())],
+                name: "my-api".into(),
+                url: Some("https://a.example/mcp".into()),
+                headers: vec![("Authorization".into(), "Bearer token-a".into())],
+                ..Default::default()
+            },
+            McpSpec {
+                name: "my_api".into(),
+                url: Some("https://b.example/mcp".into()),
+                headers: vec![("Authorization".into(), "Bearer token-b".into())],
                 ..Default::default()
             },
             McpSpec {
@@ -1516,14 +1647,21 @@ mod tests {
             },
         ];
         let (cfg, env_vars) = build_codex_mcp_config(&specs);
-        assert_eq!(cfg["mcp_servers.wiki.url"], "https://wiki.example/mcp");
-        assert_eq!(
-            cfg["mcp_servers.wiki.bearer_token_env_var"],
-            "MYRIAD_MCP_BEARER_WIKI"
-        );
+        assert_eq!(cfg["mcp_servers.my-api.url"], "https://a.example/mcp");
+        assert_eq!(cfg["mcp_servers.my_api.url"], "https://b.example/mcp");
+        let env_a = cfg["mcp_servers.my-api.bearer_token_env_var"]
+            .as_str()
+            .unwrap();
+        let env_b = cfg["mcp_servers.my_api.bearer_token_env_var"]
+            .as_str()
+            .unwrap();
+        assert_ne!(env_a, env_b);
         assert_eq!(
             env_vars,
-            vec![("MYRIAD_MCP_BEARER_WIKI".into(), "secret-tok".into())]
+            vec![
+                (env_a.to_string(), "token-a".into()),
+                (env_b.to_string(), "token-b".into()),
+            ]
         );
         assert_eq!(cfg["mcp_servers.local-fs.command"], "npx");
         assert_eq!(cfg["mcp_servers.local-fs.args"], json!(["-y", "mcp-fs"]));
@@ -1540,7 +1678,8 @@ mod tests {
         #[derive(Default)]
         struct RecordingObserver {
             approve_response: bool,
-            approvals: Mutex<Vec<String>>,
+            started_ids: Mutex<Vec<String>>,
+            approvals: Mutex<Vec<(String, String, bool)>>,
             usages: Mutex<Vec<Usage>>,
             steps: Mutex<Vec<(String, StepEnd, String)>>,
         }
@@ -1548,7 +1687,9 @@ mod tests {
         #[async_trait::async_trait]
         impl Observer for RecordingObserver {
             async fn text_delta(&self, _: &str) {}
-            async fn tool_started(&self, _: &str, _: &str, _: &str, _: &str) {}
+            async fn tool_started(&self, id: &str, _: &str, _: &str, _: &str) {
+                self.started_ids.lock().unwrap().push(id.to_string());
+            }
             async fn tool_finished(&self, id: &str, end: StepEnd, output: &str) {
                 self.steps
                     .lock()
@@ -1559,7 +1700,18 @@ mod tests {
                 self.usages.lock().unwrap().push(usage);
             }
             async fn request_approval(&self, req: ApprovalRequest<'_>) -> bool {
-                self.approvals.lock().unwrap().push(req.title.to_string());
+                // 校验 RoomObserver 契约：挂审批卡前必须已存在同 `call_id` 步骤！
+                let has_step = self
+                    .started_ids
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|id| id == req.call_id);
+                self.approvals.lock().unwrap().push((
+                    req.call_id.to_string(),
+                    req.title.to_string(),
+                    has_step,
+                ));
                 self.approve_response
             }
         }
@@ -1571,15 +1723,15 @@ mod tests {
             r#"#!/usr/bin/env python3
 import json, os, sys
 
-# Mock codex CLI supporting BOTH `app-server --stdio` and legacy `exec --json`.
+# Mock codex CLI validating `--listen stdio://`, rejecting `-m` on app-server argv, and supporting legacy `exec`.
 if len(sys.argv) >= 2 and sys.argv[1] == "exec":
     prompt = sys.stdin.read().strip()
     print(json.dumps({"type": "thread.started", "thread_id": "legacy-thr"}), flush=True)
     print(json.dumps({"type": "item.completed", "item": {"id": "m1", "type": "agent_message", "text": f"legacy:{prompt}"}}), flush=True)
     sys.exit(0)
 
-if len(sys.argv) < 2 or sys.argv[1] != "app-server":
-    sys.stderr.write("unsupported subcommand\n")
+if sys.argv[1:4] != ["app-server", "--listen", "stdio://"] or "-m" in sys.argv or "--model" in sys.argv:
+    sys.stderr.write(f"invalid app-server args: {sys.argv[1:]}\n")
     sys.exit(2)
 
 pid = os.getpid()
@@ -1589,6 +1741,7 @@ total_out = 0
 thread_id = f"thr-{pid}"
 sandbox = "workspace-write"
 approval_policy = "on-request"
+model_name = "default"
 
 def send(obj):
     print(json.dumps(obj), flush=True)
@@ -1608,6 +1761,8 @@ for raw in sys.stdin:
     elif method in ("thread/start", "thread/resume"):
         sandbox = params.get("sandbox", sandbox)
         approval_policy = params.get("approvalPolicy", approval_policy)
+        if params.get("model"):
+            model_name = params["model"]
         if method == "thread/resume" and params.get("threadId"):
             thread_id = params["threadId"]
         send({"jsonrpc": "2.0", "id": mid, "result": {"thread": {"id": thread_id}}})
@@ -1619,14 +1774,19 @@ for raw in sys.stdin:
         send({"jsonrpc": "2.0", "method": "turn/started", "params": {"threadId": thread_id, "turn": {"id": tid}}})
 
         if "wait-steer" in prompt_text:
-            send({"jsonrpc": "2.0", "method": "item/agentMessage/delta", "params": {"threadId": thread_id, "itemId": "am1", "delta": "working..."}})
-            # Block until turn/steer arrives!
+            # 故意把一条 JSON 通知拆成两半：前半段在 steer 前刷出，后半段在 steer 后刷出，验证 cancel-safe LineBuffer 不丢帧！
+            split_frame = json.dumps({"jsonrpc": "2.0", "method": "item/agentMessage/delta", "params": {"threadId": thread_id, "itemId": "am1", "delta": "working..."}})
+            half = len(split_frame) // 2
+            sys.stdout.write(split_frame[:half])
+            sys.stdout.flush()
             for raw2 in sys.stdin:
                 m2 = json.loads(raw2.strip())
                 if m2.get("method") == "turn/steer":
                     assert m2["params"]["threadId"] == thread_id
                     assert m2["params"]["expectedTurnId"] == tid
                     steered = m2["params"]["input"][0]["text"]
+                    sys.stdout.write(split_frame[half:] + "\n")
+                    sys.stdout.flush()
                     send({"jsonrpc": "2.0", "id": m2["id"], "result": {}})
                     send({"jsonrpc": "2.0", "method": "item/agentMessage/delta", "params": {"threadId": thread_id, "itemId": "am1", "delta": f"|steered:{steered}"}})
                     break
@@ -1648,9 +1808,9 @@ for raw in sys.stdin:
             })
             resp = json.loads(sys.stdin.readline())
             decision = resp["result"]["decision"]
-            send({"jsonrpc": "2.0", "method": "item/agentMessage/delta", "params": {"threadId": thread_id, "itemId": "am1", "delta": f"pid={pid},turn={turn_n},decision={decision},sandbox={sandbox}"}})
+            send({"jsonrpc": "2.0", "method": "item/agentMessage/delta", "params": {"threadId": thread_id, "itemId": "am1", "delta": f"pid={pid},turn={turn_n},decision={decision},sandbox={sandbox},model={model_name}"}})
         else:
-            send({"jsonrpc": "2.0", "method": "item/agentMessage/delta", "params": {"threadId": thread_id, "itemId": "am1", "delta": f"pid={pid},turn={turn_n},sandbox={sandbox},policy={approval_policy}"}})
+            send({"jsonrpc": "2.0", "method": "item/agentMessage/delta", "params": {"threadId": thread_id, "itemId": "am1", "delta": f"pid={pid},turn={turn_n},sandbox={sandbox},policy={approval_policy},model={model_name}"}})
 
         total_in += 100
         total_out += 25
@@ -1660,8 +1820,8 @@ for raw in sys.stdin:
             "params": {
                 "threadId": thread_id,
                 "tokenUsage": {
-                    "total": {"inputTokens": total_in, "outputTokens": total_out, "cachedInputTokens": 10},
-                    "last": {"inputTokens": 100, "outputTokens": 25, "cachedInputTokens": 10},
+                    "total": {"inputTokens": total_in, "outputTokens": total_out, "reasoningOutputTokens": 10, "cachedInputTokens": 10},
+                    "last": {"inputTokens": 100, "outputTokens": 25, "reasoningOutputTokens": 10, "cachedInputTokens": 10},
                 }
             }
         })
@@ -1672,13 +1832,14 @@ for raw in sys.stdin:
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         let pool = CodexPool::default();
-        let cmd = script.display().to_string();
+        // 使用文档推荐命令格式 `codex -m o3`，验证 `-m o3` 被正确提取并传入 `thread/start.model` 而非导致 app-server 失败回退。
+        let cmd = format!("{} -m o3", script.display());
         let obs = RecordingObserver {
             approve_response: true,
             ..Default::default()
         };
 
-        // 1. 第一轮冷启动 + 第二轮复用常驻进程（PID 相同、turn 递增、用量按增量上报）。
+        // 1. 第一轮冷启动 + 第二轮复用常驻进程（PID 相同、turn 递增、用量按增量上报且不重复计 reasoningOutputTokens）。
         let first = run(
             &Launch {
                 harness: Harness::Codex,
@@ -1691,6 +1852,7 @@ for raw in sys.stdin:
                 acp_pool: None,
                 codex_pool: Some(&pool),
                 acp_scope: Some("room:r1:bot:codex"),
+                interactive_approvals: true,
             },
             &obs,
             &CancellationToken::new(),
@@ -1701,7 +1863,7 @@ for raw in sys.stdin:
         assert!(
             first
                 .text
-                .contains("turn=1,sandbox=workspace-write,policy=on-request"),
+                .contains("turn=1,sandbox=workspace-write,policy=on-request,model=o3"),
             "{}",
             first.text
         );
@@ -1718,6 +1880,7 @@ for raw in sys.stdin:
                 acp_pool: None,
                 codex_pool: Some(&pool),
                 acp_scope: Some("room:r1:bot:codex"),
+                interactive_approvals: true,
             },
             &obs,
             &CancellationToken::new(),
@@ -1730,11 +1893,19 @@ for raw in sys.stdin:
             "{}",
             second.text
         );
-        assert_eq!(obs.approvals.lock().unwrap().len(), 1);
+        let approvals = obs.approvals.lock().unwrap().clone();
+        assert_eq!(approvals.len(), 1);
+        // 关键契约：请求审批前必须以相同 call_id 先创建步骤，审批卡才能被 RoomObserver 挂出并渲染！
+        assert!(
+            approvals[0].2,
+            "approval step was not started before request_approval"
+        );
         let usages = obs.usages.lock().unwrap().clone();
         assert_eq!(usages.len(), 2);
         assert_eq!(usages[0].input_tokens, 100);
+        assert_eq!(usages[0].output_tokens, 25); // 不得把 reasoningOutputTokens=10 重复累加为 35
         assert_eq!(usages[1].input_tokens, 100); // 增量而非累计 200
+        assert_eq!(usages[1].output_tokens, 25);
 
         // 2. 切到 Plan 模式时不会复用旧 Ask 权限连接，且自动拦截审批请求。
         let plan_obs = RecordingObserver {
@@ -1753,6 +1924,7 @@ for raw in sys.stdin:
                 acp_pool: None,
                 codex_pool: Some(&pool),
                 acp_scope: Some("room:r1:bot:codex"),
+                interactive_approvals: true,
             },
             &plan_obs,
             &CancellationToken::new(),
@@ -1762,13 +1934,13 @@ for raw in sys.stdin:
         assert!(
             planned
                 .text
-                .contains("turn=1,decision=decline,sandbox=read-only"),
+                .contains("turn=1,decision=decline,sandbox=read-only,model=o3"),
             "{}",
             planned.text
         );
         assert!(plan_obs.approvals.lock().unwrap().is_empty());
 
-        // 3. 运行中实时插话（turn/steer）：在轮次执行中途发送 SteerRequest，验证 ack=true 且输出包含插话内容。
+        // 3. 运行中实时插话（turn/steer）+ 半帧跨 steer 恢复：验证不丢帧、ack=true 且包含前后两段输出。
         let (steer_tx, steer_rx) = mpsc::unbounded_channel();
         let (ack_tx, ack_rx) = oneshot::channel();
         tokio::spawn(async move {
@@ -1790,6 +1962,7 @@ for raw in sys.stdin:
                 acp_pool: None,
                 codex_pool: Some(&pool),
                 acp_scope: Some("room:r1:bot:codex"),
+                interactive_approvals: true,
             },
             Some(steer_rx),
             &obs,
@@ -1819,6 +1992,7 @@ for raw in sys.stdin:
                 acp_pool: None,
                 codex_pool: Some(&pool),
                 acp_scope: Some("room:r1:bot:codex"),
+                interactive_approvals: true,
             },
             &obs,
             &cancel,
@@ -1827,7 +2001,29 @@ for raw in sys.stdin:
         assert_eq!(interrupted.end, TurnEnd::Cancelled);
         assert_eq!(pool.len(), 0);
 
-        // 5. 旧版本 Codex（不支持 app-server）在握手阶段失败后无感回退 legacy `codex exec --json`。
+        // 5. `interactive_approvals: false`（例如 `sa share` 远端转发）直接走 legacy `codex exec`，不触发静默拒批。
+        let shared_desk_run = run(
+            &Launch {
+                harness: Harness::Codex,
+                command: &cmd,
+                dir: dir.path(),
+                prompt: "shared-prompt",
+                session: None,
+                permission: PermissionMode::Ask,
+                mcp_servers: &[],
+                acp_pool: None,
+                codex_pool: None,
+                acp_scope: None,
+                interactive_approvals: false,
+            },
+            &obs,
+            &CancellationToken::new(),
+        )
+        .await;
+        assert_eq!(shared_desk_run.end, TurnEnd::Completed);
+        assert_eq!(shared_desk_run.text, "legacy:shared-prompt");
+
+        // 6. 旧版本 Codex（不支持 app-server）在握手阶段失败后无感回退 legacy `codex exec --json`。
         let legacy_script = dir.path().join("legacy-codex.py");
         std::fs::write(
             &legacy_script,
@@ -1855,6 +2051,7 @@ print(json.dumps({"type": "item.completed", "item": {"id": "m1", "type": "agent_
                 acp_pool: None,
                 codex_pool: Some(&pool),
                 acp_scope: Some("room:r1:bot:legacy"),
+                interactive_approvals: true,
             },
             &obs,
             &CancellationToken::new(),

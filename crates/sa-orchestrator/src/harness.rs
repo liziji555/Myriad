@@ -196,6 +196,8 @@ pub(crate) struct Launch<'a> {
     pub codex_pool: Option<&'a crate::codex_app_server::CodexPool>,
     /// 与 `acp_pool` / `codex_pool` 配对的作用域键（如 `room:{id}:bot:{id}`）。
     pub acp_scope: Option<&'a str>,
+    /// 调用方观察者是否能弹出并回传交互式审批卡（本地 `RoomObserver` 为 `true`，`sa share` 远程转发暂为 `false`）。
+    pub interactive_approvals: bool,
 }
 
 static TEMP_MCP_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -737,7 +739,7 @@ pub fn approval_key(bot: &str, harness: Harness, command: &str) -> String {
 /// stderr 最多在内存里保留的末尾字节数，避免失控子进程把内存撑爆。
 const MAX_STDERR_BYTES: usize = 32 * 1024;
 /// stdout 单行最多读入的字节数，超出部分丢弃到下一个换行符。
-const MAX_STDOUT_LINE_BYTES: usize = 4 * 1024 * 1024;
+pub(crate) const MAX_STDOUT_LINE_BYTES: usize = 4 * 1024 * 1024;
 
 pub(crate) async fn read_stderr_tail(mut err: tokio::process::ChildStderr) -> String {
     let mut buf = Vec::new();
@@ -819,7 +821,7 @@ pub(crate) async fn run_interactive(
     if launch.harness == Harness::Acp {
         return run_acp(launch, observer, cancel).await;
     }
-    if launch.harness == Harness::Codex {
+    if launch.harness == Harness::Codex && launch.interactive_approvals {
         match crate::codex_app_server::run_codex_app_server(launch, &mut steer_rx, observer, cancel)
             .await
         {
@@ -2444,6 +2446,7 @@ mod tests {
             acp_pool: None,
             codex_pool: None,
             acp_scope: None,
+            interactive_approvals: true,
         };
         let (_, args, stdin, _guard) = plan(&launch).unwrap();
         assert!(stdin);
@@ -2477,6 +2480,7 @@ mod tests {
             acp_pool: None,
             codex_pool: None,
             acp_scope: None,
+            interactive_approvals: true,
         };
         let (_, args, _, guard) = plan(&launch).unwrap();
         assert!(args.contains(&"--dangerously-skip-permissions".to_string()));
@@ -2640,6 +2644,7 @@ mod tests {
             acp_pool: None,
             codex_pool: None,
             acp_scope: None,
+            interactive_approvals: true,
         };
         let done = run(&launch, &Null, &CancellationToken::new()).await;
         assert!(matches!(done.end, TurnEnd::Failed(msg) if msg.contains("找不到")));
@@ -2655,6 +2660,7 @@ mod tests {
             acp_pool: None,
             codex_pool: None,
             acp_scope: None,
+            interactive_approvals: true,
         };
         let done = run(&codex, &Null, &CancellationToken::new()).await;
         assert!(matches!(done.end, TurnEnd::Failed(msg) if msg.contains("Codex")));
@@ -2785,6 +2791,7 @@ for raw in sys.stdin:
                 acp_pool: Some(&pool),
                 codex_pool: None,
                 acp_scope: Some("room:r1:bot:b1"),
+                interactive_approvals: true,
             },
             &Null,
             &CancellationToken::new(),
@@ -2807,6 +2814,7 @@ for raw in sys.stdin:
                 acp_pool: Some(&pool),
                 codex_pool: None,
                 acp_scope: Some("room:r1:bot:b1"),
+                interactive_approvals: true,
             },
             &Null,
             &CancellationToken::new(),
@@ -2832,6 +2840,7 @@ for raw in sys.stdin:
                 acp_pool: Some(&pool),
                 codex_pool: None,
                 acp_scope: Some("room:r1:bot:b1"),
+                interactive_approvals: true,
             },
             &Null,
             &CancellationToken::new(),
@@ -2852,6 +2861,7 @@ for raw in sys.stdin:
                 acp_pool: Some(&pool),
                 codex_pool: None,
                 acp_scope: Some("room:r1:bot:b1"),
+                interactive_approvals: true,
             },
             &Null,
             &CancellationToken::new(),
@@ -2873,6 +2883,7 @@ for raw in sys.stdin:
                 acp_pool: Some(&pool),
                 codex_pool: None,
                 acp_scope: Some("room:r1:bot:b1"),
+                interactive_approvals: true,
             },
             &Null,
             &CancellationToken::new(),
