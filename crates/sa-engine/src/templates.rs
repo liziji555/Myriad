@@ -61,6 +61,9 @@ fn template(bot: &Bot) -> BotTemplate {
         harness: bot.harness,
         harness_command: bot.harness_command.clone(),
         enabled: bot.enabled,
+        role: (!bot.role.is_empty()).then(|| bot.role.clone()),
+        avatar_shape: (!bot.avatar_shape.is_empty()).then(|| bot.avatar_shape.clone()),
+        avatar_color: (!bot.avatar_color.is_empty()).then(|| bot.avatar_color.clone()),
     }
 }
 
@@ -194,20 +197,38 @@ impl Engine {
                     || bot.persona.trim() != have.persona
                     || bot.enabled != have.enabled
                     || bot.harness != have.harness
-                    || bot.harness_command.trim() != have.harness_command;
+                    || bot.harness_command.trim() != have.harness_command
+                    || bot.role.as_deref().is_some_and(|v| v.trim() != have.role)
+                    || bot
+                        .avatar_shape
+                        .as_deref()
+                        .is_some_and(|v| v.trim().to_lowercase() != have.avatar_shape)
+                    || bot
+                        .avatar_color
+                        .as_deref()
+                        .is_some_and(|v| v.trim().to_lowercase() != have.avatar_color);
                 differs.then_some((have, bot))
             })
             .collect();
         for (_, bot) in &changed {
             crate::team::check_bot(&bot.name, &bot.persona)?;
         }
-        // 先把每个 harness 命令都查一遍：中途才发现不对，前面改过的 Bot 就留下了。
+        // 先把每个 harness 命令、职责标签与形象代号都查一遍：中途才发现不对，前面写过的 Bot 就留下了。
         for bot in changed
             .iter()
             .map(|(_, bot)| *bot)
             .chain(fresh.iter().copied())
         {
             crate::team::check_harness(bot.harness, &bot.harness_command)?;
+            if let Some(role) = bot.role.as_deref() {
+                crate::team::check_role(role)?;
+            }
+            if let Some(shape) = bot.avatar_shape.as_deref() {
+                crate::team::check_avatar_token(shape)?;
+            }
+            if let Some(color) = bot.avatar_color.as_deref() {
+                crate::team::check_avatar_token(color)?;
+            }
         }
         if let Some(room) = &team.room {
             crate::check_room_name(&room.name)?;
@@ -236,17 +257,27 @@ impl Engine {
                 enabled: Some(bot.enabled),
                 harness: Some(bot.harness),
                 harness_command: Some(bot.harness_command.clone()),
+                role: bot.role.clone(),
+                avatar_shape: bot.avatar_shape.clone(),
+                avatar_color: bot.avatar_color.clone(),
                 ..Default::default()
             };
             report.updated.push(self.update_bot(&have.id, patch)?);
         }
         for bot in fresh {
-            let mut created = self.create_harness_bot(
+            let mut created = self.create_bot_with_profile(
                 &bot.name,
                 bot.tier,
                 &bot.persona,
                 bot.harness,
                 &bot.harness_command,
+                crate::BotProfileOptions {
+                    is_master: None,
+                    role: bot.role.clone(),
+                    avatar_shape: bot.avatar_shape.clone(),
+                    avatar_color: bot.avatar_color.clone(),
+                    avatar_image: None,
+                },
             )?;
             if !bot.enabled {
                 let patch = BotPatch {
@@ -336,6 +367,9 @@ mod tests {
             enabled: true,
             harness: Default::default(),
             harness_command: String::new(),
+            role: None,
+            avatar_shape: None,
+            avatar_color: None,
         }
     }
 
@@ -657,5 +691,78 @@ mod tests {
             assert!(engine.list_rooms().unwrap().is_empty(), "{expect}");
         }
         assert_eq!(engine.import_team(&good(), false).unwrap().created.len(), 2);
+    }
+
+    #[test]
+    fn invalid_profile_fields_leave_no_partial_writes_and_legacy_templates_preserve_customization()
+    {
+        let engine = engine();
+        let coder = engine
+            .create_bot_with_profile(
+                "Coder",
+                ModelTier::Mid,
+                "旧人设",
+                sa_protocol::Harness::Builtin,
+                "",
+                crate::BotProfileOptions {
+                    is_master: None,
+                    role: Some("后端工匠".into()),
+                    avatar_shape: Some("cat".into()),
+                    avatar_color: Some("aurora".into()),
+                    avatar_image: None,
+                },
+            )
+            .unwrap();
+
+        // 后续条目的 role / avatar_shape 非法：前面的更新和新建都不应落地。
+        let bad_later_fresh = TeamTemplate {
+            version: 1,
+            bots: vec![
+                bot("Reviewer", ModelTier::Cheap, "审代码"),
+                BotTemplate {
+                    role: Some("超".repeat(40)),
+                    ..bot("BadRole", ModelTier::Mid, "")
+                },
+            ],
+            room: None,
+        };
+        assert!(engine.import_team(&bad_later_fresh, false).is_err());
+        assert_eq!(engine.list_bots().unwrap().len(), 1);
+
+        let bad_later_update = TeamTemplate {
+            version: 1,
+            bots: vec![
+                bot("Coder", ModelTier::Strong, "新人设"),
+                BotTemplate {
+                    avatar_shape: Some("bad shape!".into()),
+                    ..bot("BadShape", ModelTier::Mid, "")
+                },
+            ],
+            room: None,
+        };
+        assert!(engine.import_team(&bad_later_update, true).is_err());
+        assert_eq!(engine.get_bot(&coder.id).unwrap().persona, "旧人设");
+        assert_eq!(engine.list_bots().unwrap().len(), 1);
+
+        // 旧版模板不含 role/avatar 字段，update_existing=true 不应抹掉已有定制。
+        let legacy_toml =
+            "version = 1\n[[bots]]\nname = \"Coder\"\ntier = \"strong\"\npersona = \"恢复人设\"\n";
+        let parsed = parse_template(legacy_toml).unwrap();
+        let report = engine.import_team(&parsed, true).unwrap();
+        assert_eq!(report.updated.len(), 1);
+        let updated = engine.get_bot(&coder.id).unwrap();
+        assert_eq!(updated.persona, "恢复人设");
+        assert_eq!(updated.role, "后端工匠");
+        assert_eq!(updated.avatar_shape, "cat");
+        assert_eq!(updated.avatar_color, "aurora");
+
+        // 显式写入空字符串则表示清空。
+        let clear_toml =
+            "version = 1\n[[bots]]\nname = \"Coder\"\ntier = \"strong\"\npersona = \"恢复人设\"\nrole = \"\"\n";
+        let cleared = engine
+            .import_team(&parse_template(clear_toml).unwrap(), true)
+            .unwrap();
+        assert_eq!(cleared.updated.len(), 1);
+        assert_eq!(engine.get_bot(&coder.id).unwrap().role, "");
     }
 }

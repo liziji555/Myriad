@@ -179,6 +179,7 @@ fn bot(engine: &Engine, command: BotCommand, out: &mut impl Write) -> Result<()>
                 enabled,
                 harness,
                 harness_command,
+                ..Default::default()
             };
             let updated = engine.update_bot(&target.id, patch)?;
             let off = if updated.enabled { "" } else { "，已停用" };

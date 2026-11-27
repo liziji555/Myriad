@@ -41,7 +41,10 @@ pub use sa_store::tasks::Workdir;
 pub use tasks::{
     state_label, NewTask, RunOutcome, MAX_ACTIVE_TASKS, MAX_TASK_TEXT_CHARS, MAX_TASK_TITLE_CHARS,
 };
-pub use team::{find_mentions, BotPatch, MAX_BOT_NAME_CHARS, MAX_PERSONA_CHARS, MAX_ROOM_MEMBERS};
+pub use team::{
+    find_mentions, BotPatch, BotProfileOptions, MAX_BOT_NAME_CHARS, MAX_PERSONA_CHARS,
+    MAX_ROOM_MEMBERS,
+};
 
 pub use templates::{
     parse_template, template_file_name, template_text, MAX_TEMPLATE_BOTS, MAX_TEMPLATE_BYTES,
@@ -116,6 +119,11 @@ impl Engine {
                 created_at: now,
                 harness: Default::default(),
                 harness_command: String::new(),
+                is_master: true,
+                role: "主控中枢".into(),
+                avatar_shape: "orb".into(),
+                avatar_color: "obsidian".into(),
+                avatar_image: String::new(),
             };
             bots::insert(tx, &bot)?;
             events::append(tx, None, EventKind::BotCreated, &to_json(&bot), now)?;

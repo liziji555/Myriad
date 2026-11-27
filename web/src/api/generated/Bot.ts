@@ -16,4 +16,24 @@ harness: Harness,
 /**
  * harness 的命令：程序和参数，用空格隔开。空的就用这种 harness 的默认程序。
  */
-harness_command: string, };
+harness_command: string, 
+/**
+ * 是否为中枢主控 Bot（可自主创建/调整子 Bot 与组建协作房间，置顶于左侧主控位）。
+ */
+is_master: boolean, 
+/**
+ * 简短的职责标签（最多 24 字，如「主控中枢」「前端专家」「代码审查」）。
+ */
+role: string, 
+/**
+ * 自建参数化形象的造型代号（空串表示按 Bot ID 确定性分配）。
+ */
+avatar_shape: string, 
+/**
+ * 自建参数化形象的配色代号（空串表示按 Bot ID 确定性分配）。
+ */
+avatar_color: string, 
+/**
+ * 用户上传的自定义头像 data URL（空串表示使用参数化动态角色模型）。
+ */
+avatar_image: string, };

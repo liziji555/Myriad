@@ -245,6 +245,11 @@ mod tests {
             created_at: 1,
             harness: Default::default(),
             harness_command: String::new(),
+            is_master: true,
+            role: String::new(),
+            avatar_shape: String::new(),
+            avatar_color: String::new(),
+            avatar_image: String::new(),
         };
         let room = Room {
             discussion: Default::default(),

@@ -1,0 +1,546 @@
+/* Myriad 自建参数化动态角色模型（借鉴 Grok Bot / ProkBot Plus / DS-Bot / Tarobird 动效体系） */
+
+@property --sa-lid {
+  syntax: "<number>";
+  inherits: true;
+  initial-value: 1;
+}
+
+.sa-mascot {
+  --sa-lid: 1;
+  --sa-gx: 0;
+  --sa-gy: 0;
+  --sa-speed: 1;
+  --sa-delay: 0s;
+  --sa-gaze-ms: 220ms;
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: var(--sa-mascot-size, 28px);
+  height: var(--sa-mascot-size, 28px);
+  user-select: none;
+  vertical-align: middle;
+}
+
+.sa-mascot-svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+  overflow: visible;
+}
+
+.sa-mascot-body {
+  transform-box: fill-box;
+  transform-origin: 50% 62%;
+  transition: transform 240ms cubic-bezier(0.22, 1, 0.36, 1), filter 220ms ease;
+}
+
+.sa-mascot-gaze {
+  transform: translate(calc(var(--sa-gx) * 8px), calc(var(--sa-gy) * 6px));
+  transition: transform var(--sa-gaze-ms) cubic-bezier(0.2, 0, 0, 1);
+}
+
+.sa-mascot-eyes {
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+.sa-mascot-eye {
+  transform-box: fill-box;
+  transform-origin: center;
+  transform: rotate(-16deg) scaleY(var(--sa-lid));
+  transition: --sa-lid 90ms ease, opacity 140ms ease;
+}
+
+.sa-mascot-eye--right {
+  transform: rotate(-16deg) scaleY(var(--sa-lid));
+}
+
+.sa-mascot-eye-happy,
+.sa-mascot-eye-sleep,
+.sa-mascot-eye-error,
+.sa-mascot-smile,
+.sa-mascot-sparkles {
+  opacity: 0;
+  transition: opacity 160ms ease;
+}
+
+/* 自定义上传头像照片模式 */
+.sa-mascot-photo {
+  width: 100%;
+  height: 100%;
+  border-radius: 34%;
+  object-fit: cover;
+  display: block;
+  box-shadow: 0 2px 6px rgba(15, 23, 42, 0.14);
+  transition: transform 240ms cubic-bezier(0.22, 1, 0.36, 1), filter 200ms ease;
+}
+
+/* ---------- 1. 空闲态（轻呼吸 + 错峰眨眼） ---------- */
+.sa-mascot[data-state="idle"] .sa-mascot-body {
+  animation: sa-m-float calc(6.4s * var(--sa-speed)) ease-in-out var(--sa-delay) infinite;
+}
+
+.sa-mascot[data-state="idle"] .sa-mascot-eyes {
+  animation: sa-m-blink-idle calc(5.4s * var(--sa-speed)) linear var(--sa-delay) infinite;
+}
+
+/* 鼠标悬停抚摸彩蛋（idle / done 状态下歪头蹭 + 变 ^ ^ 开心眼） */
+.sa-mascot[data-interactive="true"][data-state="idle"]:hover .sa-mascot-body {
+  animation: sa-m-nuzzle 0.85s ease-in-out infinite;
+}
+.sa-mascot[data-interactive="true"][data-state="idle"]:hover .sa-mascot-eye {
+  opacity: 0;
+}
+.sa-mascot[data-interactive="true"][data-state="idle"]:hover .sa-mascot-eye-happy,
+.sa-mascot[data-interactive="true"][data-state="idle"]:hover .sa-mascot-smile {
+  opacity: 1;
+}
+
+/* 戳一戳 360° 欢快旋转弹跳 */
+.sa-mascot[data-poked="true"] .sa-mascot-body,
+.sa-mascot[data-poked="true"] .sa-mascot-photo {
+  animation: sa-m-poke 0.72s cubic-bezier(0.22, 1, 0.36, 1) 1 !important;
+}
+
+/* ---------- 2. 思考 / 组织回复（歪头眯眼 + 向上思索） ---------- */
+.sa-mascot[data-state="thinking"] .sa-mascot-body {
+  animation: sa-m-ponder calc(2.4s * var(--sa-speed)) ease-in-out var(--sa-delay) infinite;
+}
+.sa-mascot[data-state="thinking"] .sa-mascot-eye {
+  --sa-lid: 0.7;
+}
+.sa-mascot[data-state="thinking"] .sa-mascot-eyes {
+  animation: sa-m-ponder-eyes calc(3.8s * var(--sa-speed)) ease-in-out var(--sa-delay) infinite;
+}
+
+/* ---------- 3. 搜索 / 阅读（前倾 + 眼睛左右高速扫视） ---------- */
+.sa-mascot[data-state="searching"] .sa-mascot-body {
+  animation: sa-m-seek calc(1.1s * var(--sa-speed)) ease-in-out var(--sa-delay) infinite;
+}
+.sa-mascot[data-state="searching"] .sa-mascot-eyes {
+  animation: sa-m-scan calc(1.35s * var(--sa-speed)) ease-in-out var(--sa-delay) infinite;
+}
+
+/* ---------- 4. 工作中 / 执行工具（按造型自适应编舞） ---------- */
+.sa-mascot[data-state="working"][data-motion="soft"] .sa-mascot-body {
+  animation: sa-m-squash calc(1.15s * var(--sa-speed)) ease-in-out var(--sa-delay) infinite;
+}
+.sa-mascot[data-state="working"][data-motion="angular"] .sa-mascot-body {
+  transform-origin: 50% 50%;
+  animation: sa-m-wiggle calc(1.35s * var(--sa-speed)) ease-in-out var(--sa-delay) infinite;
+}
+.sa-mascot[data-state="working"][data-motion="bouncy"] .sa-mascot-body,
+.sa-mascot[data-state="working"] .sa-mascot-photo {
+  animation: sa-m-work-bob calc(1.3s * var(--sa-speed)) ease-in-out var(--sa-delay) infinite;
+}
+.sa-mascot[data-state="working"] .sa-mascot-eyes {
+  animation: sa-m-work-eyes calc(2.2s * var(--sa-speed)) ease-in-out var(--sa-delay) infinite;
+}
+
+/* ---------- 5. 跨 Bot 派活 / 发送指令（前冲倾斜） ---------- */
+.sa-mascot[data-state="sending"] .sa-mascot-body {
+  animation: sa-m-dash calc(1.1s * var(--sa-speed)) cubic-bezier(0.4, 0, 0.2, 1) var(--sa-delay) infinite;
+}
+
+/* ---------- 6. 等待用户批准 / 需要关注（轻跳引起注意） ---------- */
+.sa-mascot[data-state="waiting"] .sa-mascot-body {
+  animation: sa-m-hop 1.45s cubic-bezier(0.3, 0.7, 0.4, 1) infinite;
+}
+
+/* ---------- 7. 刚刚完成未读（欢呼轻跳 + ^ ^ 开心眼 + 微笑 + 星光） ---------- */
+.sa-mascot[data-state="done"] .sa-mascot-body {
+  animation: sa-m-cheer 2.2s ease-in-out var(--sa-delay) infinite;
+}
+.sa-mascot[data-state="done"] .sa-mascot-eye {
+  opacity: 0;
+}
+.sa-mascot[data-state="done"] .sa-mascot-eye-happy,
+.sa-mascot[data-state="done"] .sa-mascot-smile,
+.sa-mascot[data-state="done"] .sa-mascot-sparkles {
+  opacity: 1;
+}
+
+/* ---------- 8. 报错失败（阻尼摇头 + > < 眼） ---------- */
+.sa-mascot[data-state="error"] .sa-mascot-body {
+  animation: sa-m-shake 0.56s ease-in-out 1;
+}
+.sa-mascot[data-state="error"] .sa-mascot-eye {
+  opacity: 0;
+}
+.sa-mascot[data-state="error"] .sa-mascot-eye-error {
+  opacity: 1;
+}
+
+/* ---------- 9. 停止 / 停用 / 休眠（完全静止 + 闭眼平静弧线 + 微降饱和） ---------- */
+.sa-mascot[data-state="sleeping"] .sa-mascot-body,
+.sa-mascot[data-state="sleeping"] .sa-mascot-photo {
+  animation: none;
+  filter: saturate(0.35) opacity(0.76);
+}
+.sa-mascot[data-state="sleeping"] .sa-mascot-gaze {
+  transform: none;
+}
+.sa-mascot[data-state="sleeping"] .sa-mascot-eye {
+  opacity: 0;
+}
+.sa-mascot[data-state="sleeping"] .sa-mascot-eye-sleep {
+  opacity: 1;
+}
+
+/* ---------- 角标（主控金星 / 工作中绿点 / 待审批琥珀问号 / 报错红点） ---------- */
+.sa-mascot-badge {
+  position: absolute;
+  right: -2px;
+  bottom: -2px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  border: 2px solid var(--sa-surface, #ffffff);
+  box-sizing: content-box;
+  pointer-events: none;
+}
+
+.sa-mascot-badge--working {
+  width: 8px;
+  height: 8px;
+  background: #10b981;
+  box-shadow: 0 0 0 2px rgba(16, 185, 129, 0.22);
+}
+
+.sa-mascot-badge--waiting {
+  min-width: 14px;
+  height: 14px;
+  padding: 0 3px;
+  background: #f59e0b;
+  color: #ffffff;
+  font-size: 9px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.sa-mascot-badge--error {
+  width: 9px;
+  height: 9px;
+  background: #ef4444;
+}
+
+.sa-mascot-badge--done {
+  width: 9px;
+  height: 9px;
+  background: #3b82f6;
+}
+
+.sa-mascot-badge--master {
+  top: -3px;
+  bottom: auto;
+  right: -3px;
+  width: 14px;
+  height: 14px;
+  background: linear-gradient(135deg, #fbbf24, #f59e0b);
+  color: #ffffff;
+  font-size: 9px;
+  line-height: 1;
+  box-shadow: 0 1px 4px rgba(245, 158, 11, 0.4);
+}
+
+/* 群聊多 Bot 拼图头像（2~4 成员网格 + 溢出角标） */
+.sa-room-collage {
+  position: relative;
+  display: grid;
+  width: var(--sa-collage-size, 28px);
+  height: var(--sa-collage-size, 28px);
+  flex: 0 0 auto;
+  border-radius: 9px;
+  background: var(--sa-surface-2, rgba(15, 23, 42, 0.05));
+  padding: 2px;
+  gap: 1px;
+  place-items: center;
+  box-sizing: border-box;
+}
+
+.sa-room-collage[data-count="2"] {
+  grid-template-columns: repeat(2, 1fr);
+}
+.sa-room-collage[data-count="3"],
+.sa-room-collage[data-count="4"] {
+  grid-template-columns: repeat(2, 1fr);
+  grid-template-rows: repeat(2, 1fr);
+}
+
+.sa-room-collage-more {
+  font-size: 8px;
+  font-weight: 700;
+  color: var(--sa-ink-2);
+  line-height: 1;
+}
+
+/* ---------- 关键帧动画定义 ---------- */
+@keyframes sa-m-float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-3.5px); }
+}
+
+@keyframes sa-m-blink-idle {
+  0%, 42%, 46%, 94%, 98%, 100% { --sa-lid: 1; }
+  44%, 96% { --sa-lid: 0.08; }
+}
+
+@keyframes sa-m-nuzzle {
+  0%, 100% { transform: rotate(5deg) scale(1.03, 0.97); }
+  50% { transform: rotate(-6deg) scale(0.98, 1.03); }
+}
+
+@keyframes sa-m-poke {
+  0% { transform: translateY(0) scale(1) rotate(0deg); }
+  25% { transform: translateY(-16px) scale(0.92, 1.1) rotate(160deg); }
+  65% { transform: translateY(2px) scale(1.12, 0.88) rotate(360deg); }
+  85% { transform: translateY(-3px) scale(0.97, 1.04) rotate(360deg); }
+  100% { transform: translateY(0) scale(1) rotate(360deg); }
+}
+
+@keyframes sa-m-ponder {
+  0%, 100% { transform: translateY(0) rotate(3deg); }
+  50% { transform: translateY(-4px) rotate(6.5deg); }
+}
+
+@keyframes sa-m-ponder-eyes {
+  0%, 100% { transform: translate(5px, -6px); --sa-lid: 0.72; }
+  48% { transform: translate(7px, -7px); --sa-lid: 0.66; }
+  52% { transform: translate(7px, -7px); --sa-lid: 0.1; }
+  56% { transform: translate(5px, -6px); --sa-lid: 0.72; }
+}
+
+@keyframes sa-m-seek {
+  0%, 100% { transform: translateY(0) rotate(-3deg); }
+  50% { transform: translateY(-6px) rotate(-1deg); }
+}
+
+@keyframes sa-m-scan {
+  0%, 100% { transform: translateX(-11px); }
+  50% { transform: translateX(11px); }
+}
+
+@keyframes sa-m-squash {
+  0%, 100% { transform: translateY(0) scale(1, 1); }
+  25% { transform: translateY(4px) scale(1.08, 0.91); }
+  55% { transform: translateY(-8px) scale(0.94, 1.07); }
+}
+
+@keyframes sa-m-wiggle {
+  0%, 100% { transform: rotate(-7deg) scale(1.02); }
+  50% { transform: rotate(7deg) scale(1.04); }
+}
+
+@keyframes sa-m-work-bob {
+  0%, 100% { transform: translateY(0) rotate(-3deg); }
+  50% { transform: translateY(-6px) rotate(3deg); }
+}
+
+@keyframes sa-m-work-eyes {
+  0%, 40%, 46%, 100% { transform: translate(0, 2px); --sa-lid: 1; }
+  20% { transform: translate(-5px, 3px); }
+  43% { transform: translate(0, 2px); --sa-lid: 0.08; }
+  72% { transform: translate(5px, 2px); }
+}
+
+@keyframes sa-m-dash {
+  0%, 100% { transform: translateX(0) rotate(0deg); }
+  40% { transform: translateX(10px) rotate(7deg); }
+  70% { transform: translateX(-3px) rotate(-2deg); }
+}
+
+@keyframes sa-m-hop {
+  0%, 100% { transform: translateY(0) scale(1, 1); }
+  18% { transform: translateY(3px) scale(1.07, 0.92); }
+  42% { transform: translateY(-13px) scale(0.95, 1.06); }
+  66% { transform: translateY(0) scale(1.05, 0.95); }
+}
+
+@keyframes sa-m-cheer {
+  0%, 72%, 100% { transform: translateY(0) scale(1, 1); }
+  80% { transform: translateY(-9px) scale(0.96, 1.06); }
+  90% { transform: translateY(1px) scale(1.06, 0.95); }
+}
+
+@keyframes sa-m-shake {
+  0%, 100% { transform: translateX(0); }
+  20% { transform: translateX(-8px) rotate(-4deg); }
+  40% { transform: translateX(7px) rotate(4deg); }
+  60% { transform: translateX(-5px) rotate(-2deg); }
+  80% { transform: translateX(3px) rotate(1deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sa-mascot *,
+  .sa-mascot-body,
+  .sa-mascot-eyes,
+  .sa-mascot-gaze {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
+
+/* ---------- 形象工作室弹窗（Avatar Studio） ---------- */
+.sa-studio-modal {
+  max-width: 560px;
+}
+
+.sa-studio-stage {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: 18px;
+  border-radius: 16px;
+  background: var(--sa-surface-2, rgba(15, 23, 42, 0.04));
+  border: 1px solid var(--sa-border);
+  margin-bottom: 14px;
+}
+
+.sa-studio-preview {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  min-width: 108px;
+}
+
+.sa-studio-hint {
+  font-size: 11px;
+  color: var(--sa-ink-3);
+}
+
+.sa-studio-states {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  flex: 1;
+}
+
+.sa-studio-state-btn {
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--sa-border);
+  background: var(--sa-surface);
+  color: var(--sa-ink-2);
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 140ms ease;
+}
+
+.sa-studio-state-btn[aria-pressed="true"] {
+  background: var(--sa-accent);
+  border-color: var(--sa-accent);
+  color: #ffffff;
+}
+
+.sa-studio-tabs {
+  display: inline-flex;
+  gap: 4px;
+  padding: 3px;
+  border-radius: 10px;
+  background: var(--sa-surface-2, rgba(15, 23, 42, 0.05));
+  margin-bottom: 14px;
+}
+
+.sa-studio-tab {
+  padding: 6px 14px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--sa-ink-2);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.sa-studio-tab[aria-selected="true"] {
+  background: var(--sa-surface);
+  color: var(--sa-ink);
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.1);
+}
+
+.sa-studio-section-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--sa-ink-2);
+  margin: 0 0 8px;
+}
+
+.sa-shape-grid {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.sa-shape-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 4px;
+  border-radius: 12px;
+  border: 1.5px solid var(--sa-border);
+  background: var(--sa-surface);
+  cursor: pointer;
+  color: var(--sa-ink-2);
+  font-size: 11px;
+  transition: border-color 140ms ease, transform 140ms ease, background 140ms ease;
+}
+
+.sa-shape-card:hover {
+  transform: translateY(-1px);
+  border-color: var(--sa-ink-3);
+}
+
+.sa-shape-card[aria-pressed="true"] {
+  border-color: var(--sa-accent);
+  background: color-mix(in srgb, var(--sa-accent) 10%, var(--sa-surface));
+  color: var(--sa-ink);
+  font-weight: 600;
+}
+
+.sa-color-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.sa-color-swatch {
+  width: 28px;
+  height: 28px;
+  border-radius: 999px;
+  border: 2px solid transparent;
+  cursor: pointer;
+  padding: 0;
+  position: relative;
+  transition: transform 140ms ease, box-shadow 140ms ease;
+}
+
+.sa-color-swatch:hover {
+  transform: scale(1.1);
+}
+
+.sa-color-swatch[aria-pressed="true"] {
+  transform: scale(1.12);
+  box-shadow: 0 0 0 2px var(--sa-surface), 0 0 0 4px var(--sa-accent);
+}
+
+.sa-upload-drop {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 24px 16px;
+  border-radius: 14px;
+  border: 1.5px dashed var(--sa-border);
+  background: var(--sa-surface-2, rgba(15, 23, 42, 0.02));
+  text-align: center;
+  margin-bottom: 14px;
+}

@@ -4,7 +4,7 @@ use sa_protocol::{Bot, BotId, BotKind, Harness, ModelTier};
 
 pub fn insert(conn: &Connection, bot: &Bot) -> Result<()> {
     conn.execute(
-        "INSERT INTO bots (id, name, kind, tier, persona, enabled, created_at, harness, harness_command) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        "INSERT INTO bots (id, name, kind, tier, persona, enabled, created_at, harness, harness_command, is_master, role, avatar_shape, avatar_color, avatar_image) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         params![
             bot.id.as_str(),
             bot.name,
@@ -14,7 +14,12 @@ pub fn insert(conn: &Connection, bot: &Bot) -> Result<()> {
             bot.enabled,
             bot.created_at,
             bot.harness.as_str(),
-            bot.harness_command
+            bot.harness_command,
+            bot.is_master,
+            bot.role,
+            bot.avatar_shape,
+            bot.avatar_color,
+            bot.avatar_image
         ],
     )?;
     Ok(())
@@ -22,7 +27,7 @@ pub fn insert(conn: &Connection, bot: &Bot) -> Result<()> {
 
 pub fn list(conn: &Connection) -> Result<Vec<Bot>> {
     let mut stmt = conn.prepare(
-        "SELECT id, name, kind, tier, enabled, created_at, persona, harness, harness_command FROM bots ORDER BY created_at, id",
+        "SELECT id, name, kind, tier, enabled, created_at, persona, harness, harness_command, is_master, role, avatar_shape, avatar_color, avatar_image FROM bots ORDER BY created_at, id",
     )?;
     let rows = stmt.query_map([], read_row)?;
     rows.map(|row| row?).collect()
@@ -32,10 +37,10 @@ pub fn get(conn: &Connection, id: &BotId) -> Result<Option<Bot>> {
     Ok(list(conn)?.into_iter().find(|bot| &bot.id == id))
 }
 
-/// 用 `bot` 的可变部分（名字、档位、人设、是否启用）覆盖已有的那一行。
+/// 用 `bot` 的可变部分（名字、档位、人设、是否启用、形象与主控身份）覆盖已有的那一行。
 pub fn update(conn: &Connection, bot: &Bot) -> Result<()> {
     let changed = conn.execute(
-        "UPDATE bots SET name = ?2, tier = ?3, persona = ?4, enabled = ?5, harness = ?6, harness_command = ?7 WHERE id = ?1",
+        "UPDATE bots SET name = ?2, tier = ?3, persona = ?4, enabled = ?5, harness = ?6, harness_command = ?7, is_master = ?8, role = ?9, avatar_shape = ?10, avatar_color = ?11, avatar_image = ?12 WHERE id = ?1",
         params![
             bot.id.as_str(),
             bot.name,
@@ -43,7 +48,12 @@ pub fn update(conn: &Connection, bot: &Bot) -> Result<()> {
             bot.persona,
             bot.enabled,
             bot.harness.as_str(),
-            bot.harness_command
+            bot.harness_command,
+            bot.is_master,
+            bot.role,
+            bot.avatar_shape,
+            bot.avatar_color,
+            bot.avatar_image
         ],
     )?;
     if changed == 0 {
@@ -84,5 +94,10 @@ fn read_row(row: &Row<'_>) -> rusqlite::Result<Result<Bot>> {
         persona: row.get(6)?,
         harness,
         harness_command: row.get(8)?,
+        is_master: row.get(9)?,
+        role: row.get(10)?,
+        avatar_shape: row.get(11)?,
+        avatar_color: row.get(12)?,
+        avatar_image: row.get(13)?,
     }))
 }

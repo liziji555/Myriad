@@ -3,6 +3,8 @@ import { api } from "../api/client";
 import { importSummary, MAX_TEMPLATE_BYTES, saveTextFile } from "../api/templates";
 import type { Team } from "../api/useWorkspace";
 import type { Bot, DeskDiff, Discussion, Harness, HarnessDesk, HarnessProbe, ModelTier, Room, Share } from "../api/types";
+import { AvatarStudioModal } from "./AvatarStudio";
+import { BotMascot } from "./BotMascot";
 import { DiffView } from "./FilesPanel";
 
 /** 一个房间里最多几个 Bot。和服务端的上限一致，超过时服务端也会拒绝。 */
@@ -266,8 +268,19 @@ export function MembersPanel({ room, members, bots, team }: Props) {
           {members.map((bot) => (
             <li key={bot.id} className="sa-member">
               <div className="sa-row sa-row-static">
-                <span className="sa-dot" data-state={bot.enabled ? "idle" : "off"} aria-hidden="true" />
+                <BotMascot
+                  id={bot.id}
+                  name={bot.name}
+                  isMaster={bot.is_master}
+                  shape={bot.avatar_shape}
+                  color={bot.avatar_color}
+                  image={bot.avatar_image}
+                  size={24}
+                  state={bot.enabled ? "idle" : "sleeping"}
+                />
                 <span className="sa-row-label">{bot.name}</span>
+                {bot.is_master && <span className="sa-tag">主控</span>}
+                {bot.role && !bot.is_master && <span className="sa-tag">{bot.role}</span>}
                 {bot.id === room.host_bot_id && <span className="sa-tag">入口</span>}
                 {bot.harness !== "builtin" && <span className="sa-tag">{harnessLabel(bot.harness)}</span>}
                 {!bot.enabled && <span className="sa-tag">已停用</span>}
@@ -321,8 +334,19 @@ export function MembersPanel({ room, members, bots, team }: Props) {
             {outside.map((bot) => (
               <li key={bot.id} className="sa-member">
                 <div className="sa-row sa-row-static">
-                  <span className="sa-dot" data-state={bot.enabled ? "idle" : "off"} aria-hidden="true" />
+                  <BotMascot
+                    id={bot.id}
+                    name={bot.name}
+                    isMaster={bot.is_master}
+                    shape={bot.avatar_shape}
+                    color={bot.avatar_color}
+                    image={bot.avatar_image}
+                    size={22}
+                    state={bot.enabled ? "idle" : "sleeping"}
+                  />
                   <span className="sa-row-label">{bot.name}</span>
+                  {bot.is_master && <span className="sa-tag">主控</span>}
+                  {bot.role && !bot.is_master && <span className="sa-tag">{bot.role}</span>}
                 </div>
                 <div className="sa-member-actions">
                   <button
@@ -487,10 +511,14 @@ function DeskView({
 
 interface Draft {
   name: string;
+  role: string;
   tier: ModelTier;
   persona: string;
   harness: Harness;
   harness_command: string;
+  avatar_shape: string;
+  avatar_color: string;
+  avatar_image: string;
   enabled?: boolean;
 }
 
@@ -506,11 +534,16 @@ interface FormProps {
 
 function BotForm({ bot, busy, error, onSave, onCancel, onDelete }: FormProps) {
   const [name, setName] = useState(bot?.name ?? "");
+  const [role, setRole] = useState(bot?.role ?? "");
   const [tier, setTier] = useState<ModelTier>(bot?.tier ?? "mid");
   const [persona, setPersona] = useState(bot?.persona ?? "");
   const [enabled, setEnabled] = useState(bot?.enabled ?? true);
   const [harness, setHarness] = useState<Harness>(bot?.harness ?? "builtin");
   const [command, setCommand] = useState(bot?.harness_command ?? "");
+  const [avatarShape, setAvatarShape] = useState(bot?.avatar_shape ?? "");
+  const [avatarColor, setAvatarColor] = useState(bot?.avatar_color ?? "");
+  const [avatarImage, setAvatarImage] = useState(bot?.avatar_image ?? "");
+  const [studioOpen, setStudioOpen] = useState(false);
   const [probes, setProbes] = useState<readonly HarnessProbe[]>([]);
 
   useEffect(() => {
@@ -536,11 +569,48 @@ function BotForm({ bot, busy, error, onSave, onCancel, onDelete }: FormProps) {
   const submit = (event: FormEvent) => {
     event.preventDefault();
     const harness_command = harness === "builtin" ? "" : command.trim();
-    void onSave({ name: name.trim(), tier, persona, harness, harness_command, ...(bot ? { enabled } : {}) });
+    void onSave({
+      name: name.trim(),
+      role: role.trim(),
+      tier,
+      persona,
+      harness,
+      harness_command,
+      avatar_shape: avatarShape,
+      avatar_color: avatarColor,
+      avatar_image: avatarImage,
+      ...(bot ? { enabled } : {}),
+    });
   };
 
   return (
     <form className="sa-form" onSubmit={submit} aria-label={bot ? `编辑 ${bot.name}` : "新建 Bot"}>
+      <div className="sa-create-hero">
+        <BotMascot
+          id={bot?.id ?? `new-${name || "bot"}`}
+          name={name.trim() || "新 Bot"}
+          isMaster={bot?.is_master ?? false}
+          shape={avatarShape}
+          color={avatarColor}
+          image={avatarImage}
+          size={54}
+          state={enabled ? "idle" : "sleeping"}
+          gaze
+          interactive
+        />
+        <div className="sa-create-hero-copy">
+          <strong>{name.trim() || "未命名 Bot"}</strong>
+          <span>{role.trim() || (bot?.is_master ? "主控中枢" : "点击定制动态形象或上传头像")}</span>
+        </div>
+        <button
+          type="button"
+          className="sa-button sa-button-quiet"
+          disabled={busy}
+          onClick={() => setStudioOpen(true)}
+        >
+          定制形象
+        </button>
+      </div>
       <label className="sa-field">
         <span>名字</span>
         <input
@@ -550,6 +620,15 @@ function BotForm({ bot, busy, error, onSave, onCancel, onDelete }: FormProps) {
           autoFocus
           placeholder="比如 Coder。用来 @ 它，不能有空格"
           onChange={(event) => setName(event.target.value)}
+        />
+      </label>
+      <label className="sa-field">
+        <span>角色标签</span>
+        <input
+          value={role}
+          maxLength={40}
+          placeholder="例如：架构师、后端开发、代码审查员"
+          onChange={(event) => setRole(event.target.value)}
         />
       </label>
       <label className="sa-field">
@@ -629,6 +708,25 @@ function BotForm({ bot, busy, error, onSave, onCancel, onDelete }: FormProps) {
           </button>
         )}
       </div>
+      {studioOpen && (
+        <AvatarStudioModal
+          botId={bot?.id ?? `new-${name || "bot"}`}
+          botName={name.trim() || "新 Bot"}
+          isMaster={bot?.is_master ?? false}
+          initial={{
+            avatar_shape: avatarShape,
+            avatar_color: avatarColor,
+            avatar_image: avatarImage,
+          }}
+          onSave={(next) => {
+            setAvatarShape(next.avatar_shape);
+            setAvatarColor(next.avatar_color);
+            setAvatarImage(next.avatar_image);
+            setStudioOpen(false);
+          }}
+          onClose={() => setStudioOpen(false)}
+        />
+      )}
     </form>
   );
 }

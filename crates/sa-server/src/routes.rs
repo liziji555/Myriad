@@ -5,7 +5,7 @@ use axum::extract::rejection::{JsonRejection, QueryRejection};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
-use sa_engine::{AuditFilter, BotPatch, Engine, EngineError, RoutinePatch};
+use sa_engine::{AuditFilter, BotPatch, BotProfileOptions, Engine, EngineError, RoutinePatch};
 use sa_protocol::{
     ApprovalId, AuditPage, Bot, BotId, CheckpointInfo, CreateBotRequest, CreateLinkRequest,
     CreateRoomRequest, CreateRoutineRequest, CreateTaskRequest, DecideApprovalRequest,
@@ -209,19 +209,26 @@ pub async fn create_bot(
 ) -> Result<(StatusCode, Json<Bot>), AppError> {
     let Json(body) = body.map_err(|e| AppError::bad_request(e.body_text()))?;
     let bot = blocking(&state, move |engine| {
-        engine.create_harness_bot(
+        engine.create_bot_with_profile(
             &body.name,
             body.tier.unwrap_or(ModelTier::Mid),
             body.persona.as_deref().unwrap_or(""),
             body.harness.unwrap_or_default(),
             body.harness_command.as_deref().unwrap_or(""),
+            BotProfileOptions {
+                is_master: body.is_master,
+                role: body.role,
+                avatar_shape: body.avatar_shape,
+                avatar_color: body.avatar_color,
+                avatar_image: body.avatar_image,
+            },
         )
     })
     .await?;
     Ok((StatusCode::CREATED, Json(bot)))
 }
 
-/// 改一个 Bot 的名字、档位、人设，或者停用、启用它。只改请求里给出的字段。
+/// 改一个 Bot 的名字、档位、人设、形象或停用/启用它。只改请求里给出的字段。
 pub async fn update_bot(
     State(state): State<AppState>,
     Path(bot_id): Path<BotId>,
@@ -235,6 +242,11 @@ pub async fn update_bot(
         enabled: body.enabled,
         harness: body.harness,
         harness_command: body.harness_command,
+        is_master: body.is_master,
+        role: body.role,
+        avatar_shape: body.avatar_shape,
+        avatar_color: body.avatar_color,
+        avatar_image: body.avatar_image,
     };
     Ok(Json(
         blocking(&state, move |engine| engine.update_bot(&bot_id, patch)).await?,

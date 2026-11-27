@@ -1,8 +1,9 @@
-import type { Presence } from "../api/presence";
+import type { GlobalBotSignal, Presence } from "../api/presence";
 import { presenceSummary } from "../api/presence";
 import { THEME_LABEL, type Theme } from "../api/theme";
-import type { Room } from "../api/types";
+import type { Bot, BotId, Room } from "../api/types";
 import { BotAvatar } from "./BotAvatar";
+import { BotMascot, RoomMascotCollage } from "./BotMascot";
 import { Icon } from "./Icon";
 import { WindowControls } from "./WindowControls";
 
@@ -10,9 +11,11 @@ const THEME_ICON = { system: "auto", light: "sun", dark: "moon" } as const;
 
 interface Props {
   room: Room | undefined;
-  /** 当前会话的性质标签（如「主控」「1v1」「3 人协作」）。 */
+  members: readonly Bot[];
+  /** 当前会话的性质标签（如「主控」「1v1」「3 位队员协作」）。 */
   roomBadge?: string | null;
   presence: readonly Presence[];
+  globalSignals: Readonly<Record<BotId, GlobalBotSignal>>;
   connected: boolean;
   /** 等人处理的任务有几个。 */
   pendingTasks: number;
@@ -23,6 +26,7 @@ interface Props {
   roomsOpen: boolean;
   onToggleRooms(): void;
   onToggleTrajectory(): void;
+  onOpenIdentity(): void;
   onShowTasks(): void;
   onOpenPalette(): void;
   theme: Theme;
@@ -33,12 +37,14 @@ interface Props {
 }
 
 /**
- * 顶上的现场栏：当前对话标题 + 每个 Bot 实时现场胶囊（跨栏飞线锚点）+ 全局快捷操作。
+ * 顶上的现场栏：融合 DS-Bot 居中「灵动岛」身份胶囊 + 多 Bot 实时现场胶囊 + 快捷操作。
  */
 export function StageBar({
   room,
+  members,
   roomBadge,
   presence,
+  globalSignals,
   connected,
   pendingTasks,
   trajectoryShown,
@@ -46,6 +52,7 @@ export function StageBar({
   roomsOpen,
   onToggleRooms,
   onToggleTrajectory,
+  onOpenIdentity,
   onShowTasks,
   onOpenPalette,
   theme,
@@ -53,14 +60,13 @@ export function StageBar({
   onPick,
 }: Props) {
   const mac = /Mac|iPhone|iPad/.test(navigator.platform);
+  const singleBot = members.length === 1 ? members[0] : null;
+  const singleSignal = singleBot ? globalSignals[singleBot.id] : undefined;
+  const waitingCount = presence.filter((p) => p.state === "approval" || p.state === "asking").length;
+
   return (
     <header className="sa-stage">
-      {docked ? (
-        <div className="sa-stage-room" data-docked="true">
-          <h1 className="sa-room-title">{room?.name ?? "主控对话"}</h1>
-          {roomBadge && <span className="sa-tag">{roomBadge}</span>}
-        </div>
-      ) : (
+      {!docked ? (
         <button
           type="button"
           className="sa-stage-room"
@@ -75,6 +81,36 @@ export function StageBar({
           </span>
           <h1 className="sa-room-title">{room?.name ?? "主控对话"}</h1>
           <span className="sa-stage-caret" aria-hidden="true" />
+        </button>
+      ) : (
+        <button
+          type="button"
+          className="sa-island-pill"
+          data-alert={waitingCount > 0 || undefined}
+          title={singleBot ? `点一下打开「${singleBot.name}」的形象与档案` : "点一下查看成员与房间设置"}
+          onClick={onOpenIdentity}
+        >
+          {singleBot ? (
+            <BotMascot
+              id={singleBot.id}
+              name={singleBot.name}
+              isMaster={singleBot.is_master}
+              shape={singleBot.avatar_shape}
+              color={singleBot.avatar_color}
+              image={singleBot.avatar_image}
+              state={singleSignal?.mascotState ?? (singleBot.enabled ? "idle" : "sleeping")}
+              activeTool={singleSignal?.activeTool}
+              size={26}
+            />
+          ) : members.length >= 2 ? (
+            <RoomMascotCollage members={members} size={26} />
+          ) : null}
+          <h1 className="sa-room-title">{room?.name ?? "主控对话"}</h1>
+          {roomBadge && <span className="sa-tag">{roomBadge}</span>}
+          {waitingCount > 0 && <span className="sa-island-alert">{waitingCount} 待处理</span>}
+          <span className="sa-island-arrow" aria-hidden="true">
+            →
+          </span>
         </button>
       )}
 
@@ -97,10 +133,17 @@ export function StageBar({
               >
                 {running && (
                   <svg className="light-running-border" aria-hidden="true">
-                    <rect x="1" y="1" width="calc(100% - 2px)" height="calc(100% - 2px)" rx="999" pathLength="100" />
+                    <rect
+                      x="1"
+                      y="1"
+                      width="calc(100% - 2px)"
+                      height="calc(100% - 2px)"
+                      rx="999"
+                      pathLength="100"
+                    />
                   </svg>
                 )}
-                <BotAvatar id={row.botId} name={row.name} state={row.state} />
+                <BotAvatar id={row.botId} name={row.name} state={row.state} activeTool={row.activeTool} size={22} />
                 <span className="sa-presence-name">{row.name}</span>
                 <span className="sa-presence-text">{row.text}</span>
                 {(row.state === "approval" || row.state === "asking") && (

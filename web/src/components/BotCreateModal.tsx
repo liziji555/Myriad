@@ -1,6 +1,8 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { api } from "../api/client";
 import type { Bot, CreateBotRequest, Harness, HarnessProbe, ModelTier } from "../api/types";
+import { AvatarStudioModal, type AvatarDraft } from "./AvatarStudio";
+import { BotMascot } from "./BotMascot";
 
 const HARNESSES: readonly { id: Harness; label: string }[] = [
   { id: "builtin", label: "内置模型（直接调用 API）" },
@@ -19,26 +21,45 @@ const TIERS: readonly { id: ModelTier; label: string }[] = [
   { id: "strong", label: "强档" },
 ];
 
-const PRESETS: readonly { name: string; persona: string; tier: ModelTier }[] = [
+const PRESETS: readonly {
+  name: string;
+  role: string;
+  persona: string;
+  tier: ModelTier;
+  shape: string;
+  color: string;
+}[] = [
   {
     name: "前端专家",
+    role: "界面与交互",
     persona: "负责界面设计、React/TypeScript 组件实现与交互细节打磨，注重视觉整洁与响应式体验。",
     tier: "strong",
+    shape: "cat",
+    color: "aurora",
   },
   {
     name: "后端工匠",
+    role: "架构与服务",
     persona: "负责服务端架构、API 设计、并发安全与单元测试，修改后主动运行验证。",
     tier: "strong",
+    shape: "hex",
+    color: "cobalt",
   },
   {
     name: "代码审查",
+    role: "质量把关",
     persona: "负责审查代码改动、边界条件、安全隐患与性能问题，给出直接可落地的改进建议。",
     tier: "mid",
+    shape: "shield",
+    color: "emerald",
   },
   {
     name: "资料调研",
+    role: "情报检索",
     persona: "负责快速检索代码库与公开资料，提炼结构化结论与来源，不凭印象猜测。",
     tier: "mid",
+    shape: "sprout",
+    color: "cyan",
   },
 ];
 
@@ -47,13 +68,21 @@ interface Props {
   onClose(): void;
 }
 
-/** 独立创建 Bot 弹窗（借鉴 ProkBot / GrokBot 的 Bot-first 创建流程）。 */
+/** 独立创建 Bot 弹窗（集成自建动态角色形象选择与快速角色模板）。 */
 export function BotCreateModal({ onCreate, onClose }: Props) {
+  const [previewId] = useState(() => `draft-${Math.random().toString(36).slice(2, 8)}`);
   const [name, setName] = useState("");
+  const [role, setRole] = useState("");
   const [persona, setPersona] = useState("");
   const [tier, setTier] = useState<ModelTier>("mid");
   const [harness, setHarness] = useState<Harness>("builtin");
   const [command, setCommand] = useState("");
+  const [avatar, setAvatar] = useState<AvatarDraft>({
+    avatar_shape: "",
+    avatar_color: "",
+    avatar_image: "",
+  });
+  const [studioOpen, setStudioOpen] = useState(false);
   const [openChat, setOpenChat] = useState(true);
   const [probes, setProbes] = useState<readonly HarnessProbe[]>([]);
   const [busy, setBusy] = useState(false);
@@ -72,11 +101,11 @@ export function BotCreateModal({ onCreate, onClose }: Props) {
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && !busy) onClose();
+      if (event.key === "Escape" && !busy && !studioOpen) onClose();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [busy, onClose]);
+  }, [busy, studioOpen, onClose]);
 
   const activeProbe = probes.find((p) => p.harness === harness);
 
@@ -93,11 +122,15 @@ export function BotCreateModal({ onCreate, onClose }: Props) {
       await onCreate(
         {
           name: name.trim(),
+          role: role.trim() || undefined,
           persona: persona.trim(),
           tier,
           harness,
           harness_command:
             harness === "acp" || harness === "command" ? command.trim() || undefined : undefined,
+          avatar_shape: avatar.avatar_shape || undefined,
+          avatar_color: avatar.avatar_color || undefined,
+          avatar_image: avatar.avatar_image || undefined,
         },
         openChat,
       );
@@ -112,7 +145,7 @@ export function BotCreateModal({ onCreate, onClose }: Props) {
   return (
     <div
       className="sa-palette-backdrop"
-      onMouseDown={(event) => event.target === event.currentTarget && !busy && onClose()}
+      onMouseDown={(event) => event.target === event.currentTarget && !busy && !studioOpen && onClose()}
     >
       <div className="sa-connect-panel sa-create-modal" role="dialog" aria-modal="true" aria-label="新建 Bot">
         <header className="sa-connect-head">
@@ -121,6 +154,41 @@ export function BotCreateModal({ onCreate, onClose }: Props) {
             关闭
           </button>
         </header>
+
+        {studioOpen && (
+          <AvatarStudioModal
+            botId={previewId}
+            botName={name.trim() || "新 Bot"}
+            initial={avatar}
+            onSave={(draft) => setAvatar(draft)}
+            onClose={() => setStudioOpen(false)}
+          />
+        )}
+
+        <div className="sa-create-hero">
+          <BotMascot
+            id={previewId}
+            name={name.trim() || "新 Bot"}
+            shape={avatar.avatar_shape}
+            color={avatar.avatar_color}
+            image={avatar.avatar_image}
+            state="idle"
+            size={64}
+            gaze
+            interactive
+          />
+          <div className="sa-create-hero-copy">
+            <strong>{name.trim() || "给新 Bot 选个专属形象"}</strong>
+            <small>12 款自建动态角色造型 × 12 种渐变，也支持上传图片</small>
+            <button
+              type="button"
+              className="sa-button sa-button-quiet"
+              onClick={() => setStudioOpen(true)}
+            >
+              切换造型与配色
+            </button>
+          </div>
+        </div>
 
         <div className="sa-preset-row" aria-label="快速角色模板">
           <span className="sa-preset-label">快速填充：</span>
@@ -131,8 +199,14 @@ export function BotCreateModal({ onCreate, onClose }: Props) {
               className="sa-chip"
               onClick={() => {
                 setName(preset.name);
+                setRole(preset.role);
                 setPersona(preset.persona);
                 setTier(preset.tier);
+                setAvatar({
+                  avatar_shape: preset.shape,
+                  avatar_color: preset.color,
+                  avatar_image: "",
+                });
               }}
             >
               {preset.name}
@@ -141,16 +215,27 @@ export function BotCreateModal({ onCreate, onClose }: Props) {
         </div>
 
         <form className="sa-form" onSubmit={submit}>
-          <label className="sa-field">
-            Bot 名字
-            <input
-              autoFocus
-              maxLength={24}
-              value={name}
-              placeholder="例如：前端专家、代码审查、Codex 助手"
-              onChange={(e) => setName(e.target.value)}
-            />
-          </label>
+          <div className="sa-create-row">
+            <label className="sa-field">
+              Bot 名字
+              <input
+                autoFocus
+                maxLength={24}
+                value={name}
+                placeholder="例如：前端专家、代码审查"
+                onChange={(e) => setName(e.target.value)}
+              />
+            </label>
+            <label className="sa-field">
+              职责标签（可选）
+              <input
+                maxLength={24}
+                value={role}
+                placeholder="例如：界面与交互"
+                onChange={(e) => setRole(e.target.value)}
+              />
+            </label>
+          </div>
 
           <div className="sa-create-row">
             <label className="sa-field">

@@ -11,6 +11,11 @@ const bot: Bot = {
   enabled: true,
   harness: "builtin",
   harness_command: "",
+  is_master: true,
+  role: "主控中枢",
+  avatar_shape: "orb",
+  avatar_color: "obsidian",
+  avatar_image: "",
   created_at: 1,
 };
 const room = (id: string, name: string): Room => ({

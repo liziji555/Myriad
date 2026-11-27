@@ -5,4 +5,4 @@ import type { ModelTier } from "./ModelTier";
 /**
  * 模板里的一个 Bot：只有名字、档位、分工、是否启用。没有 ID、时间和任何密钥，换一台机器也能用。
  */
-export type BotTemplate = { name: string, tier: ModelTier, persona: string, enabled: boolean, harness?: Harness, harness_command?: string, };
+export type BotTemplate = { name: string, tier: ModelTier, persona: string, enabled: boolean, harness?: Harness, harness_command?: string, role?: string, avatar_shape?: string, avatar_color?: string, };

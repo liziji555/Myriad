@@ -5,4 +5,4 @@ import type { ModelTier } from "./ModelTier";
 /**
  * 只改给出的字段。
  */
-export type UpdateBotRequest = { name?: string, tier?: ModelTier, persona?: string, enabled?: boolean, harness?: Harness, harness_command?: string, };
+export type UpdateBotRequest = { name?: string, tier?: ModelTier, persona?: string, enabled?: boolean, harness?: Harness, harness_command?: string, is_master?: boolean, role?: string, avatar_shape?: string, avatar_color?: string, avatar_image?: string, };

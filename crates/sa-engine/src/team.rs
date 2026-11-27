@@ -8,7 +8,9 @@ use sa_protocol::{
 use sa_store::{bots, events, rooms};
 
 pub const MAX_BOT_NAME_CHARS: usize = 24;
+pub const MAX_BOT_ROLE_CHARS: usize = 24;
 pub const MAX_PERSONA_CHARS: usize = 4_000;
+pub const MAX_AVATAR_IMAGE_BYTES: usize = 256 * 1024;
 /// 一个房间里最多几个 Bot。再多，谁该接话就说不清了。
 pub const MAX_ROOM_MEMBERS: usize = 6;
 
@@ -21,6 +23,21 @@ pub struct BotPatch {
     pub enabled: Option<bool>,
     pub harness: Option<Harness>,
     pub harness_command: Option<String>,
+    pub is_master: Option<bool>,
+    pub role: Option<String>,
+    pub avatar_shape: Option<String>,
+    pub avatar_color: Option<String>,
+    pub avatar_image: Option<String>,
+}
+
+/// 创建 Bot 时的可选形象与身份配置。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BotProfileOptions {
+    pub is_master: Option<bool>,
+    pub role: Option<String>,
+    pub avatar_shape: Option<String>,
+    pub avatar_color: Option<String>,
+    pub avatar_image: Option<String>,
 }
 
 impl Engine {
@@ -37,7 +54,36 @@ impl Engine {
         harness: Harness,
         command: &str,
     ) -> Result<Bot> {
+        self.create_bot_with_profile(
+            name,
+            tier,
+            persona,
+            harness,
+            command,
+            BotProfileOptions::default(),
+        )
+    }
+
+    /// 新建一个带完整形象与主控身份选项的 Bot。
+    pub fn create_bot_with_profile(
+        &self,
+        name: &str,
+        tier: ModelTier,
+        persona: &str,
+        harness: Harness,
+        command: &str,
+        profile: BotProfileOptions,
+    ) -> Result<Bot> {
         let command = check_harness(harness, command)?;
+        if profile.is_master == Some(true) && harness != Harness::Builtin {
+            return Err(EngineError::Invalid(
+                "主控中枢 Bot 需要使用内置引擎（builtin），才能调用创建和管理团队工具".into(),
+            ));
+        }
+        let role = check_role(profile.role.as_deref().unwrap_or(""))?;
+        let avatar_shape = check_avatar_token(profile.avatar_shape.as_deref().unwrap_or(""))?;
+        let avatar_color = check_avatar_token(profile.avatar_color.as_deref().unwrap_or(""))?;
+        let avatar_image = check_avatar_image(profile.avatar_image.as_deref().unwrap_or(""))?;
         let now = now_ms();
         let (bot, seq) = self.store.write(|tx| {
             let existing = bots::list(tx)?;
@@ -46,6 +92,9 @@ impl Engine {
                 (Ok(name), Ok(persona)) => (name, persona),
                 (Err(e), _) | (_, Err(e)) => return Ok(Err(e)),
             };
+            let is_master = profile.is_master.unwrap_or_else(|| {
+                harness == Harness::Builtin && existing.iter().all(|b| !b.is_master)
+            });
             let bot = Bot {
                 id: BotId::new(),
                 name,
@@ -56,6 +105,11 @@ impl Engine {
                 created_at: now,
                 harness,
                 harness_command: command.clone(),
+                is_master,
+                role: role.clone(),
+                avatar_shape: avatar_shape.clone(),
+                avatar_color: avatar_color.clone(),
+                avatar_image: avatar_image.clone(),
             };
             bots::insert(tx, &bot)?;
             let seq = events::append(tx, None, EventKind::BotCreated, &to_json(&bot), now)?;
@@ -87,6 +141,32 @@ impl Engine {
                     Err(e) => return Ok(Err(e)),
                 }
             }
+            if let Some(role) = &patch.role {
+                match check_role(role) {
+                    Ok(role) => bot.role = role,
+                    Err(e) => return Ok(Err(e)),
+                }
+            }
+            if let Some(shape) = &patch.avatar_shape {
+                match check_avatar_token(shape) {
+                    Ok(shape) => bot.avatar_shape = shape,
+                    Err(e) => return Ok(Err(e)),
+                }
+            }
+            if let Some(color) = &patch.avatar_color {
+                match check_avatar_token(color) {
+                    Ok(color) => bot.avatar_color = color,
+                    Err(e) => return Ok(Err(e)),
+                }
+            }
+            if let Some(image) = &patch.avatar_image {
+                match check_avatar_image(image) {
+                    Ok(image) => bot.avatar_image = image,
+                    Err(e) => return Ok(Err(e)),
+                }
+            }
+            let original_harness = bot.harness;
+            let original_master = bot.is_master;
             let harness = patch.harness.unwrap_or(bot.harness);
             let command = patch
                 .harness_command
@@ -95,6 +175,26 @@ impl Engine {
             match check_harness(harness, &command) {
                 Ok(command) => (bot.harness, bot.harness_command) = (harness, command),
                 Err(e) => return Ok(Err(e)),
+            }
+            if let Some(is_master) = patch.is_master {
+                if !is_master
+                    && bot.is_master
+                    && existing.len() > 1
+                    && !existing.iter().any(|b| b.is_master && &b.id != id)
+                {
+                    return Ok(Err(EngineError::Invalid(
+                        "团队至少需要保留一位主控 Bot，请先将另一位 Bot 设为主控".into(),
+                    )));
+                }
+                bot.is_master = is_master;
+            }
+            let promoted_to_master = bot.is_master && !original_master;
+            let switched_to_external =
+                bot.is_master && bot.harness != Harness::Builtin && bot.harness != original_harness;
+            if (promoted_to_master && bot.harness != Harness::Builtin) || switched_to_external {
+                return Ok(Err(EngineError::Invalid(
+                    "主控中枢 Bot 需要使用内置引擎（builtin），才能调用创建和管理团队工具；请先将另一位内置 Bot 设为主控再切换引擎".into(),
+                )));
             }
             bot.tier = patch.tier.unwrap_or(bot.tier);
             bot.enabled = patch.enabled.unwrap_or(bot.enabled);
@@ -115,6 +215,7 @@ impl Engine {
     }
 
     /// 删掉一个 Bot。它发过的消息留着；它是入口的房间换成剩下的第一个成员（没有就空着）。
+    /// 如果删掉的是最后一位主控且团队还有其它 Bot，自动把最早的剩余 Bot 接任主控。
     pub fn delete_bot(&self, id: &BotId) -> Result<()> {
         let now = now_ms();
         let seq = self.store.write(|tx| {
@@ -122,12 +223,37 @@ impl Engine {
                 .into_iter()
                 .filter(|room| room.member_bot_ids.contains(id))
                 .collect();
-            let name = bots::get(tx, id)?.map(|bot| bot.name);
+            let target = bots::get(tx, id)?;
+            let was_master = target.as_ref().is_some_and(|bot| bot.is_master);
+            let name = target.map(|bot| bot.name);
             if !bots::delete(tx, id)? {
                 return Ok(Err(EngineError::NotFound("没有这个 Bot".into())));
             }
             let gone = BotRef { id: id.clone() };
             let mut seq = events::append(tx, None, EventKind::BotDeleted, &to_json(&gone), now)?;
+            if was_master {
+                let remaining = bots::list(tx)?;
+                if !remaining.iter().any(|b| b.is_master) {
+                    if let Some(mut successor) = remaining
+                        .iter()
+                        .find(|b| b.enabled && b.harness == Harness::Builtin)
+                        .or_else(|| remaining.iter().find(|b| b.harness == Harness::Builtin))
+                        .or_else(|| remaining.iter().find(|b| b.enabled))
+                        .or_else(|| remaining.first())
+                        .cloned()
+                    {
+                        successor.is_master = true;
+                        bots::update(tx, &successor)?;
+                        seq = events::append(
+                            tx,
+                            None,
+                            EventKind::BotUpdated,
+                            &to_json(&successor),
+                            now,
+                        )?;
+                    }
+                }
+            }
             for mut room in affected {
                 room.member_bot_ids.retain(|member| member != id);
                 if room.host_bot_id.as_ref() == Some(id) {
@@ -353,6 +479,55 @@ fn check_persona(persona: &str) -> Result<String> {
     Ok(persona.to_string())
 }
 
+pub(crate) fn check_role(role: &str) -> Result<String> {
+    let role = role.trim();
+    if role.chars().count() > MAX_BOT_ROLE_CHARS {
+        return Err(EngineError::Invalid(format!(
+            "职责标签不能超过 {MAX_BOT_ROLE_CHARS} 个字"
+        )));
+    }
+    if role.contains(['\n', '\r']) {
+        return Err(EngineError::Invalid("职责标签要写在一行里".into()));
+    }
+    Ok(role.to_string())
+}
+
+pub(crate) fn check_avatar_token(token: &str) -> Result<String> {
+    let token = token.trim().to_lowercase();
+    if token.is_empty() {
+        return Ok(String::new());
+    }
+    if token.len() > 32
+        || !token
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '_'))
+    {
+        return Err(EngineError::Invalid("形象代号格式不对".into()));
+    }
+    Ok(token)
+}
+
+fn check_avatar_image(image: &str) -> Result<String> {
+    let image = image.trim();
+    if image.is_empty() {
+        return Ok(String::new());
+    }
+    if image.len() > MAX_AVATAR_IMAGE_BYTES {
+        return Err(EngineError::Invalid(
+            "自定义头像图片过大（上限 256 KB）".into(),
+        ));
+    }
+    let ok_prefix = image.starts_with("data:image/png;base64,")
+        || image.starts_with("data:image/jpeg;base64,")
+        || image.starts_with("data:image/webp;base64,");
+    if !ok_prefix {
+        return Err(EngineError::Invalid(
+            "自定义头像仅支持 PNG / JPEG / WebP 图片".into(),
+        ));
+    }
+    Ok(image.to_string())
+}
+
 /// 找出文字里 `@名字` 点到的 Bot，按出现的先后，不重复。
 ///
 /// 名字不分大小写；几个名字都对得上时取最长的（有「审查」和「审查员」时，`@审查员` 是后者）。
@@ -563,6 +738,11 @@ mod tests {
             created_at: 0,
             harness: Default::default(),
             harness_command: String::new(),
+            is_master: false,
+            role: String::new(),
+            avatar_shape: String::new(),
+            avatar_color: String::new(),
+            avatar_image: String::new(),
         };
         let team = [bot("Coder"), bot("审查"), bot("审查员")];
         let ids = |text: &str| -> Vec<String> {
@@ -637,5 +817,62 @@ mod tests {
         let events = engine.events_after(head, 10).unwrap();
         assert_eq!(kinds(&events), ["message.deleted"]);
         assert_eq!(events[0].payload["id"], draft.id.as_str());
+    }
+
+    #[test]
+    fn master_role_avatar_validation_and_successor_promotion() {
+        let engine = engine();
+        let bots = engine.list_bots().unwrap();
+        assert_eq!(bots.len(), 1);
+        let master = &bots[0];
+        assert!(master.is_master);
+        assert_eq!(master.role, "主控中枢");
+        assert_eq!(master.avatar_shape, "orb");
+        assert_eq!(master.avatar_color, "obsidian");
+
+        let child = engine
+            .create_bot_with_profile(
+                "前端专家",
+                ModelTier::Strong,
+                "写 React",
+                Harness::Builtin,
+                "",
+                BotProfileOptions {
+                    is_master: Some(false),
+                    role: Some("前端工程师".into()),
+                    avatar_shape: Some("cat".into()),
+                    avatar_color: Some("aurora".into()),
+                    avatar_image: None,
+                },
+            )
+            .unwrap();
+        assert!(!child.is_master);
+        assert_eq!(child.role, "前端工程师");
+        assert_eq!(child.avatar_shape, "cat");
+        assert_eq!(child.avatar_color, "aurora");
+
+        assert!(engine
+            .update_bot(
+                &child.id,
+                BotPatch {
+                    avatar_image: Some("javascript:alert(1)".into()),
+                    ..Default::default()
+                },
+            )
+            .is_err());
+
+        assert!(engine
+            .update_bot(
+                &master.id,
+                BotPatch {
+                    is_master: Some(false),
+                    ..Default::default()
+                },
+            )
+            .is_err());
+
+        engine.delete_bot(&master.id).unwrap();
+        let after = engine.get_bot(&child.id).unwrap();
+        assert!(after.is_master);
     }
 }

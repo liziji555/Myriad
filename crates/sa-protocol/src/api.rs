@@ -96,6 +96,21 @@ pub struct CreateBotRequest {
     #[serde(default)]
     #[ts(optional)]
     pub harness_command: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub is_master: Option<bool>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub role: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub avatar_shape: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub avatar_color: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub avatar_image: Option<String>,
 }
 
 /// 只改给出的字段。
@@ -120,6 +135,21 @@ pub struct UpdateBotRequest {
     #[serde(default)]
     #[ts(optional)]
     pub harness_command: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub is_master: Option<bool>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub role: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub avatar_shape: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub avatar_color: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub avatar_image: Option<String>,
 }
 
 /// 只改给出的字段。
@@ -375,6 +405,15 @@ pub struct BotTemplate {
     pub harness: Harness,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub harness_command: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub avatar_shape: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub avatar_color: Option<String>,
 }
 
 fn is_builtin(harness: &Harness) -> bool {

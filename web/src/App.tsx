@@ -1,13 +1,13 @@
-import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { loadLayout, saveLayout, type Layout } from "./api/layout";
 import { CHECKPOINTS_CHANGED, checkpointsByMessage } from "./api/checkpoints";
 import { EXTENSIONS_CHANGED } from "./api/extensions";
 import { skillPrompt, type SlashCommand } from "./api/slash";
-import { presenceOf, speakersOf, type Presence } from "./api/presence";
+import { globalBotSignalsOf, presenceOf, speakersOf, type Presence } from "./api/presence";
 import { executionOf } from "./api/execution";
 import { STATE_LABEL } from "./api/tasks";
 import { api } from "./api/client";
-import type { CheckpointInfo, RoomId, SkillInfo, TaskId, UpdateStatus } from "./api/types";
+import type { Bot, BotId, CheckpointInfo, RoomId, SkillInfo, TaskId, UpdateStatus } from "./api/types";
 import { useWorkspace } from "./api/useWorkspace";
 import {
   DESKTOP_CHANGED,
@@ -16,6 +16,7 @@ import {
   type DesktopState,
   type DesktopUpdateInfo,
 } from "./api/desktop";
+import { BotDirectoryProvider } from "./components/BotDirectoryContext";
 import { ConnectPanel } from "./components/ConnectPanel";
 import { UpdatePanel } from "./components/UpdatePanel";
 import { BotCreateModal } from "./components/BotCreateModal";
@@ -151,6 +152,9 @@ function Shell() {
       return next;
     });
   const [focusTask, setFocusTask] = useState<TaskId | null>(null);
+  const [focusBotRequest, setFocusBotRequest] = useState<{ botId: BotId; seq: number } | null>(null);
+  const [unreadMarks, setUnreadMarks] = useState<Record<BotId, "done" | "error">>({});
+  const seenStreamingRef = useRef<Record<string, { botId: BotId; roomId: RoomId }>>({});
   const [version, setVersion] = useState("");
   const [loadError, setLoadError] = useState<string | null>(null);
   const [retry, setRetry] = useState(0);
@@ -202,6 +206,56 @@ function Shell() {
       stale = true;
     };
   }, [roomId, epoch, retry, openRoom]);
+
+  // 监听非当前房间里流式回复刚刚完成/报错的 Bot，点亮侧边栏 ^ ^ 欢呼或 > < 告警，直到用户切进去查看。
+  useEffect(() => {
+    const prev = seenStreamingRef.current;
+    const next: Record<string, { botId: BotId; roomId: RoomId }> = {};
+    const updates: Record<BotId, "done" | "error"> = {};
+    for (const [rId, chat] of Object.entries(workspace.chat.rooms)) {
+      if (!chat) continue;
+      for (const msg of chat.messages) {
+        if (msg.sender.kind !== "bot") continue;
+        if (msg.state === "streaming") {
+          next[msg.id] = { botId: msg.sender.bot_id, roomId: rId };
+        } else if (prev[msg.id] && rId !== roomId) {
+          updates[msg.sender.bot_id] = msg.state === "failed" ? "error" : "done";
+        }
+      }
+    }
+    seenStreamingRef.current = next;
+    if (Object.keys(updates).length > 0) {
+      setUnreadMarks((current) => ({ ...current, ...updates }));
+    }
+  }, [workspace.chat.rooms, roomId]);
+
+  useEffect(() => {
+    if (!roomId) return;
+    const currentRoom = workspace.rooms.find((r) => r.id === roomId);
+    if (!currentRoom) return;
+    setUnreadMarks((current) => {
+      let changed = false;
+      const copy = { ...current };
+      for (const botId of currentRoom.member_bot_ids) {
+        if (copy[botId]) {
+          delete copy[botId];
+          changed = true;
+        }
+      }
+      return changed ? copy : current;
+    });
+  }, [roomId, workspace.rooms]);
+
+  const globalSignals = useMemo(
+    () =>
+      globalBotSignalsOf(
+        workspace.bots,
+        workspace.chat.rooms,
+        workspace.board.rooms,
+        unreadMarks,
+      ),
+    [workspace.bots, workspace.chat.rooms, workspace.board.rooms, unreadMarks],
+  );
 
   // 房间内已完成消息数变化、切换房间或回滚完成后，自动刷新轮次级文件检查点。
   const settledBotTurns = useMemo(() => {
@@ -404,8 +458,13 @@ function Shell() {
     }
   };
 
-  // ProkBot / GrokBot 风格：识别主控、每个 Bot 的 1v1 直聊房间、以及多 Bot 协作房间。
-  const masterBot = workspace.bots.find((b) => b.enabled) ?? workspace.bots[0] ?? null;
+  // 持久化中枢主控识别（后端 is_master 字段为准，兼容旧数据时回退首个启用 Bot）。
+  const masterBot =
+    workspace.bots.find((b) => b.is_master && b.enabled) ??
+    workspace.bots.find((b) => b.is_master) ??
+    workspace.bots.find((b) => b.enabled) ??
+    workspace.bots[0] ??
+    null;
   const directRoomOf = (botId: string) => {
     const bot = workspace.bots.find((b) => b.id === botId);
     const singles = workspace.rooms
@@ -426,9 +485,15 @@ function Shell() {
   );
   const groupRooms = workspace.rooms.filter((candidate) => !directRoomIds.has(candidate.id));
 
-  const openBotChat = async (bot: (typeof workspace.bots)[number]) => {
+  const openBotChat = async (bot: Bot) => {
     setRoomsOpen(false);
     setFlowExpanded(false);
+    setUnreadMarks((current) => {
+      if (!current[bot.id]) return current;
+      const copy = { ...current };
+      delete copy[bot.id];
+      return copy;
+    });
     const existing = directRoomOf(bot.id);
     if (existing) {
       setSelected(existing.id);
@@ -441,6 +506,11 @@ function Shell() {
       discussion: "normal",
     });
     setSelected(created.id);
+  };
+
+  const openBotProfile = (bot: Bot) => {
+    setFocusBotRequest((prev) => ({ botId: bot.id, seq: (prev?.seq ?? 0) + 1 }));
+    showPanel("profile");
   };
 
   const roomBadge = !room
@@ -507,8 +577,8 @@ function Shell() {
       id: `bot:${bot.id}`,
       group: "bot",
       title: bot.name,
-      hint: bot.persona.split("\n")[0] || (bot.enabled ? undefined : "已停用"),
-      run: () => showPanel("members"),
+      hint: bot.role || bot.persona.split("\n")[0] || (bot.enabled ? undefined : "已停用"),
+      run: () => void openBotChat(bot),
     })),
     // 只有打开过的房间的任务在手上。
     ...Object.values(workspace.board.rooms)
@@ -646,6 +716,7 @@ function Shell() {
     }));
 
   return (
+    <BotDirectoryProvider value={workspace.bots}>
     <div
       className="sa-shell"
       data-panel-open={panelOpen}
@@ -721,8 +792,10 @@ function Shell() {
       )}
       <StageBar
         room={room}
+        members={members}
         roomBadge={roomBadge}
         presence={presence}
+        globalSignals={globalSignals}
         connected={workspace.connected}
         pendingTasks={pendingTasks}
         trajectoryShown={showTrajectory}
@@ -730,6 +803,13 @@ function Shell() {
         roomsOpen={roomsShown}
         onToggleRooms={toggleRooms}
         onToggleTrajectory={toggleTrajectory}
+        onOpenIdentity={() => {
+          if (members.length === 1 && members[0]) {
+            openBotProfile(members[0]);
+          } else {
+            showPanel("members");
+          }
+        }}
         onShowTasks={() => showPanel("tasks")}
         onOpenPalette={() => setPaletteOpen(true)}
         theme={theme}
@@ -753,6 +833,7 @@ function Shell() {
             selectedRoomId={room?.id ?? null}
             roomStates={roomStates}
             presence={presence}
+            globalSignals={globalSignals}
             connected={workspace.connected}
             version={version}
             collapsed={collapsed}
@@ -761,6 +842,7 @@ function Shell() {
             activeTab={panelOpen ? tab : null}
             onShowPanel={toggleTab}
             onOpenBotChat={(bot) => void openBotChat(bot)}
+            onOpenBotProfile={openBotProfile}
             onSelectRoom={(id) => {
               setSelected(id);
               setFlowExpanded(false);
@@ -925,8 +1007,18 @@ function Shell() {
             linkActions={workspace.linkActions}
             usageKey={workspace.notices.length}
             execution={execution}
+            globalSignals={globalSignals}
+            focusBotRequest={focusBotRequest}
+            onOpenBotChat={(bot) => void openBotChat(bot)}
             onJump={jumpTo}
             onStopBot={(botId) => void workspace.stopBot(room.id, botId)}
+            onStopTarget={(botId, target) => {
+              if (target.kind === "task") {
+                void workspace.tasks.stop(target.taskId);
+              } else {
+                void workspace.stopBot(target.roomId, botId);
+              }
+            }}
             checkpoints={checkpoints}
             onRewindCheckpoint={handleRewindCheckpoint}
             onJumpMessage={openMessage}
@@ -936,5 +1028,6 @@ function Shell() {
         )}
       </div>
     </div>
+    </BotDirectoryProvider>
   );
 }
