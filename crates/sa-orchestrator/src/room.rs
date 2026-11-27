@@ -1825,8 +1825,9 @@ struct InboxScan {
 
 impl RoomInbox {
     /// 只读扫描未看消息并计算出游标与续轮更新（不立即提交），供 `drain` 与运行中 `peek_steer` 共用。
-    /// 当 `only_local_chat` 为 `true` 时，仅允许本机用户在房间内发出的普通对话插话；遇到外部来源（Telegram / GitHub）
-    /// 或非普通聊天消息直接返回 `None`，避免外部消息绕过 harness 启动审批。
+    /// 当 `only_local_chat` 为 `true` 时，仅允许本机用户在房间内发出的普通对话进入插话载荷；
+    /// 遇到外部来源（Telegram / GitHub）、定时任务、其它 Bot 回复或任务卡片时保持其未读（置 `waiting = true` 留待下一轮走正常审批），
+    /// 同时继续扫描并收集后面到来的本机用户插话（记入 `next_ahead`）。
     async fn scan(&self, only_local_chat: bool) -> Option<InboxScan> {
         let engine = self.shared.engine.clone();
         let (room, after) = (self.room_id.clone(), self.last_seq);
@@ -1877,7 +1878,8 @@ impl RoomInbox {
                 }
                 MessageKind::Routine | MessageKind::Event => {
                     if only_local_chat {
-                        return None;
+                        waiting = true;
+                        continue;
                     }
                 }
                 // 任务的运行过程不进对话：结果会以交付卡的形式出现。它没写完也不挡着后面的消息。
@@ -1890,7 +1892,8 @@ impl RoomInbox {
                 }
                 MessageKind::Task | MessageKind::Delivery => {
                     if only_local_chat {
-                        return None;
+                        waiting = true;
+                        continue;
                     }
                     see(message.seq, waiting, &mut next_last_seq, &mut next_ahead);
                     let who = match &message.sender {
@@ -1941,7 +1944,8 @@ impl RoomInbox {
                 continue;
             }
             if only_local_chat && (speaker.is_some() || message.origin.is_some()) {
-                return None;
+                waiting = true;
+                continue;
             }
             see(message.seq, waiting, &mut next_last_seq, &mut next_ahead);
             // 成员没做成也要交回主 Agent：它要知道这件事失败了，才能决定下一步。

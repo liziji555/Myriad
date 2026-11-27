@@ -389,6 +389,10 @@ impl Orchestrator {
                     shared.settings.fence.root_display()
                 )));
             }
+            // 验收前先做只读预检（例如主目录是否存在未完成合并），避免预检就失败时误杀工位后台进程。
+            workdir::preflight_accept(&dir)
+                .await
+                .map_err(OrchestratorError::Conflict)?;
             // 先静默结束常驻 ACP / Codex / Claude 进程树，确保后台子进程在最终提交和验收合并前不再继续改写文件。
             self.shared.acp_pool.evict_scope(&scope);
             self.shared.codex_pool.evict_scope(&scope);
