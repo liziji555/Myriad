@@ -6,7 +6,7 @@
 use crate::room::db;
 use crate::Shared;
 use async_trait::async_trait;
-use sa_engine::BotPatch;
+use sa_engine::{BotPatch, BotProfileOptions};
 use sa_protocol::{Bot, CreateRoomRequest, Discussion, Harness, ModelTier, RoomId};
 use sa_tools::{Permission, Tool, ToolCtx, ToolError, ToolResult};
 use serde::Deserialize;
@@ -23,6 +23,8 @@ pub(crate) struct CreateBotTool {
 struct CreateBotInput {
     name: String,
     #[serde(default)]
+    role: String,
+    #[serde(default)]
     persona: String,
     #[serde(default)]
     tier: Option<ModelTier>,
@@ -30,12 +32,12 @@ struct CreateBotInput {
     harness: Option<Harness>,
     #[serde(default)]
     command: String,
-    #[serde(default = "default_true")]
+    #[serde(default)]
+    avatar_shape: String,
+    #[serde(default)]
+    avatar_color: String,
+    #[serde(default)]
     add_to_room: bool,
-}
-
-fn default_true() -> bool {
-    true
 }
 
 #[async_trait]
@@ -45,9 +47,9 @@ impl Tool for CreateBotTool {
     }
 
     fn description(&self) -> String {
-        "创建一个新的专职子 Bot，并默认把它拉进当前房间以便马上用 ask_bot 派活。\
-         当用户要求组建团队、创建某个角色的助手或外部 CLI Agent（如 claude_code / codex / gemini / kimi / open_code / acp）时调用。\
-         创建后会立刻出现在用户左侧栏里，返回它的名字和 ID。"
+        "创建一个新的独立专职子 Bot（支持内置模型或外部 CLI Harness，如 claude_code / codex / gemini / kimi / open_code / acp）。\
+         默认创建为独立 Bot（add_to_room=false），立刻出现在用户左侧「我的 Bot」列表里，不会破坏当前 1v1 主控对话；\
+         只有在多人协作房间里需要它马上加入讨论时，才传 add_to_room=true 或用 create_room 另建多 Bot 协作房间。"
             .into()
     }
 
@@ -56,6 +58,7 @@ impl Tool for CreateBotTool {
             "type": "object",
             "properties": {
                 "name": { "type": "string", "description": "新 Bot 的简短名字（最多 24 字，如「前端专家」「代码审查」）" },
+                "role": { "type": "string", "description": "简短职责标签（最多 24 字，如「前端工程师」「架构审查」）" },
                 "persona": { "type": "string", "description": "新 Bot 的职责、分工和行事要求" },
                 "tier": {
                     "type": "string",
@@ -68,7 +71,17 @@ impl Tool for CreateBotTool {
                     "description": "执行引擎，默认 builtin（内置模型）"
                 },
                 "command": { "type": "string", "description": "当 harness 为 acp 或 command 时的启动命令" },
-                "add_to_room": { "type": "boolean", "description": "是否顺便拉进当前房间，默认 true" }
+                "avatar_shape": {
+                    "type": "string",
+                    "enum": ["orb", "pebble", "squircle", "cloud", "teardrop", "hex", "capsule", "star", "sprout", "cat", "shield", "prism"],
+                    "description": "可选专属造型，留空则按 Bot ID 自动分配独特造型"
+                },
+                "avatar_color": {
+                    "type": "string",
+                    "enum": ["cobalt", "cyan", "emerald", "amber", "coral", "rose", "violet", "indigo", "mint", "slate", "aurora"],
+                    "description": "可选专属配色，留空则按 Bot ID 自动分配"
+                },
+                "add_to_room": { "type": "boolean", "description": "是否同时拉进当前房间，默认 false（保持独立 Bot）" }
             },
             "required": ["name"]
         })
@@ -84,6 +97,9 @@ impl Tool for CreateBotTool {
     }
 
     async fn call(&self, input: Value, _ctx: &ToolCtx) -> ToolResult {
+        if !self.from.is_master {
+            return Err(ToolError("只有中枢主控 Bot 才能创建新 Bot。".into()));
+        }
         let input: CreateBotInput =
             serde_json::from_value(input).map_err(|e| ToolError(format!("参数不对：{e}")))?;
         let engine = self.shared.engine.clone();
@@ -94,12 +110,21 @@ impl Tool for CreateBotTool {
         let by = self.from.name.clone();
 
         let (bot, added, add_note) = db(move || {
-            let bot = engine.create_harness_bot(
+            let bot = engine.create_bot_with_profile(
                 &input.name,
                 tier,
                 &input.persona,
                 harness,
                 &input.command,
+                BotProfileOptions {
+                    is_master: Some(false),
+                    role: (!input.role.trim().is_empty()).then_some(input.role),
+                    avatar_shape: (!input.avatar_shape.trim().is_empty())
+                        .then_some(input.avatar_shape),
+                    avatar_color: (!input.avatar_color.trim().is_empty())
+                        .then_some(input.avatar_color),
+                    avatar_image: None,
+                },
             )?;
             let mut added = false;
             let mut add_note = String::new();
@@ -119,7 +144,7 @@ impl Tool for CreateBotTool {
         } else if !add_note.is_empty() {
             &add_note
         } else {
-            "已创建为独立 Bot（未加入当前房间），用户可以在左侧栏直接点它 1v1 对话。"
+            "已创建为独立 Bot，已出现在用户左侧「我的 Bot」列表里，可直接点击 1v1 对话，或用 create_room 拉它组建协作房间。"
         };
         Ok(format!(
             "主控「{by}」已创建 Bot「{}」（id: {}，引擎: {:?}，档位: {:?}）。{join_msg}",

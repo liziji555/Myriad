@@ -1026,19 +1026,21 @@ async fn turn(
                         from: bot.clone(),
                     });
                 }
-                // 主控与内置 Bot 均可自主创建/调整子 Bot、组建多 Bot 协作房间，并随时用 ask_bot 派活（即使刚新建子 Bot 也能同轮立刻派活）。
-                tools.register(CreateBotTool {
-                    shared: shared.clone(),
-                    room_id: room_id.clone(),
-                    from: bot.clone(),
-                });
-                tools.register(UpdateBotTool {
-                    shared: shared.clone(),
-                });
-                tools.register(CreateRoomTool {
-                    shared: shared.clone(),
-                    from: bot.clone(),
-                });
+                // 中枢主控独享建队与建房工具（借鉴 DS-Bot 三级治理）；普通 Bot 只能参与协作与向队友派活。
+                if bot.is_master {
+                    tools.register(CreateBotTool {
+                        shared: shared.clone(),
+                        room_id: room_id.clone(),
+                        from: bot.clone(),
+                    });
+                    tools.register(UpdateBotTool {
+                        shared: shared.clone(),
+                    });
+                    tools.register(CreateRoomTool {
+                        shared: shared.clone(),
+                        from: bot.clone(),
+                    });
+                }
                 tools.register(AskBotTool {
                     shared: shared.clone(),
                     link: link.clone(),

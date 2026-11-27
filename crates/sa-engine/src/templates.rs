@@ -61,6 +61,9 @@ fn template(bot: &Bot) -> BotTemplate {
         harness: bot.harness,
         harness_command: bot.harness_command.clone(),
         enabled: bot.enabled,
+        role: bot.role.clone(),
+        avatar_shape: bot.avatar_shape.clone(),
+        avatar_color: bot.avatar_color.clone(),
     }
 }
 
@@ -194,7 +197,10 @@ impl Engine {
                     || bot.persona.trim() != have.persona
                     || bot.enabled != have.enabled
                     || bot.harness != have.harness
-                    || bot.harness_command.trim() != have.harness_command;
+                    || bot.harness_command.trim() != have.harness_command
+                    || bot.role.trim() != have.role
+                    || bot.avatar_shape.trim() != have.avatar_shape
+                    || bot.avatar_color.trim() != have.avatar_color;
                 differs.then_some((have, bot))
             })
             .collect();
@@ -236,17 +242,27 @@ impl Engine {
                 enabled: Some(bot.enabled),
                 harness: Some(bot.harness),
                 harness_command: Some(bot.harness_command.clone()),
+                role: Some(bot.role.clone()),
+                avatar_shape: Some(bot.avatar_shape.clone()),
+                avatar_color: Some(bot.avatar_color.clone()),
                 ..Default::default()
             };
             report.updated.push(self.update_bot(&have.id, patch)?);
         }
         for bot in fresh {
-            let mut created = self.create_harness_bot(
+            let mut created = self.create_bot_with_profile(
                 &bot.name,
                 bot.tier,
                 &bot.persona,
                 bot.harness,
                 &bot.harness_command,
+                crate::BotProfileOptions {
+                    is_master: None,
+                    role: (!bot.role.is_empty()).then(|| bot.role.clone()),
+                    avatar_shape: (!bot.avatar_shape.is_empty()).then(|| bot.avatar_shape.clone()),
+                    avatar_color: (!bot.avatar_color.is_empty()).then(|| bot.avatar_color.clone()),
+                    avatar_image: None,
+                },
             )?;
             if !bot.enabled {
                 let patch = BotPatch {
@@ -336,6 +352,9 @@ mod tests {
             enabled: true,
             harness: Default::default(),
             harness_command: String::new(),
+            role: String::new(),
+            avatar_shape: String::new(),
+            avatar_color: String::new(),
         }
     }
 

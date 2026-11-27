@@ -10,4 +10,4 @@ tier?: ModelTier, persona?: string,
 /**
  * 不给就是内置。
  */
-harness?: Harness, harness_command?: string, };
+harness?: Harness, harness_command?: string, is_master?: boolean, role?: string, avatar_shape?: string, avatar_color?: string, avatar_image?: string, };

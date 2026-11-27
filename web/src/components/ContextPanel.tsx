@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { clampPanelWidth, panelWidthAt, PANEL_MAX, PANEL_MIN, PANEL_STEP } from "../api/layout";
+import type { GlobalBotSignal } from "../api/presence";
 import type { TaskBoard } from "../api/tasks";
 import type { LinkActions, RoutineActions, TaskActions, Team } from "../api/useWorkspace";
 import type { Bot, BotId, CheckpointInfo, Link, RewindReport, Room, Routine, TaskId } from "../api/types";
 import type { ExecCard } from "../api/execution";
 import { AuditPanel } from "./AuditPanel";
+import { BotProfilePanel } from "./BotProfilePanel";
 import { ExecutionPanel } from "./ExecutionPanel";
 import { ExtensionsPanel } from "./ExtensionsPanel";
 import { FilesPanel } from "./FilesPanel";
@@ -18,6 +20,7 @@ import { TasksPanel } from "./TasksPanel";
 import { UsagePanel } from "./UsagePanel";
 
 export type PanelTab =
+  | "profile"
   | "execution"
   | "tasks"
   | "routines"
@@ -31,6 +34,7 @@ export type PanelTab =
   | "activity";
 
 const TABS: readonly { id: PanelTab; label: string; icon: IconName }[] = [
+  { id: "profile", label: "Bot 档案与形象", icon: "bot" },
   { id: "execution", label: "执行态势", icon: "graph" },
   { id: "tasks", label: "房间任务", icon: "tasks" },
   { id: "activity", label: "任务流线图", icon: "graph" },
@@ -70,6 +74,9 @@ interface Props {
   usageKey: number;
   /** 「执行」页：每个 Bot 一张卡片。 */
   execution: readonly ExecCard[];
+  globalSignals: Readonly<Record<BotId, GlobalBotSignal>>;
+  focusBotId: BotId | null;
+  onOpenBotChat(bot: Bot): void;
   onJump(card: ExecCard): void;
   /** 只停一个 Bot。 */
   onStopBot(botId: BotId): void;
@@ -102,6 +109,9 @@ export function ContextPanel({
   linkActions,
   usageKey,
   execution,
+  globalSignals,
+  focusBotId,
+  onOpenBotChat,
   onJump,
   onStopBot,
   checkpoints,
@@ -233,6 +243,18 @@ export function ContextPanel({
       </header>
 
       <div className="sa-panel-body" role="region" aria-label={current.label}>
+        {tab === "profile" && (
+          <BotProfilePanel
+            candidates={members.length > 0 ? members : bots}
+            allBots={bots}
+            initialBotId={focusBotId ?? members[0]?.id ?? null}
+            signals={globalSignals}
+            team={team}
+            onOpenBotChat={onOpenBotChat}
+            onOpenMembers={() => onTab("members")}
+            onStopBot={onStopBot}
+          />
+        )}
         {tab === "execution" && (
           <ExecutionPanel
             cards={execution}

@@ -567,11 +567,23 @@ pub(crate) fn render_prompt(
     skills: &str,
 ) -> String {
     let template = settings.prompt.as_deref().unwrap_or(DEFAULT_PROMPT);
-    let persona = if bot.persona.is_empty() {
-        String::new()
-    } else {
-        format!("你的分工和人设：\n{}", bot.persona)
-    };
+    let mut persona_parts = Vec::new();
+    if bot.is_master {
+        persona_parts.push(
+            "你是这个团队的中枢主控 Bot（Chief）：\n\
+             - 当用户需要组建专职团队时，调用 create_bot 创建独立的常驻子 Bot（默认不拉入当前 1v1 主控对话，创建后会自动出现在用户左侧栏）；\n\
+             - 当用户需要多位 Bot 协同讨论或分工完成复杂任务时，调用 create_room 拉入相关 Bot 组建协作房间；\n\
+             - 仅在已有的多人协作房间内才使用 add_to_room=true。"
+                .to_string(),
+        );
+    }
+    if !bot.role.is_empty() {
+        persona_parts.push(format!("你的职责标签：{}", bot.role));
+    }
+    if !bot.persona.is_empty() {
+        persona_parts.push(format!("你的分工和人设：\n{}", bot.persona));
+    }
+    let persona = persona_parts.join("\n\n");
     let team = if others.is_empty() {
         String::new()
     } else {

@@ -1,29 +1,56 @@
-import { hueOf, initialOf } from "../api/avatar";
+import type { MascotState } from "../api/mascotShapes";
 import type { PresenceState } from "../api/presence";
+import { useBotById } from "./BotDirectoryContext";
+import { BotMascot } from "./BotMascot";
 
 /**
- * Bot 的头像：一个带颜色的圆，里面是名字的第一个字。
- * 同一个 Bot 颜色不变；给了状态时外面一圈跟着状态变（在忙、等你、停用）。
+ * 统一的 Bot 形象入口：自动从 BotDirectory 读取该 Bot 的专属造型、配色、自定义图片与主控标识，
+ * 渲染 Myriad 自建参数化动态角色模型，彻底替代旧版单字圆圈。
  */
 export function BotAvatar({
   id,
   name,
   state,
+  activeTool,
+  size,
+  gaze,
+  interactive,
+  showBadge,
   className,
 }: {
   id: string;
   name: string;
-  state?: PresenceState | "streaming";
+  state?: PresenceState | "streaming" | MascotState;
+  activeTool?: string;
+  size?: number;
+  gaze?: boolean;
+  interactive?: boolean;
+  showBadge?: boolean;
   className?: string;
 }) {
+  const bot = useBotById(id);
+  const resolvedSize =
+    size ??
+    (className?.includes("sa-master-avatar")
+      ? 48
+      : className?.includes("sa-row-avatar")
+        ? 30
+        : 24);
   return (
-    <span
-      className={className ? `sa-avatar ${className}` : "sa-avatar"}
-      data-hue={hueOf(id)}
-      data-state={state}
-      aria-hidden="true"
-    >
-      {initialOf(name)}
-    </span>
+    <BotMascot
+      id={id}
+      name={name}
+      isMaster={bot?.is_master ?? false}
+      shape={bot?.avatar_shape}
+      color={bot?.avatar_color}
+      image={bot?.avatar_image}
+      state={state}
+      activeTool={activeTool}
+      size={resolvedSize}
+      gaze={gaze}
+      interactive={interactive}
+      showBadge={showBadge}
+      className={className}
+    />
   );
 }

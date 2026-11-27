@@ -195,6 +195,11 @@ mod tests {
             created_at: 0,
             harness: Default::default(),
             harness_command: String::new(),
+            is_master: false,
+            role: String::new(),
+            avatar_shape: String::new(),
+            avatar_color: String::new(),
+            avatar_image: String::new(),
         }
     }
 
